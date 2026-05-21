@@ -7,6 +7,7 @@ import httpProxy from "http-proxy"
 import ReleaseGroup from "./release-group.js"
 
 /**
+ * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} SingletonStatus
  * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, proxy: {host: string, port: number | undefined}, releases: import("./release-group.js").ReleaseStatus[], singletons: SingletonStatus[]}} DaemonStatus
@@ -16,7 +17,7 @@ export default class RollbridgeDaemon {
   /**
    * @param {object} args - Options.
    * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
-   * @param {(message: string, data?: Record<string, unknown>) => void} [args.logger] - Logger.
+   * @param {(message: string, data?: Record<string, JsonValue>) => void} [args.logger] - Logger.
    */
   constructor({config, logger}) {
     this.config = config
@@ -195,7 +196,7 @@ export default class RollbridgeDaemon {
 
   /**
    * @param {string} line - JSON command line.
-   * @returns {Promise<Record<string, unknown>>} Command response.
+   * @returns {Promise<Record<string, JsonValue>>} Command response.
    */
   async executeControlLine(line) {
     const command = JSON.parse(line)
@@ -204,7 +205,7 @@ export default class RollbridgeDaemon {
       throw new Error("Control command must be an object")
     }
 
-    const data = /** @type {Record<string, unknown>} */ (command)
+    const data = /** @type {Record<string, JsonValue>} */ (command)
     const commandName = data.command
 
     if (commandName === "deploy") {
@@ -235,7 +236,7 @@ export default class RollbridgeDaemon {
   /**
    * Starts a new release, switches traffic, and drains the previous release.
    * @param {DeployArgs} args - Deploy args.
-   * @returns {Promise<Record<string, unknown>>} Deploy result.
+   * @returns {Promise<Record<string, JsonValue>>} Deploy result.
    */
   async deploy({releaseId, releasePath, revision}) {
     if (this.stopping) throw new Error("Rollbridge is shutting down")
@@ -356,7 +357,7 @@ export default class RollbridgeDaemon {
 }
 
 /**
- * @param {unknown} value - Value.
+ * @param {JsonValue} value - Value.
  * @returns {string | undefined} String value.
  */
 function stringOrUndefined(value) {
@@ -367,7 +368,7 @@ function stringOrUndefined(value) {
 }
 
 /**
- * @param {unknown} value - Value.
+ * @param {JsonValue} value - Value.
  * @param {string} key - Key.
  * @returns {string} String value.
  */

@@ -4,6 +4,7 @@ import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
 
 /**
+ * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
@@ -17,7 +18,7 @@ export default class ManagedProcess extends EventEmitter {
    * @param {string | undefined} args.cwd - Working directory.
    * @param {Record<string, string | undefined>} args.env - Environment.
    * @param {string} args.id - Process id.
-   * @param {(message: string, data?: Record<string, unknown>) => void} args.logger - Logger callback.
+   * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger callback.
    * @param {number} args.restartDelayMs - Restart delay.
    * @param {() => boolean} args.shouldRestart - Restart policy callback.
    * @param {number} args.stopTimeoutMs - Stop timeout.

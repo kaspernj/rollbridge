@@ -120,7 +120,7 @@ test("control socket accepts deploy and status commands", async () => {
 async function createFixture(options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const singletonLogPath = path.join(root, "singleton.log")
-  /** @type {Array<Record<string, unknown>>} */
+  /** @type {Array<Record<string, import("../src/json.js").JsonValue>>} */
   const processes = [
     {
       command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,

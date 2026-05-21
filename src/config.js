@@ -5,6 +5,7 @@ import path from "node:path"
 import YAML from "yaml"
 
 /**
+ * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{from: number, to: number}} PortRange
  * @typedef {{path: string, timeoutMs: number, intervalMs: number}} HealthConfig
  * @typedef {"proxied" | "companion" | "singleton"} ProcessPolicy
@@ -20,7 +21,7 @@ const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton"])
 /**
  * Reads and parses a YAML or JSON config file without validating it.
  * @param {string} configPath - Config path.
- * @returns {Promise<{absolutePath: string, rawConfig: unknown}>} Parsed config.
+ * @returns {Promise<{absolutePath: string, rawConfig: JsonValue}>} Parsed config.
  */
 export async function parseConfigFile(configPath) {
   const absolutePath = path.resolve(configPath)
@@ -43,7 +44,7 @@ export async function loadConfig(configPath) {
 
 /**
  * Normalizes a raw config object, throwing when validation fails.
- * @param {unknown} rawConfig - Parsed config.
+ * @param {JsonValue} rawConfig - Parsed config.
  * @param {string} [configPath] - Source path.
  * @returns {RollbridgeConfig} Normalized config.
  */
@@ -59,14 +60,14 @@ export function normalizeConfig(rawConfig, configPath = process.cwd()) {
 
 /**
  * Validates a raw config object and collects every issue instead of throwing on the first one.
- * @param {unknown} rawConfig - Parsed config.
+ * @param {JsonValue} rawConfig - Parsed config.
  * @param {string} [configPath] - Source path.
  * @returns {{config: RollbridgeConfig, issues: ConfigIssue[]}} Best-effort config and any issues.
  */
 export function validateConfig(rawConfig, configPath = process.cwd()) {
   /** @type {ConfigIssue[]} */
   const issues = []
-  const source = isPlainObject(rawConfig) ? /** @type {Record<string, unknown>} */ (rawConfig) : {}
+  const source = isPlainObject(rawConfig) ? rawConfig : /** @type {Record<string, JsonValue>} */ ({})
 
   if (!isPlainObject(rawConfig)) {
     issues.push({fix: "Provide a YAML or JSON mapping with application, proxy, and processes keys.", message: "Config must be an object"})
@@ -88,7 +89,7 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
 }
 
 /**
- * @param {Record<string, unknown>} source - Raw proxy config.
+ * @param {Record<string, JsonValue>} source - Raw proxy config.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @returns {ProxyConfig} Normalized proxy config.
  */
@@ -104,7 +105,7 @@ function normalizeProxy(source, issues) {
 }
 
 /**
- * @param {unknown} value - Raw process config.
+ * @param {JsonValue} value - Raw process config.
  * @param {number} index - Process index.
  * @param {ProxyConfig} proxy - Proxy config defaults.
  * @param {ConfigIssue[]} issues - Issue collector.
@@ -117,7 +118,7 @@ function normalizeProcess(value, index, proxy, issues) {
     return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", policy: "companion", port: undefined, restartDelayMs: 1000}
   }
 
-  const source = /** @type {Record<string, unknown>} */ (value)
+  const source = value
 
   return {
     command: normalizeString(source.command, `processes[${index}].command`, issues),
@@ -165,7 +166,7 @@ function validateProcessSet(processes, issues) {
 }
 
 /**
- * @param {unknown} value - Raw policy.
+ * @param {JsonValue} value - Raw policy.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @returns {ProcessPolicy} Normalized policy.
@@ -183,7 +184,7 @@ function normalizePolicy(value, key, issues) {
 }
 
 /**
- * @param {unknown} value - Raw health config.
+ * @param {JsonValue} value - Raw health config.
  * @param {string} key - Config key.
  * @param {ProxyConfig} proxy - Proxy defaults.
  * @param {ConfigIssue[]} issues - Issue collector.
@@ -198,7 +199,7 @@ function normalizeHealth(value, key, proxy, issues) {
     return undefined
   }
 
-  const source = value === undefined ? {} : /** @type {Record<string, unknown>} */ (value)
+  const source = value === undefined ? /** @type {Record<string, JsonValue>} */ ({}) : value
 
   return {
     intervalMs: normalizeNumber(source.intervalMs, `${key}.intervalMs`, issues, {default: 250}),
@@ -208,7 +209,7 @@ function normalizeHealth(value, key, proxy, issues) {
 }
 
 /**
- * @param {unknown} value - Raw env config.
+ * @param {JsonValue} value - Raw env config.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @returns {Record<string, string>} Normalized env.
@@ -222,11 +223,10 @@ function normalizeEnv(value, key, issues) {
     return {}
   }
 
-  const source = /** @type {Record<string, unknown>} */ (value)
   /** @type {Record<string, string>} */
   const env = {}
 
-  for (const [envKey, envValue] of Object.entries(source)) {
+  for (const [envKey, envValue] of Object.entries(value)) {
     env[envKey] = normalizeString(envValue, `${key}.${envKey}`, issues)
   }
 
@@ -234,7 +234,7 @@ function normalizeEnv(value, key, issues) {
 }
 
 /**
- * @param {unknown} value - Raw port range.
+ * @param {JsonValue} value - Raw port range.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @returns {PortRange | undefined} Normalized range.
@@ -258,9 +258,8 @@ function normalizePortRange(value, key, issues) {
     return undefined
   }
 
-  const source = /** @type {Record<string, unknown>} */ (value)
-  const from = normalizeNumber(source.from, `${key}.from`, issues, {default: 0})
-  const to = normalizeNumber(source.to, `${key}.to`, issues, {default: from})
+  const from = normalizeNumber(value.from, `${key}.from`, issues, {default: 0})
+  const to = normalizeNumber(value.to, `${key}.to`, issues, {default: from})
 
   if (from < 0 || to < 0 || to < from) {
     issues.push({fix: `Set ${key}.from and ${key}.to to a positive ascending range, e.g. {from: 18000, to: 18099}.`, message: `${key} must be a positive port or valid {from, to} range`})
@@ -272,7 +271,7 @@ function normalizePortRange(value, key, issues) {
 }
 
 /**
- * @param {unknown} value - Raw value.
+ * @param {JsonValue} value - Raw value.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @param {{default?: string}} [options] - Options.
@@ -297,7 +296,7 @@ function normalizeString(value, key, issues, options = {}) {
 }
 
 /**
- * @param {unknown} value - Raw value.
+ * @param {JsonValue} value - Raw value.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @param {{default?: number}} [options] - Options.
@@ -322,11 +321,11 @@ function normalizeNumber(value, key, issues, options = {}) {
 }
 
 /**
- * @param {unknown} value - Raw object.
+ * @param {JsonValue} value - Raw object.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
- * @param {Record<string, unknown>} [defaultValue] - Default when missing.
- * @returns {Record<string, unknown>} Normalized object, or a placeholder when invalid.
+ * @param {Record<string, JsonValue>} [defaultValue] - Default when missing.
+ * @returns {Record<string, JsonValue>} Normalized object, or a placeholder when invalid.
  */
 function objectAt(value, key, issues, defaultValue) {
   if (value === undefined || value === null) {
@@ -343,14 +342,14 @@ function objectAt(value, key, issues, defaultValue) {
     return defaultValue ?? {}
   }
 
-  return /** @type {Record<string, unknown>} */ (value)
+  return value
 }
 
 /**
- * @param {unknown} value - Raw array.
+ * @param {JsonValue} value - Raw array.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
- * @returns {unknown[]} Normalized array, or an empty array when invalid.
+ * @returns {JsonValue[]} Normalized array, or an empty array when invalid.
  */
 function arrayAt(value, key, issues) {
   if (!Array.isArray(value)) {
@@ -363,8 +362,8 @@ function arrayAt(value, key, issues) {
 }
 
 /**
- * @param {unknown} value - Value.
- * @returns {boolean} True for non-null, non-array objects.
+ * @param {JsonValue} value - Value.
+ * @returns {value is Record<string, JsonValue>} True for non-null, non-array objects.
  */
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)

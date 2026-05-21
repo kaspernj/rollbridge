@@ -148,7 +148,7 @@ async function captureCli(argv) {
   const originalError = console.error
   /** @type {string[]} */
   const lines = []
-  const collect = (/** @type {unknown[]} */ ...args) => { lines.push(args.map((arg) => String(arg)).join(" ")) }
+  const collect = (/** @type {string[]} */ ...args) => { lines.push(args.map((arg) => String(arg)).join(" ")) }
 
   console.log = collect
   console.error = collect
