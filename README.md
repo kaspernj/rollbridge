@@ -64,6 +64,9 @@ processes:
       timeoutMs: 30000
 ```
 
+Production-ready examples live in `examples/`, including
+`examples/tensorbuzz.com.yml` for the current TensorBuzz backend deployment.
+
 ## Process Policies
 
 - `proxied`: the web/API process. Rollbridge forwards HTTP and WebSocket traffic to the active release and tracks connections for draining.
