@@ -3,8 +3,8 @@
 import crypto from "node:crypto"
 import http from "node:http"
 
-const port = Number(process.env.SWITCHYARD_PORT)
-const releaseId = process.env.SWITCHYARD_RELEASE_ID || "unknown"
+const port = Number(process.env.ROLLGATE_PORT)
+const releaseId = process.env.ROLLGATE_RELEASE_ID || "unknown"
 const healthFails = releaseId.includes("bad")
 const sockets = new Set()
 

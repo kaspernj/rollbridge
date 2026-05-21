@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
-import SwitchyardDaemon from "../src/daemon.js"
+import RollgateDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 
@@ -115,10 +115,10 @@ test("control socket accepts deploy and status commands", async () => {
 
 /**
  * @param {{includeSingleton?: boolean}} [options] - Fixture options.
- * @returns {Promise<{config: import("../src/config.js").SwitchyardConfig, root: string, singletonLogPath: string}>}
+ * @returns {Promise<{config: import("../src/config.js").RollgateConfig, root: string, singletonLogPath: string}>}
  */
 async function createFixture(options = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "switchyard-test-"))
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollgate-test-"))
   const singletonLogPath = path.join(root, "singleton.log")
   const processes = [
     {
@@ -138,7 +138,7 @@ async function createFixture(options = {}) {
     processes.push({
       command: `${JSON.stringify(process.execPath)} ${JSON.stringify(singletonAppPath)}`,
       env: {
-        SWITCHYARD_SINGLETON_LOG: singletonLogPath
+        ROLLGATE_SINGLETON_LOG: singletonLogPath
       },
       id: "jobs-main",
       policy: "singleton"
@@ -146,9 +146,9 @@ async function createFixture(options = {}) {
   }
 
   const config = normalizeConfig({
-    application: "switchyard-test",
+    application: "rollgate-test",
     control: {
-      path: path.join(root, "switchyard.sock")
+      path: path.join(root, "rollgate.sock")
     },
     processes,
     proxy: {
@@ -165,11 +165,11 @@ async function createFixture(options = {}) {
 }
 
 /**
- * @param {import("../src/config.js").SwitchyardConfig} config - Config.
- * @returns {Promise<SwitchyardDaemon>} Started daemon.
+ * @param {import("../src/config.js").RollgateConfig} config - Config.
+ * @returns {Promise<RollgateDaemon>} Started daemon.
  */
 async function startDaemon(config) {
-  const daemon = new SwitchyardDaemon({config, logger: () => {}})
+  const daemon = new RollgateDaemon({config, logger: () => {}})
 
   await daemon.start()
 
@@ -177,7 +177,7 @@ async function startDaemon(config) {
 }
 
 /**
- * @param {SwitchyardDaemon} daemon - Daemon.
+ * @param {RollgateDaemon} daemon - Daemon.
  * @param {string} pathName - Path.
  * @returns {Promise<string>} Response text.
  */
@@ -190,7 +190,7 @@ async function fetchText(daemon, pathName) {
 }
 
 /**
- * @param {SwitchyardDaemon} daemon - Daemon.
+ * @param {RollgateDaemon} daemon - Daemon.
  * @returns {Promise<WebSocket>} Open WebSocket.
  */
 async function openWebSocket(daemon) {
@@ -205,7 +205,7 @@ async function openWebSocket(daemon) {
 }
 
 /**
- * @param {SwitchyardDaemon} daemon - Daemon.
+ * @param {RollgateDaemon} daemon - Daemon.
  * @param {string} releaseId - Release id.
  * @returns {Record<string, unknown>} Release status.
  */

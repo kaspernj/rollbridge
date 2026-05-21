@@ -10,10 +10,10 @@ import ReleaseGroup from "./release-group.js"
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  */
 
-export default class SwitchyardDaemon {
+export default class RollgateDaemon {
   /**
    * @param {object} args - Options.
-   * @param {import("./config.js").SwitchyardConfig} args.config - Switchyard config.
+   * @param {import("./config.js").RollgateConfig} args.config - Rollgate config.
    * @param {(message: string, data?: Record<string, unknown>) => void} [args.logger] - Logger.
    */
   constructor({config, logger}) {
@@ -236,7 +236,7 @@ export default class SwitchyardDaemon {
    * @returns {Promise<Record<string, unknown>>} Deploy result.
    */
   async deploy({releaseId, releasePath, revision}) {
-    if (this.stopping) throw new Error("Switchyard is shutting down")
+    if (this.stopping) throw new Error("Rollgate is shutting down")
 
     const newReleaseId = releaseId || revision || new Date().toISOString().replace(/[^0-9]/g, "")
     const release = new ReleaseGroup({

@@ -1,7 +1,7 @@
 // @ts-check
 
 import {Command} from "commander"
-import SwitchyardDaemon from "./daemon.js"
+import RollgateDaemon from "./daemon.js"
 import {loadConfig} from "./config.js"
 import {sendControlCommand} from "./control-client.js"
 
@@ -14,7 +14,7 @@ export async function runCli(argv) {
   const program = new Command()
 
   program
-    .name("switchyard")
+    .name("rollgate")
     .description("Zero-downtime process supervisor and local traffic switcher.")
     .showHelpAfterError()
 
@@ -23,7 +23,7 @@ export async function runCli(argv) {
     .requiredOption("-c, --config <path>", "Config file path")
     .action(async (options) => {
       const config = await loadConfig(options.config)
-      const daemon = new SwitchyardDaemon({config})
+      const daemon = new RollgateDaemon({config})
 
       await daemon.start()
 

@@ -11,7 +11,7 @@ import YAML from "yaml"
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number}} ProxyConfig
- * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig}} SwitchyardConfig
+ * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig}} RollgateConfig
  */
 
 const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton"])
@@ -19,7 +19,7 @@ const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton"])
 /**
  * Loads a YAML or JSON config file.
  * @param {string} configPath - Config path.
- * @returns {Promise<SwitchyardConfig>} Normalized config.
+ * @returns {Promise<RollgateConfig>} Normalized config.
  */
 export async function loadConfig(configPath) {
   const absolutePath = path.resolve(configPath)
@@ -33,7 +33,7 @@ export async function loadConfig(configPath) {
  * Normalizes a raw config object.
  * @param {unknown} rawConfig - Parsed config.
  * @param {string} [configPath] - Source path.
- * @returns {SwitchyardConfig} Normalized config.
+ * @returns {RollgateConfig} Normalized config.
  */
 export function normalizeConfig(rawConfig, configPath = process.cwd()) {
   if (!rawConfig || typeof rawConfig !== "object") {
@@ -47,7 +47,7 @@ export function normalizeConfig(rawConfig, configPath = process.cwd()) {
   const processesSource = arrayAt(source.processes, "processes")
   const proxy = normalizeProxy(proxySource)
   const control = {
-    path: normalizeString(controlSource.path, "control.path", `/tmp/switchyard-${application}.sock`)
+    path: normalizeString(controlSource.path, "control.path", `/tmp/rollgate-${application}.sock`)
   }
   const processes = processesSource.map((processSource, index) => normalizeProcess(processSource, index, proxy))
   const proxiedProcesses = processes.filter((processConfig) => processConfig.policy === "proxied")

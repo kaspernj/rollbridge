@@ -3,7 +3,7 @@
 import net from "node:net"
 
 /**
- * Sends a command to a Switchyard daemon.
+ * Sends a command to a Rollgate daemon.
  * @param {object} args - Options.
  * @param {Record<string, unknown>} args.command - Command payload.
  * @param {string} args.path - Control socket path.
@@ -28,7 +28,7 @@ export async function sendControlCommand({command, path}) {
       socket.end()
 
       if (response.status === "error") {
-        reject(new Error(String(response.error || "Unknown Switchyard error")))
+        reject(new Error(String(response.error || "Unknown Rollgate error")))
       } else {
         resolve(response)
       }

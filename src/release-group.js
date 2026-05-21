@@ -21,7 +21,7 @@ function envId(id) {
 export default class ReleaseGroup extends EventEmitter {
   /**
    * @param {object} args - Options.
-   * @param {import("./config.js").SwitchyardConfig} args.config - Switchyard config.
+   * @param {import("./config.js").RollgateConfig} args.config - Rollgate config.
    * @param {(message: string, data?: Record<string, unknown>) => void} args.logger - Logger.
    * @param {string} args.releaseId - Release id.
    * @param {string} args.releasePath - Release path.
@@ -137,19 +137,19 @@ export default class ReleaseGroup extends EventEmitter {
   baseEnvironment(processConfig) {
     /** @type {Record<string, string>} */
     const env = {
-      SWITCHYARD_APPLICATION: this.config.application,
-      SWITCHYARD_PROCESS_ID: processConfig.id,
-      SWITCHYARD_RELEASE_ID: this.releaseId,
-      SWITCHYARD_RELEASE_PATH: this.releasePath,
-      SWITCHYARD_REVISION: this.revision
+      ROLLGATE_APPLICATION: this.config.application,
+      ROLLGATE_PROCESS_ID: processConfig.id,
+      ROLLGATE_RELEASE_ID: this.releaseId,
+      ROLLGATE_RELEASE_PATH: this.releasePath,
+      ROLLGATE_REVISION: this.revision
     }
 
     if (this.ports[processConfig.id] !== undefined) {
-      env.SWITCHYARD_PORT = String(this.ports[processConfig.id])
+      env.ROLLGATE_PORT = String(this.ports[processConfig.id])
     }
 
     for (const [processId, port] of Object.entries(this.ports)) {
-      env[`SWITCHYARD_${envId(processId)}_PORT`] = String(port)
+      env[`ROLLGATE_${envId(processId)}_PORT`] = String(port)
     }
 
     return env
