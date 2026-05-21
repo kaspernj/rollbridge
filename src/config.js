@@ -8,7 +8,7 @@ import YAML from "yaml"
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{from: number, to: number}} PortRange
  * @typedef {{path: string, timeoutMs: number, intervalMs: number}} HealthConfig
- * @typedef {"proxied" | "companion" | "singleton"} ProcessPolicy
+ * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number}} ProxyConfig
@@ -16,7 +16,7 @@ import YAML from "yaml"
  * @typedef {{fix: string, message: string}} ConfigIssue
  */
 
-const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton"])
+const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton", "service"])
 
 /**
  * Reads and parses a YAML or JSON config file without validating it.

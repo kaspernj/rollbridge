@@ -19,8 +19,11 @@ test("TensorBuzz example config loads", async () => {
   assert.deepEqual(
     config.processes.map((processConfig) => [processConfig.id, processConfig.policy]),
     [
+      ["beacon", "service"],
+      ["background-jobs-main", "service"],
+      ["background-jobs-worker", "companion"],
       ["web", "proxied"]
     ]
   )
-  assert.equal(config.processes[0].env.VELOCIOUS_BACKGROUND_JOBS_PORT, "7331")
+  assert.equal(config.processes[3].env.VELOCIOUS_BACKGROUND_JOBS_PORT, "{{ports.background-jobs-main}}")
 })

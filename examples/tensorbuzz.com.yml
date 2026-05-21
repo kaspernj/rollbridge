@@ -1,10 +1,9 @@
 # Rollbridge config for the TensorBuzz production backend.
 #
-# TensorBuzz currently configures Velocious Beacon and background-jobs-main as
-# stable cross-release services on 127.0.0.1:7330 and 127.0.0.1:7331. Keep those
-# services supervised outside this config before starting Rollbridge. Nginx
-# should keep proxying the backend host to 127.0.0.1:4500; Rollbridge binds that
-# stable HTTP port and forwards to the active release's internal web port.
+# Nginx should keep proxying the backend host to 127.0.0.1:4500. Rollbridge
+# binds that stable HTTP port, forwards to the active release's internal web
+# port, keeps Beacon/jobs-main as daemon-wide services, and starts one
+# background worker per active release.
 
 application: tensorbuzz
 
@@ -20,14 +19,47 @@ proxy:
   forceStopTimeoutMs: 10000
 
 processes:
+  - id: beacon
+    policy: service
+    cwd: "{{releasePath}}/backend"
+    env:
+      NODE_ENV: production
+      VELOCIOUS_ENV: production
+      VELOCIOUS_BEACON_PORT: "{{port}}"
+    command: "npx velocious beacon"
+    port: 7330
+
+  - id: background-jobs-main
+    policy: service
+    cwd: "{{releasePath}}/backend"
+    env:
+      NODE_ENV: production
+      VELOCIOUS_ENV: production
+      VELOCIOUS_BEACON_PORT: "{{ports.beacon}}"
+      VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}"
+    command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- npx velocious background-jobs-main"
+    port: 7331
+
+  - id: background-jobs-worker
+    policy: companion
+    cwd: "{{releasePath}}/backend"
+    env:
+      NODE_ENV: production
+      VELOCIOUS_ENV: production
+      VELOCIOUS_BEACON_PORT: "{{ports.beacon}}"
+      VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"
+    command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- wait-for-it 127.0.0.1:{{ports.background-jobs-main}} --strict -- npx velocious background-jobs-worker"
+    gracefulStopMs: 60000
+
   - id: web
     policy: proxied
     cwd: "{{releasePath}}/backend"
     env:
       NODE_ENV: production
       VELOCIOUS_ENV: production
-      VELOCIOUS_BACKGROUND_JOBS_PORT: "7331"
-    command: "wait-for-it 127.0.0.1:7330 --strict -- wait-for-it 127.0.0.1:7331 --strict -- npx velocious server --host 127.0.0.1 --port {{port}}"
+      VELOCIOUS_BEACON_PORT: "{{ports.beacon}}"
+      VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"
+    command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- wait-for-it 127.0.0.1:{{ports.background-jobs-main}} --strict -- npx velocious server --host 127.0.0.1 --port {{port}}"
     port:
       from: 14500
       to: 14599

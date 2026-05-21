@@ -48,7 +48,7 @@ processes:
     command: "npx velocious background-jobs-worker"
 
   - id: background-jobs-main
-    policy: singleton
+    policy: service
     cwd: "{{releasePath}}"
     command: "npx velocious background-jobs-main"
 
@@ -72,6 +72,7 @@ Production-ready examples live in `examples/`, including
 - `proxied`: the web/API process. Rollbridge forwards HTTP and WebSocket traffic to the active release and tracks connections for draining.
 - `companion`: a release-scoped support process. It starts with the release and stops after that release drains.
 - `singleton`: a one-at-a-time support process. Rollbridge stops the old singleton before starting the new one, so duplicate-unsafe schedulers or job dispatchers do not overlap.
+- `service`: a daemon-wide support process. Rollbridge starts it before release processes need it, leaves it running across deploys, and updates its restart template after a successful deploy.
 
 ## Commands
 
@@ -103,10 +104,22 @@ Start the daemon:
 rollbridge daemon --config rollbridge.yml
 ```
 
+Start the daemon only when it is not already running:
+
+```bash
+rollbridge ensure-daemon --config rollbridge.yml --daemon-log-path log/rollbridge.log --daemon-pid-path tmp/pids/rollbridge.pid
+```
+
 Deploy a prepared release:
 
 ```bash
 rollbridge deploy --config rollbridge.yml --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
+```
+
+Deploy and start the daemon first when needed:
+
+```bash
+rollbridge deploy --ensure-daemon --config rollbridge.yml --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
 ```
 
 Inspect state:
@@ -145,7 +158,7 @@ location / {
 
 ## Deployment Notes
 
-Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For Velocious background jobs, keep `background-jobs-main` as `singleton` until Velocious has atomic job claiming.
+Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For stable local brokers such as Velocious Beacon or `background-jobs-main`, use `service` when the process should survive deploys and restart from the latest successful release if it crashes.
 
 ## Releasing
 
