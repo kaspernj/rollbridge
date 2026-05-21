@@ -52,9 +52,7 @@ export default class ReleaseGroup extends EventEmitter {
     try {
       await this.allocatePorts()
 
-      for (const processConfig of this.config.processes) {
-        if (processConfig.policy === "singleton") continue
-
+      for (const processConfig of this.releaseProcessStartOrder()) {
         const processInstance = this.buildProcess(processConfig)
         this.processes.set(processConfig.id, processInstance)
         await processInstance.start()
@@ -72,6 +70,18 @@ export default class ReleaseGroup extends EventEmitter {
       await this.stop()
       throw error
     }
+  }
+
+  /**
+   * Starts companions before the proxied process so release-local dependencies are available before health checks.
+   * @returns {import("./config.js").ProcessConfig[]} Ordered process configs.
+   */
+  releaseProcessStartOrder() {
+    const releaseProcesses = this.config.processes.filter((processConfig) => processConfig.policy !== "singleton")
+    const companionProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "companion")
+    const proxiedProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "proxied")
+
+    return [...companionProcesses, ...proxiedProcesses]
   }
 
   /** @returns {void} Marks this release active. */

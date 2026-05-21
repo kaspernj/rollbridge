@@ -73,6 +73,10 @@ export default class SwitchyardDaemon {
 
   /** @returns {Promise<void>} Removes a stale Unix socket before binding. */
   async prepareControlSocketPath() {
+    if (await controlSocketAcceptsConnections(this.config.control.path)) {
+      throw new Error(`Control socket already accepts connections: ${this.config.control.path}`)
+    }
+
     try {
       await fs.rm(this.config.control.path, {force: true})
     } catch (error) {
@@ -371,4 +375,29 @@ function requiredString(value, key) {
   }
 
   return value
+}
+
+/**
+ * @param {string} socketPath - Control socket path.
+ * @returns {Promise<boolean>} True when an existing daemon is reachable.
+ */
+async function controlSocketAcceptsConnections(socketPath) {
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath)
+
+    socket.once("connect", () => {
+      socket.end()
+      resolve(true)
+    })
+    socket.once("error", (error) => {
+      if (error && typeof error === "object" && "code" in error) {
+        if (error.code === "ENOENT" || error.code === "ECONNREFUSED") {
+          resolve(false)
+          return
+        }
+      }
+
+      reject(error)
+    })
+  })
 }

@@ -34,6 +34,24 @@ proxy:
   forceStopTimeoutMs: 10000
 
 processes:
+  - id: beacon
+    policy: companion
+    cwd: "{{releasePath}}"
+    command: "env VELOCIOUS_BEACON_PORT={{port}} npx velocious beacon"
+    port:
+      from: 17330
+      to: 17399
+
+  - id: background-jobs-worker
+    policy: companion
+    cwd: "{{releasePath}}"
+    command: "npx velocious background-jobs-worker"
+
+  - id: background-jobs-main
+    policy: singleton
+    cwd: "{{releasePath}}"
+    command: "npx velocious background-jobs-main"
+
   - id: web
     policy: proxied
     cwd: "{{releasePath}}"
@@ -44,19 +62,6 @@ processes:
     health:
       path: /ping
       timeoutMs: 30000
-
-  - id: beacon
-    policy: companion
-    cwd: "{{releasePath}}"
-    command: "env VELOCIOUS_BEACON_PORT={{port}} npx velocious beacon"
-    port:
-      from: 17330
-      to: 17399
-
-  - id: background-jobs-main
-    policy: singleton
-    cwd: "{{releasePath}}"
-    command: "npx velocious background-jobs-main"
 ```
 
 ## Process Policies
