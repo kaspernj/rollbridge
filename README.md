@@ -1,13 +1,13 @@
-# Rollgate
+# Rollbridge
 
-Rollgate is a Node.js process supervisor and local traffic switcher for zero-downtime deploys.
+Rollbridge is a Node.js process supervisor and local traffic switcher for zero-downtime deploys.
 
-Nginx points at one stable Rollgate proxy port. Deploy tooling asks Rollgate to start a new release, health-check it, switch new traffic to it, and drain old HTTP/WebSocket connections before stopping the previous release.
+Nginx points at one stable Rollbridge proxy port. Deploy tooling asks Rollbridge to start a new release, health-check it, switch new traffic to it, and drain old HTTP/WebSocket connections before stopping the previous release.
 
 ## Install
 
 ```bash
-npm install rollgate
+npm install rollbridge
 ```
 
 For local development in this repository:
@@ -23,7 +23,7 @@ npm test
 application: ticket-server
 
 control:
-  path: /tmp/rollgate-ticket-server.sock
+  path: /tmp/rollbridge-ticket-server.sock
 
 proxy:
   host: 127.0.0.1
@@ -66,45 +66,45 @@ processes:
 
 ## Process Policies
 
-- `proxied`: the web/API process. Rollgate forwards HTTP and WebSocket traffic to the active release and tracks connections for draining.
+- `proxied`: the web/API process. Rollbridge forwards HTTP and WebSocket traffic to the active release and tracks connections for draining.
 - `companion`: a release-scoped support process. It starts with the release and stops after that release drains.
-- `singleton`: a one-at-a-time support process. Rollgate stops the old singleton before starting the new one, so duplicate-unsafe schedulers or job dispatchers do not overlap.
+- `singleton`: a one-at-a-time support process. Rollbridge stops the old singleton before starting the new one, so duplicate-unsafe schedulers or job dispatchers do not overlap.
 
 ## Commands
 
 Start the daemon:
 
 ```bash
-rollgate daemon --config rollgate.yml
+rollbridge daemon --config rollbridge.yml
 ```
 
 Deploy a prepared release:
 
 ```bash
-rollgate deploy --config rollgate.yml --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
+rollbridge deploy --config rollbridge.yml --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
 ```
 
 Inspect state:
 
 ```bash
-rollgate status --config rollgate.yml
+rollbridge status --config rollbridge.yml
 ```
 
 Stop the active release:
 
 ```bash
-rollgate stop --config rollgate.yml
+rollbridge stop --config rollbridge.yml
 ```
 
 Shut down the daemon and managed processes:
 
 ```bash
-rollgate shutdown --config rollgate.yml
+rollbridge shutdown --config rollbridge.yml
 ```
 
 ## Nginx
 
-Nginx should proxy to Rollgate, not directly to Velocious:
+Nginx should proxy to Rollbridge, not directly to Velocious:
 
 ```nginx
 location / {
@@ -120,4 +120,4 @@ location / {
 
 ## Deployment Notes
 
-Run migrations before `rollgate deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For Velocious background jobs, keep `background-jobs-main` as `singleton` until Velocious has atomic job claiming.
+Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For Velocious background jobs, keep `background-jobs-main` as `singleton` until Velocious has atomic job claiming.

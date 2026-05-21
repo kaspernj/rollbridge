@@ -10,10 +10,10 @@ import ReleaseGroup from "./release-group.js"
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  */
 
-export default class RollgateDaemon {
+export default class RollbridgeDaemon {
   /**
    * @param {object} args - Options.
-   * @param {import("./config.js").RollgateConfig} args.config - Rollgate config.
+   * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
    * @param {(message: string, data?: Record<string, unknown>) => void} [args.logger] - Logger.
    */
   constructor({config, logger}) {
@@ -236,7 +236,7 @@ export default class RollgateDaemon {
    * @returns {Promise<Record<string, unknown>>} Deploy result.
    */
   async deploy({releaseId, releasePath, revision}) {
-    if (this.stopping) throw new Error("Rollgate is shutting down")
+    if (this.stopping) throw new Error("Rollbridge is shutting down")
 
     const newReleaseId = releaseId || revision || new Date().toISOString().replace(/[^0-9]/g, "")
     const release = new ReleaseGroup({

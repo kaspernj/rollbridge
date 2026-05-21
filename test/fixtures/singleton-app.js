@@ -2,10 +2,10 @@
 
 import fs from "node:fs"
 
-const logPath = process.env.ROLLGATE_SINGLETON_LOG
-const releaseId = process.env.ROLLGATE_RELEASE_ID || "unknown"
+const logPath = process.env.ROLLBRIDGE_SINGLETON_LOG
+const releaseId = process.env.ROLLBRIDGE_RELEASE_ID || "unknown"
 
-if (!logPath) throw new Error("ROLLGATE_SINGLETON_LOG is required")
+if (!logPath) throw new Error("ROLLBRIDGE_SINGLETON_LOG is required")
 
 writeEvent("start")
 

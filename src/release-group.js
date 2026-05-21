@@ -21,7 +21,7 @@ function envId(id) {
 export default class ReleaseGroup extends EventEmitter {
   /**
    * @param {object} args - Options.
-   * @param {import("./config.js").RollgateConfig} args.config - Rollgate config.
+   * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
    * @param {(message: string, data?: Record<string, unknown>) => void} args.logger - Logger.
    * @param {string} args.releaseId - Release id.
    * @param {string} args.releasePath - Release path.
@@ -137,19 +137,19 @@ export default class ReleaseGroup extends EventEmitter {
   baseEnvironment(processConfig) {
     /** @type {Record<string, string>} */
     const env = {
-      ROLLGATE_APPLICATION: this.config.application,
-      ROLLGATE_PROCESS_ID: processConfig.id,
-      ROLLGATE_RELEASE_ID: this.releaseId,
-      ROLLGATE_RELEASE_PATH: this.releasePath,
-      ROLLGATE_REVISION: this.revision
+      ROLLBRIDGE_APPLICATION: this.config.application,
+      ROLLBRIDGE_PROCESS_ID: processConfig.id,
+      ROLLBRIDGE_RELEASE_ID: this.releaseId,
+      ROLLBRIDGE_RELEASE_PATH: this.releasePath,
+      ROLLBRIDGE_REVISION: this.revision
     }
 
     if (this.ports[processConfig.id] !== undefined) {
-      env.ROLLGATE_PORT = String(this.ports[processConfig.id])
+      env.ROLLBRIDGE_PORT = String(this.ports[processConfig.id])
     }
 
     for (const [processId, port] of Object.entries(this.ports)) {
-      env[`ROLLGATE_${envId(processId)}_PORT`] = String(port)
+      env[`ROLLBRIDGE_${envId(processId)}_PORT`] = String(port)
     }
 
     return env

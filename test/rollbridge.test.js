@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
-import RollgateDaemon from "../src/daemon.js"
+import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 
@@ -115,10 +115,10 @@ test("control socket accepts deploy and status commands", async () => {
 
 /**
  * @param {{includeSingleton?: boolean}} [options] - Fixture options.
- * @returns {Promise<{config: import("../src/config.js").RollgateConfig, root: string, singletonLogPath: string}>}
+ * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, singletonLogPath: string}>}
  */
 async function createFixture(options = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollgate-test-"))
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const singletonLogPath = path.join(root, "singleton.log")
   const processes = [
     {
@@ -138,7 +138,7 @@ async function createFixture(options = {}) {
     processes.push({
       command: `${JSON.stringify(process.execPath)} ${JSON.stringify(singletonAppPath)}`,
       env: {
-        ROLLGATE_SINGLETON_LOG: singletonLogPath
+        ROLLBRIDGE_SINGLETON_LOG: singletonLogPath
       },
       id: "jobs-main",
       policy: "singleton"
@@ -146,9 +146,9 @@ async function createFixture(options = {}) {
   }
 
   const config = normalizeConfig({
-    application: "rollgate-test",
+    application: "rollbridge-test",
     control: {
-      path: path.join(root, "rollgate.sock")
+      path: path.join(root, "rollbridge.sock")
     },
     processes,
     proxy: {
@@ -165,11 +165,11 @@ async function createFixture(options = {}) {
 }
 
 /**
- * @param {import("../src/config.js").RollgateConfig} config - Config.
- * @returns {Promise<RollgateDaemon>} Started daemon.
+ * @param {import("../src/config.js").RollbridgeConfig} config - Config.
+ * @returns {Promise<RollbridgeDaemon>} Started daemon.
  */
 async function startDaemon(config) {
-  const daemon = new RollgateDaemon({config, logger: () => {}})
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
 
   await daemon.start()
 
@@ -177,7 +177,7 @@ async function startDaemon(config) {
 }
 
 /**
- * @param {RollgateDaemon} daemon - Daemon.
+ * @param {RollbridgeDaemon} daemon - Daemon.
  * @param {string} pathName - Path.
  * @returns {Promise<string>} Response text.
  */
@@ -190,7 +190,7 @@ async function fetchText(daemon, pathName) {
 }
 
 /**
- * @param {RollgateDaemon} daemon - Daemon.
+ * @param {RollbridgeDaemon} daemon - Daemon.
  * @returns {Promise<WebSocket>} Open WebSocket.
  */
 async function openWebSocket(daemon) {
@@ -205,7 +205,7 @@ async function openWebSocket(daemon) {
 }
 
 /**
- * @param {RollgateDaemon} daemon - Daemon.
+ * @param {RollbridgeDaemon} daemon - Daemon.
  * @param {string} releaseId - Release id.
  * @returns {Record<string, unknown>} Release status.
  */

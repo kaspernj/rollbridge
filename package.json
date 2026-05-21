@@ -1,13 +1,13 @@
 {
-  "name": "rollgate",
+  "name": "rollbridge",
   "version": "0.1.0",
   "description": "Zero-downtime process supervisor and local traffic switcher for deploy-managed apps.",
   "type": "module",
   "bin": {
-    "rollgate": "./bin/rollgate"
+    "rollbridge": "./bin/rollbridge"
   },
   "scripts": {
-    "lint": "node --check bin/rollgate && node --check src/*.js && node --check test/*.js && node --check test/fixtures/*.js",
+    "lint": "node --check bin/rollbridge && node --check src/*.js && node --check test/*.js && node --check test/fixtures/*.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {
