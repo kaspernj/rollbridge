@@ -6,12 +6,13 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 
 - [x] Stable local HTTP/WebSocket proxy in front of one active release.
 - [x] Unix socket control API used by the CLI.
-- [x] `daemon`, `deploy`, `status`, `stop`, and `shutdown` commands.
+- [x] `daemon`, `ensure-daemon`, `deploy`, `status`, `stop`, and `shutdown` commands.
 - [x] Per-release process startup with templated `releasePath`, `releaseId`, `revision`, and ports.
-- [x] Process policies for `proxied`, `companion`, and `singleton`.
+- [x] Process policies for `proxied`, `companion`, `singleton`, and `service`.
 - [x] HTTP health check before switching traffic to a new web process.
 - [x] Drain old HTTP/WebSocket connections before stopping previous release processes.
 - [x] Restart crashed active release processes after `restartDelayMs`.
+- [x] Restart crashed daemon-wide service processes from the latest successful release template.
 - [x] Graceful `SIGTERM` followed by `SIGKILL` after timeout.
 - [x] TensorBuzz production example config.
 - [x] ESLint, TypeScript `checkJs`, TensorBuzz CI, and `release:patch`.
@@ -56,10 +57,11 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Add optional file logging with rotation guidance.
   - [ ] Add machine-readable JSON output flags for all CLI commands.
 - [ ] Config validation and doctoring.
-  - [ ] Add `validate` to parse config and report all config errors without starting the daemon.
+  - [x] Add `validate` to parse config and report all config errors without starting the daemon.
   - [ ] Add `doctor` to check control socket reachability, proxy port availability, process commands, release path, and writable log/state paths.
-  - [ ] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and unsupported lifecycle combinations.
-  - [ ] Include example fixes in validation output.
+  - [x] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and the single-proxied-process policy rule.
+  - [ ] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land.
+  - [x] Include example fixes in validation output.
 
 ## Minor Features
 
@@ -81,8 +83,8 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 ## Documentation TODO
 
 - [ ] Write a full config reference covering every field, default, and template variable.
-- [ ] Write a CLI reference for `daemon`, `deploy`, `status`, `stop`, `shutdown`, and future commands.
-- [ ] Expand process policy docs with deployment examples for `proxied`, `companion`, and `singleton`.
+- [ ] Write a CLI reference for `daemon`, `ensure-daemon`, `deploy`, `status`, `stop`, `shutdown`, and future commands.
+- [ ] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
 - [ ] Document memory checks and auto-restart behavior after the feature lands.
 - [ ] Document worker lifecycle hooks and safe background-job deployment patterns after the feature lands.
 - [ ] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples.

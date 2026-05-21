@@ -1,25 +1,26 @@
 // @ts-check
 
 /**
- * @typedef {Record<string, unknown>} TemplateContext
+ * @typedef {import("./json.js").JsonValue} JsonValue
+ * @typedef {Record<string, JsonValue>} TemplateContext
  */
 
 /**
  * Resolves a dotted template key against the context.
  * @param {string} key - Dotted key from a template expression.
  * @param {TemplateContext} context - Template context.
- * @returns {unknown} Resolved value.
+ * @returns {JsonValue} Resolved value.
  */
 export function resolveTemplateValue(key, context) {
   const parts = key.split(".")
-  let current = /** @type {unknown} */ (context)
+  let current = /** @type {JsonValue} */ (context)
 
   for (const part of parts) {
     if (!current || typeof current !== "object") {
       return undefined
     }
 
-    current = /** @type {Record<string, unknown>} */ (current)[part]
+    current = /** @type {Record<string, JsonValue>} */ (current)[part]
   }
 
   return current
@@ -45,9 +46,9 @@ export function renderTemplate(value, context) {
 
 /**
  * Renders all string values in a plain JSON-like object.
- * @param {unknown} value - Value to render.
+ * @param {JsonValue} value - Value to render.
  * @param {TemplateContext} context - Template context.
- * @returns {unknown} Rendered value.
+ * @returns {JsonValue} Rendered value.
  */
 export function renderObject(value, context) {
   if (typeof value === "string") {
@@ -59,7 +60,7 @@ export function renderObject(value, context) {
   }
 
   if (value && typeof value === "object") {
-    /** @type {Record<string, unknown>} */
+    /** @type {Record<string, JsonValue>} */
     const rendered = {}
 
     for (const [key, entry] of Object.entries(value)) {

@@ -7,9 +7,11 @@ import {renderObject, renderTemplate} from "./template.js"
 import {waitForHealth} from "./health.js"
 
 /**
+ * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {"starting" | "active" | "draining" | "stopped" | "failed"} ReleaseState
  * @typedef {{http: number, websocket: number}} ReleaseConnections
  * @typedef {{activatedAt: string | undefined, connectionCount: number, connections: ReleaseConnections, drainStartedAt: string | undefined, ports: Record<string, number>, processes: import("./managed-process.js").ManagedProcessStatus[], releaseId: string, releasePath: string, revision: string, state: ReleaseState, stoppedAt: string | undefined}} ReleaseStatus
+ * @typedef {{shouldRestart?: () => boolean}} BuildProcessOptions
  */
 
 /**
@@ -24,12 +26,13 @@ export default class ReleaseGroup extends EventEmitter {
   /**
    * @param {object} args - Options.
    * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
-   * @param {(message: string, data?: Record<string, unknown>) => void} args.logger - Logger.
+   * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger.
    * @param {string} args.releaseId - Release id.
    * @param {string} args.releasePath - Release path.
    * @param {string | undefined} args.revision - Revision.
+   * @param {Record<string, number>} [args.servicePorts] - Ports already owned by daemon-wide services.
    */
-  constructor({config, logger, releaseId, releasePath, revision}) {
+  constructor({config, logger, releaseId, releasePath, revision, servicePorts = {}}) {
     super()
 
     this.config = config
@@ -42,6 +45,8 @@ export default class ReleaseGroup extends EventEmitter {
     this.connections = /** @type {ReleaseConnections} */ ({http: 0, websocket: 0})
     this.processes = /** @type {Map<string, ManagedProcess>} */ (new Map())
     this.ports = /** @type {Record<string, number>} */ ({})
+    this.servicePorts = servicePorts
+    this.portsAllocated = false
     this.drainStartedAt = /** @type {string | undefined} */ (undefined)
     this.activatedAt = /** @type {string | undefined} */ (undefined)
     this.stoppedAt = /** @type {string | undefined} */ (undefined)
@@ -79,7 +84,7 @@ export default class ReleaseGroup extends EventEmitter {
    * @returns {import("./config.js").ProcessConfig[]} Ordered process configs.
    */
   releaseProcessStartOrder() {
-    const releaseProcesses = this.config.processes.filter((processConfig) => processConfig.policy !== "singleton")
+    const releaseProcesses = this.config.processes.filter((processConfig) => !["singleton", "service"].includes(processConfig.policy))
     const companionProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "companion")
     const proxiedProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "proxied")
 
@@ -94,10 +99,17 @@ export default class ReleaseGroup extends EventEmitter {
 
   /** @returns {Promise<void>} Allocates all configured per-process ports. */
   async allocatePorts() {
+    if (this.portsAllocated) return
+
     const usedPorts = /** @type {Set<number>} */ (new Set())
 
     for (const processConfig of this.config.processes) {
       if (!processConfig.port) continue
+      if (processConfig.policy === "service" && this.servicePorts[processConfig.id] !== undefined) {
+        this.ports[processConfig.id] = this.servicePorts[processConfig.id]
+        usedPorts.add(this.servicePorts[processConfig.id])
+        continue
+      }
 
       this.ports[processConfig.id] = await findAvailablePort({
         host: this.config.proxy.host,
@@ -105,14 +117,17 @@ export default class ReleaseGroup extends EventEmitter {
         usedPorts
       })
     }
+
+    this.portsAllocated = true
   }
 
   /**
    * Builds a managed process from config.
    * @param {import("./config.js").ProcessConfig} processConfig - Process config.
+   * @param {BuildProcessOptions} [options] - Build options.
    * @returns {ManagedProcess} Managed process.
    */
-  buildProcess(processConfig) {
+  buildProcess(processConfig, options = {}) {
     const context = this.contextForProcess(processConfig)
     const renderedEnv = /** @type {Record<string, string>} */ (renderObject(processConfig.env, context))
     const processEnv = {
@@ -127,7 +142,7 @@ export default class ReleaseGroup extends EventEmitter {
       id: processConfig.id,
       logger: (message, data = {}) => this.logger(message, {processId: processConfig.id, releaseId: this.releaseId, ...data}),
       restartDelayMs: processConfig.restartDelayMs,
-      shouldRestart: () => this.state === "active" || this.state === "starting",
+      shouldRestart: options.shouldRestart || (() => this.state === "active" || this.state === "starting"),
       stopTimeoutMs: processConfig.gracefulStopMs
     })
   }
@@ -159,7 +174,7 @@ export default class ReleaseGroup extends EventEmitter {
 
   /**
    * @param {import("./config.js").ProcessConfig} processConfig - Process config.
-   * @returns {Record<string, unknown>} Template context.
+   * @returns {Record<string, JsonValue>} Template context.
    */
   contextForProcess(processConfig) {
     return {

@@ -7,21 +7,24 @@ import httpProxy from "http-proxy"
 import ReleaseGroup from "./release-group.js"
 
 /**
+ * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
- * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} SingletonStatus
- * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, proxy: {host: string, port: number | undefined}, releases: import("./release-group.js").ReleaseStatus[], singletons: SingletonStatus[]}} DaemonStatus
+ * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
+ * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, proxy: {host: string, port: number | undefined}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  */
 
 export default class RollbridgeDaemon {
   /**
    * @param {object} args - Options.
    * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
-   * @param {(message: string, data?: Record<string, unknown>) => void} [args.logger] - Logger.
+   * @param {(message: string, data?: Record<string, JsonValue>) => void} [args.logger] - Logger.
    */
   constructor({config, logger}) {
     this.config = config
     this.logger = logger || ((message, data = {}) => console.log(JSON.stringify({at: new Date().toISOString(), data, message})))
     this.releases = /** @type {Map<string, ReleaseGroup>} */ (new Map())
+    this.services = /** @type {Map<string, import("./managed-process.js").default>} */ (new Map())
+    this.servicePorts = /** @type {Record<string, number>} */ ({})
     this.singletons = /** @type {Map<string, import("./managed-process.js").default>} */ (new Map())
     this.activeRelease = /** @type {ReleaseGroup | undefined} */ (undefined)
     this.proxy = httpProxy.createProxyServer({ws: true, xfwd: true})
@@ -195,7 +198,7 @@ export default class RollbridgeDaemon {
 
   /**
    * @param {string} line - JSON command line.
-   * @returns {Promise<Record<string, unknown>>} Command response.
+   * @returns {Promise<Record<string, JsonValue>>} Command response.
    */
   async executeControlLine(line) {
     const command = JSON.parse(line)
@@ -204,7 +207,7 @@ export default class RollbridgeDaemon {
       throw new Error("Control command must be an object")
     }
 
-    const data = /** @type {Record<string, unknown>} */ (command)
+    const data = /** @type {Record<string, JsonValue>} */ (command)
     const commandName = data.command
 
     if (commandName === "deploy") {
@@ -225,7 +228,12 @@ export default class RollbridgeDaemon {
     }
 
     if (commandName === "shutdown") {
-      await this.shutdown()
+      setImmediate(() => {
+        this.shutdown().catch((error) => {
+          this.logger("shutdown failed", {error: error instanceof Error ? error.message : String(error)})
+        })
+      })
+
       return {message: "shutdown"}
     }
 
@@ -235,7 +243,7 @@ export default class RollbridgeDaemon {
   /**
    * Starts a new release, switches traffic, and drains the previous release.
    * @param {DeployArgs} args - Deploy args.
-   * @returns {Promise<Record<string, unknown>>} Deploy result.
+   * @returns {Promise<Record<string, JsonValue>>} Deploy result.
    */
   async deploy({releaseId, releasePath, revision}) {
     if (this.stopping) throw new Error("Rollbridge is shutting down")
@@ -246,11 +254,20 @@ export default class RollbridgeDaemon {
       logger: this.logger,
       releaseId: newReleaseId,
       releasePath,
-      revision
+      revision,
+      servicePorts: this.servicePorts
     })
 
     this.logger("deploy starting", {releaseId: newReleaseId, releasePath, revision})
-    await release.start()
+    const startedServices = /** @type {string[]} */ ([])
+
+    try {
+      await this.ensureServices(release, startedServices)
+      await release.start()
+    } catch (error) {
+      await this.stopStartedServices(startedServices)
+      throw error
+    }
 
     const previousRelease = this.activeRelease
 
@@ -259,6 +276,7 @@ export default class RollbridgeDaemon {
     this.activeRelease = release
     this.logger("traffic switched", {previousReleaseId: previousRelease ? previousRelease.releaseId : null, releaseId: release.releaseId})
 
+    this.refreshServiceDefinitions(release)
     await this.replaceSingletons(release)
 
     if (previousRelease) {
@@ -270,6 +288,82 @@ export default class RollbridgeDaemon {
     return {
       activeReleaseId: release.releaseId,
       previousReleaseId: previousRelease ? previousRelease.releaseId : null
+    }
+  }
+
+  /**
+   * Starts missing daemon-wide services before release-owned processes need them.
+   * @param {ReleaseGroup} release - Release providing templates and ports.
+   * @param {string[]} startedServices - Service ids started by this deploy.
+   * @returns {Promise<void>} Resolves when missing services are running.
+   */
+  async ensureServices(release, startedServices) {
+    await release.allocatePorts()
+
+    for (const processConfig of this.config.processes) {
+      if (processConfig.policy !== "service") continue
+      if (this.services.has(processConfig.id)) continue
+
+      const service = release.buildProcess(processConfig, {shouldRestart: () => !this.stopping})
+
+      this.services.set(processConfig.id, service)
+
+      if (release.ports[processConfig.id] !== undefined) {
+        this.servicePorts[processConfig.id] = release.ports[processConfig.id]
+      }
+
+      try {
+        await service.start()
+        startedServices.push(processConfig.id)
+      } catch (error) {
+        this.services.delete(processConfig.id)
+        delete this.servicePorts[processConfig.id]
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Stops services that were started for a failed deploy.
+   * @param {string[]} startedServices - Service ids started by the failed deploy.
+   * @returns {Promise<void>} Resolves when cleanup finishes.
+   */
+  async stopStartedServices(startedServices) {
+    for (const serviceId of startedServices) {
+      const service = this.services.get(serviceId)
+
+      if (!service) continue
+
+      await service.stop()
+      this.services.delete(serviceId)
+      delete this.servicePorts[serviceId]
+    }
+  }
+
+  /**
+   * Updates daemon-wide service restart templates after a successful deploy.
+   * @param {ReleaseGroup} release - Active release.
+   * @returns {void}
+   */
+  refreshServiceDefinitions(release) {
+    for (const processConfig of this.config.processes) {
+      if (processConfig.policy !== "service") continue
+
+      const service = this.services.get(processConfig.id)
+
+      if (!service) continue
+
+      const nextDefinition = release.buildProcess(processConfig, {shouldRestart: () => !this.stopping})
+
+      service.updateDefinition({
+        command: nextDefinition.command,
+        cwd: nextDefinition.cwd,
+        env: nextDefinition.env,
+        logger: nextDefinition.logger,
+        restartDelayMs: nextDefinition.restartDelayMs,
+        shouldRestart: nextDefinition.shouldRestart,
+        stopTimeoutMs: nextDefinition.stopTimeoutMs
+      })
     }
   }
 
@@ -314,6 +408,7 @@ export default class RollbridgeDaemon {
 
     this.stopping = true
     this.proxy.close()
+    await Promise.allSettled([...this.services.values()].map((processInstance) => processInstance.stop()))
     await Promise.allSettled([...this.singletons.values()].map((processInstance) => processInstance.stop()))
     await Promise.allSettled([...this.releases.values()].map((release) => release.stop()))
     await this.closeServer(this.proxyServer)
@@ -347,6 +442,10 @@ export default class RollbridgeDaemon {
         port: this.proxyPort ?? this.config.proxy.port
       },
       releases: [...this.releases.values()].map((release) => release.status()),
+      services: [...this.services.entries()].map(([id, processInstance]) => ({
+        id,
+        process: processInstance.status()
+      })),
       singletons: [...this.singletons.entries()].map(([id, processInstance]) => ({
         id,
         process: processInstance.status()
@@ -356,7 +455,7 @@ export default class RollbridgeDaemon {
 }
 
 /**
- * @param {unknown} value - Value.
+ * @param {JsonValue} value - Value.
  * @returns {string | undefined} String value.
  */
 function stringOrUndefined(value) {
@@ -367,7 +466,7 @@ function stringOrUndefined(value) {
 }
 
 /**
- * @param {unknown} value - Value.
+ * @param {JsonValue} value - Value.
  * @param {string} key - Key.
  * @returns {string} String value.
  */

@@ -9,9 +9,13 @@ import {fileURLToPath} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
+import {runCli} from "../src/cli.js"
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
+const binPath = path.join(currentDir, "..", "bin", "rollbridge")
+const dependentAppPath = path.join(currentDir, "fixtures", "dependent-app.js")
 const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
+const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 const singletonAppPath = path.join(currentDir, "fixtures", "singleton-app.js")
 
 test("deploy switches new HTTP traffic while old WebSockets drain", async () => {
@@ -65,11 +69,11 @@ test("singleton processes restart without overlap during deploy", async () => {
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await waitFor(async () => (await singletonEvents(fixture.singletonLogPath)).some((event) => event.event === "start" && event.releaseId === "v1"))
+    await waitFor(async () => (await processEvents(fixture.singletonLogPath)).some((event) => event.event === "start" && event.releaseId === "v1"))
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
     await waitFor(async () => {
-      const events = await singletonEvents(fixture.singletonLogPath)
+      const events = await processEvents(fixture.singletonLogPath)
 
       return events.some((event) => event.event === "stop" && event.releaseId === "v1") &&
         events.some((event) => event.event === "start" && event.releaseId === "v2")
@@ -79,6 +83,38 @@ test("singleton processes restart without overlap during deploy", async () => {
 
     assert.equal(status.singletons.length, 1)
     assert.equal(status.singletons[0].process.state, "running")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("service processes start before releases and restart with the latest deploy template", async () => {
+  const fixture = await createFixture({includeService: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await waitFor(async () => (await processEvents(fixture.serviceLogPath)).some((event) => event.event === "start" && event.releaseId === "v1"))
+
+    const firstServiceStatus = daemon.status().services[0].process
+
+    assert.ok(firstServiceStatus.pid, "service should have a pid")
+    assert.match(firstServiceStatus.command, /v1/)
+
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    const secondServiceStatus = daemon.status().services[0].process
+
+    assert.equal(secondServiceStatus.pid, firstServiceStatus.pid)
+    assert.match(secondServiceStatus.command, /v2/)
+
+    process.kill(-Number(secondServiceStatus.pid), "SIGTERM")
+    await waitFor(async () => {
+      const events = await processEvents(fixture.serviceLogPath)
+
+      return events.some((event) => event.event === "start" && event.releaseId === "v2")
+    })
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -113,27 +149,91 @@ test("control socket accepts deploy and status commands", async () => {
   }
 })
 
+test("deploy can ensure the daemon before sending the release command", async () => {
+  const fixture = await createFixture()
+  const configPath = await writeConfigFile(fixture.config, fixture.root)
+  const logPath = path.join(fixture.root, "daemon.log")
+  const pidPath = path.join(fixture.root, "daemon.pid")
+
+  try {
+    await runCli([
+      "node",
+      binPath,
+      "deploy",
+      "--ensure-daemon",
+      "--config",
+      configPath,
+      "--release-path",
+      fixture.root,
+      "--release-id",
+      "ensured-v1",
+      "--daemon-log-path",
+      logPath,
+      "--daemon-pid-path",
+      pidPath
+    ])
+
+    const status = await sendControlCommand({
+      command: {command: "status"},
+      path: fixture.config.control.path
+    })
+
+    const proxy = /** @type {{port: number}} */ (status.proxy)
+
+    assert.equal(status.activeReleaseId, "ensured-v1")
+    assert.match(await fs.readFile(pidPath, "utf8"), /\d+/)
+    assert.equal(await fetchTextFromPort(proxy.port, "/release"), "ensured-v1")
+  } finally {
+    try {
+      await sendControlCommand({
+        command: {command: "shutdown"},
+        path: fixture.config.control.path
+      })
+    } catch (_error) {
+      // The daemon may have failed before it accepted commands.
+    }
+
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 /**
- * @param {{includeSingleton?: boolean}} [options] - Fixture options.
- * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, singletonLogPath: string}>} Fixture data.
+ * @param {{includeService?: boolean, includeSingleton?: boolean, webDependsOnService?: boolean}} [options] - Fixture options.
+ * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
+  const serviceLogPath = path.join(root, "service.log")
   const singletonLogPath = path.join(root, "singleton.log")
-  /** @type {Array<Record<string, unknown>>} */
-  const processes = [
-    {
-      command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
-      health: {
-        intervalMs: 50,
-        path: "/ping",
-        timeoutMs: 3000
+  /** @type {Array<Record<string, import("../src/json.js").JsonValue>>} */
+  const processes = []
+
+  if (options.includeService) {
+    processes.push({
+      command: `${JSON.stringify(process.execPath)} ${JSON.stringify(serviceAppPath)} --release={{releaseId}}`,
+      env: {
+        ROLLBRIDGE_SERVICE_LOG: serviceLogPath
       },
-      id: "web",
-      policy: "proxied",
-      port: {from: 0, to: 0}
-    }
-  ]
+      id: "beacon",
+      policy: "service",
+      port: {from: 0, to: 0},
+      restartDelayMs: 50
+    })
+  }
+
+  processes.push({
+    command: options.webDependsOnService
+      ? `${JSON.stringify(process.execPath)} ${JSON.stringify(dependentAppPath)}`
+      : `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
+    health: {
+      intervalMs: 50,
+      path: "/ping",
+      timeoutMs: 3000
+    },
+    id: "web",
+    policy: "proxied",
+    port: {from: 0, to: 0}
+  })
 
   if (options.includeSingleton) {
     processes.push({
@@ -162,7 +262,7 @@ async function createFixture(options = {}) {
     }
   })
 
-  return {config, root, singletonLogPath}
+  return {config, root, serviceLogPath, singletonLogPath}
 }
 
 /**
@@ -183,7 +283,16 @@ async function startDaemon(config) {
  * @returns {Promise<string>} Response text.
  */
 async function fetchText(daemon, pathName) {
-  const response = await fetch(`http://127.0.0.1:${daemon.getProxyPort()}${pathName}`)
+  return await fetchTextFromPort(Number(daemon.getProxyPort()), pathName)
+}
+
+/**
+ * @param {number} port - Port.
+ * @param {string} pathName - Path.
+ * @returns {Promise<string>} Response text.
+ */
+async function fetchTextFromPort(port, pathName) {
+  const response = await fetch(`http://127.0.0.1:${port}${pathName}`)
 
   assert.equal(response.status, 200)
 
@@ -223,7 +332,7 @@ function statusRelease(daemon, releaseId) {
  * @param {string} logPath - Log path.
  * @returns {Promise<Array<{event: string, pid: number, releaseId: string}>>} Events.
  */
-async function singletonEvents(logPath) {
+async function processEvents(logPath) {
   try {
     const text = await fs.readFile(logPath, "utf8")
 
@@ -239,6 +348,19 @@ async function singletonEvents(logPath) {
 
     throw error
   }
+}
+
+/**
+ * @param {import("../src/config.js").RollbridgeConfig} config - Config.
+ * @param {string} root - Fixture root.
+ * @returns {Promise<string>} Written config path.
+ */
+async function writeConfigFile(config, root) {
+  const configPath = path.join(root, "rollbridge.json")
+
+  await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+
+  return configPath
 }
 
 /**

@@ -4,9 +4,11 @@ import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
 
 /**
+ * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
+ * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
  * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, logs: ManagedProcessLog[], pid: number | undefined, state: ManagedProcessState}} ManagedProcessStatus
  */
 
@@ -17,7 +19,7 @@ export default class ManagedProcess extends EventEmitter {
    * @param {string | undefined} args.cwd - Working directory.
    * @param {Record<string, string | undefined>} args.env - Environment.
    * @param {string} args.id - Process id.
-   * @param {(message: string, data?: Record<string, unknown>) => void} args.logger - Logger callback.
+   * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger callback.
    * @param {number} args.restartDelayMs - Restart delay.
    * @param {() => boolean} args.shouldRestart - Restart policy callback.
    * @param {number} args.stopTimeoutMs - Stop timeout.
@@ -86,6 +88,21 @@ export default class ManagedProcess extends EventEmitter {
       child.stdout.on("data", (chunk) => this.appendLog("stdout", chunk))
       child.stderr.on("data", (chunk) => this.appendLog("stderr", chunk))
     })
+  }
+
+  /**
+   * Updates the command template used for future restarts without touching the currently running child.
+   * @param {ManagedProcessDefinition} definition - Replacement process definition.
+   * @returns {void}
+   */
+  updateDefinition(definition) {
+    this.command = definition.command
+    this.cwd = definition.cwd
+    this.env = definition.env
+    this.logger = definition.logger
+    this.restartDelayMs = definition.restartDelayMs
+    this.shouldRestart = definition.shouldRestart
+    this.stopTimeoutMs = definition.stopTimeoutMs
   }
 
   /**
