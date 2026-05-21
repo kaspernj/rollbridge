@@ -1,0 +1,37 @@
+# Rollbridge config for the TensorBuzz production backend.
+#
+# TensorBuzz currently configures Velocious Beacon and background-jobs-main as
+# stable cross-release services on 127.0.0.1:7330 and 127.0.0.1:7331. Keep those
+# services supervised outside this config before starting Rollbridge. Nginx
+# should keep proxying the backend host to 127.0.0.1:4500; Rollbridge binds that
+# stable HTTP port and forwards to the active release's internal web port.
+
+application: tensorbuzz
+
+control:
+  path: /tmp/rollbridge-tensorbuzz.sock
+
+proxy:
+  host: 127.0.0.1
+  port: 4500
+  healthPath: /ping
+  healthTimeoutMs: 30000
+  drainTimeoutMs: 60000
+  forceStopTimeoutMs: 10000
+
+processes:
+  - id: web
+    policy: proxied
+    cwd: "{{releasePath}}/backend"
+    env:
+      NODE_ENV: production
+      VELOCIOUS_ENV: production
+      VELOCIOUS_BACKGROUND_JOBS_PORT: "7331"
+    command: "wait-for-it 127.0.0.1:7330 --strict -- wait-for-it 127.0.0.1:7331 --strict -- npx velocious server --host 127.0.0.1 --port {{port}}"
+    port:
+      from: 14500
+      to: 14599
+    health:
+      path: /ping
+      timeoutMs: 30000
+      intervalMs: 500
