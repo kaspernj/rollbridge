@@ -1,10 +1,10 @@
 # Rollbridge config for the TensorBuzz production backend.
 #
-# TensorBuzz currently configures the Velocious Beacon broker as a stable
-# cross-release service on 127.0.0.1:7330. Keep that broker supervised outside
-# this config before starting Rollbridge. Nginx should keep proxying the backend
-# host to 127.0.0.1:4500; Rollbridge binds that stable port and forwards to the
-# active release's internal web port.
+# TensorBuzz currently configures Velocious Beacon and background-jobs-main as
+# stable cross-release services on 127.0.0.1:7330 and 127.0.0.1:7331. Keep those
+# services supervised outside this config before starting Rollbridge. Nginx
+# should keep proxying the backend host to 127.0.0.1:4500; Rollbridge binds that
+# stable HTTP port and forwards to the active release's internal web port.
 
 application: tensorbuzz
 
@@ -26,8 +26,8 @@ processes:
     env:
       NODE_ENV: production
       VELOCIOUS_ENV: production
-      VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"
-    command: "wait-for-it 127.0.0.1:7330 --strict -- npx velocious server --host 127.0.0.1 --port {{port}}"
+      VELOCIOUS_BACKGROUND_JOBS_PORT: "7331"
+    command: "wait-for-it 127.0.0.1:7330 --strict -- wait-for-it 127.0.0.1:7331 --strict -- npx velocious server --host 127.0.0.1 --port {{port}}"
     port:
       from: 14500
       to: 14599
@@ -35,26 +35,3 @@ processes:
       path: /ping
       timeoutMs: 30000
       intervalMs: 500
-
-  - id: background-jobs-main
-    policy: singleton
-    cwd: "{{releasePath}}/backend"
-    env:
-      NODE_ENV: production
-      VELOCIOUS_ENV: production
-      VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}"
-    command: "wait-for-it 127.0.0.1:7330 --strict -- npx velocious background-jobs-main"
-    port:
-      from: 17331
-      to: 17399
-    gracefulStopMs: 30000
-
-  - id: background-jobs-worker
-    policy: singleton
-    cwd: "{{releasePath}}/backend"
-    env:
-      NODE_ENV: production
-      VELOCIOUS_ENV: production
-      VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"
-    command: "wait-for-it 127.0.0.1:7330 --strict -- wait-for-it 127.0.0.1:{{ports.background-jobs-main}} --strict -- npx velocious background-jobs-worker"
-    gracefulStopMs: 30000
