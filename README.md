@@ -127,7 +127,7 @@ Run migrations before `rollbridge deploy`, and keep migrations backwards-compati
 
 ## Releasing
 
-Maintainers can publish a patch release from the latest `master`:
+Maintainers can publish a patch release from the latest default branch:
 
 ```bash
 npm run release:patch
