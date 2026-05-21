@@ -115,11 +115,12 @@ test("control socket accepts deploy and status commands", async () => {
 
 /**
  * @param {{includeSingleton?: boolean}} [options] - Fixture options.
- * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, singletonLogPath: string}>}
+ * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, singletonLogPath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const singletonLogPath = path.join(root, "singleton.log")
+  /** @type {Array<Record<string, unknown>>} */
   const processes = [
     {
       command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
@@ -207,7 +208,7 @@ async function openWebSocket(daemon) {
 /**
  * @param {RollbridgeDaemon} daemon - Daemon.
  * @param {string} releaseId - Release id.
- * @returns {Record<string, unknown>} Release status.
+ * @returns {import("../src/release-group.js").ReleaseStatus} Release status.
  */
 function statusRelease(daemon, releaseId) {
   const status = daemon.status()

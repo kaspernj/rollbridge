@@ -8,6 +8,8 @@ import ReleaseGroup from "./release-group.js"
 
 /**
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
+ * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} SingletonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, proxy: {host: string, port: number | undefined}, releases: import("./release-group.js").ReleaseStatus[], singletons: SingletonStatus[]}} DaemonStatus
  */
 
 export default class RollbridgeDaemon {
@@ -19,13 +21,13 @@ export default class RollbridgeDaemon {
   constructor({config, logger}) {
     this.config = config
     this.logger = logger || ((message, data = {}) => console.log(JSON.stringify({at: new Date().toISOString(), data, message})))
-    this.releases = new Map()
-    this.singletons = new Map()
-    this.activeRelease = undefined
+    this.releases = /** @type {Map<string, ReleaseGroup>} */ (new Map())
+    this.singletons = /** @type {Map<string, import("./managed-process.js").default>} */ (new Map())
+    this.activeRelease = /** @type {ReleaseGroup | undefined} */ (undefined)
     this.proxy = httpProxy.createProxyServer({ws: true, xfwd: true})
-    this.proxyServer = undefined
-    this.controlServer = undefined
-    this.proxyPort = undefined
+    this.proxyServer = /** @type {http.Server | undefined} */ (undefined)
+    this.controlServer = /** @type {net.Server | undefined} */ (undefined)
+    this.proxyPort = /** @type {number | undefined} */ (undefined)
     this.stopping = false
 
     this.proxy.on("error", (error, req, res) => this.onProxyError(error, req, res))
@@ -116,7 +118,7 @@ export default class RollbridgeDaemon {
 
   /**
    * @param {http.IncomingMessage} request - Client request.
-   * @param {import("node:net").Socket} socket - Client socket.
+   * @param {import("node:stream").Duplex} socket - Client socket.
    * @param {Buffer} head - Upgrade head.
    * @returns {void}
    */
@@ -334,7 +336,7 @@ export default class RollbridgeDaemon {
     return this.proxyPort
   }
 
-  /** @returns {Record<string, unknown>} Status payload. */
+  /** @returns {DaemonStatus} Status payload. */
   status() {
     return {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,

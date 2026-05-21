@@ -2,10 +2,8 @@
 
 import fs from "node:fs"
 
-const logPath = process.env.ROLLBRIDGE_SINGLETON_LOG
+const logPath = requiredEnv("ROLLBRIDGE_SINGLETON_LOG")
 const releaseId = process.env.ROLLBRIDGE_RELEASE_ID || "unknown"
-
-if (!logPath) throw new Error("ROLLBRIDGE_SINGLETON_LOG is required")
 
 writeEvent("start")
 
@@ -22,4 +20,16 @@ setInterval(() => {}, 1000)
  */
 function writeEvent(event) {
   fs.appendFileSync(logPath, `${JSON.stringify({event, pid: process.pid, releaseId})}\n`)
+}
+
+/**
+ * @param {string} key - Environment variable name.
+ * @returns {string} Environment variable value.
+ */
+function requiredEnv(key) {
+  const value = process.env[key]
+
+  if (!value) throw new Error(`${key} is required`)
+
+  return value
 }

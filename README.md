@@ -14,7 +14,7 @@ For local development in this repository:
 
 ```bash
 npm install
-npm test
+npm run all-checks
 ```
 
 ## Config
@@ -124,3 +124,11 @@ location / {
 ## Deployment Notes
 
 Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For Velocious background jobs, keep `background-jobs-main` as `singleton` until Velocious has atomic job claiming.
+
+## Releasing
+
+Maintainers can publish a patch release from the latest `master`:
+
+```bash
+npm run release:patch
+```

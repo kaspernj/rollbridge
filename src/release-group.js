@@ -8,6 +8,8 @@ import {waitForHealth} from "./health.js"
 
 /**
  * @typedef {"starting" | "active" | "draining" | "stopped" | "failed"} ReleaseState
+ * @typedef {{http: number, websocket: number}} ReleaseConnections
+ * @typedef {{activatedAt: string | undefined, connectionCount: number, connections: ReleaseConnections, drainStartedAt: string | undefined, ports: Record<string, number>, processes: import("./managed-process.js").ManagedProcessStatus[], releaseId: string, releasePath: string, revision: string, state: ReleaseState, stoppedAt: string | undefined}} ReleaseStatus
  */
 
 /**
@@ -37,12 +39,12 @@ export default class ReleaseGroup extends EventEmitter {
     this.revision = revision || releaseId
     this.state = /** @type {ReleaseState} */ ("starting")
     this.connectionCount = 0
-    this.connections = {http: 0, websocket: 0}
-    this.processes = new Map()
-    this.ports = {}
-    this.drainStartedAt = undefined
-    this.activatedAt = undefined
-    this.stoppedAt = undefined
+    this.connections = /** @type {ReleaseConnections} */ ({http: 0, websocket: 0})
+    this.processes = /** @type {Map<string, ManagedProcess>} */ (new Map())
+    this.ports = /** @type {Record<string, number>} */ ({})
+    this.drainStartedAt = /** @type {string | undefined} */ (undefined)
+    this.activatedAt = /** @type {string | undefined} */ (undefined)
+    this.stoppedAt = /** @type {string | undefined} */ (undefined)
   }
 
   /** @returns {Promise<void>} Starts release-owned processes and health checks the proxied process. */
@@ -92,7 +94,7 @@ export default class ReleaseGroup extends EventEmitter {
 
   /** @returns {Promise<void>} Allocates all configured per-process ports. */
   async allocatePorts() {
-    const usedPorts = new Set()
+    const usedPorts = /** @type {Set<number>} */ (new Set())
 
     for (const processConfig of this.config.processes) {
       if (!processConfig.port) continue
@@ -251,7 +253,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.stoppedAt = new Date().toISOString()
   }
 
-  /** @returns {Record<string, unknown>} Status payload. */
+  /** @returns {ReleaseStatus} Status payload. */
   status() {
     return {
       activatedAt: this.activatedAt,

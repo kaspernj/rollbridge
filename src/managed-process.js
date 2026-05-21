@@ -5,6 +5,9 @@ import {spawn} from "node:child_process"
 
 /**
  * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
+ * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
+ * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
+ * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, logs: ManagedProcessLog[], pid: number | undefined, state: ManagedProcessState}} ManagedProcessStatus
  */
 
 export default class ManagedProcess extends EventEmitter {
@@ -31,7 +34,7 @@ export default class ManagedProcess extends EventEmitter {
     this.shouldRestart = shouldRestart
     this.stopTimeoutMs = stopTimeoutMs
     this.state = /** @type {ManagedProcessState} */ ("stopped")
-    this.logs = []
+    this.logs = /** @type {ManagedProcessLog[]} */ ([])
     this.intentionalStop = false
     this.restartTimer = undefined
     this.child = undefined
@@ -104,7 +107,7 @@ export default class ManagedProcess extends EventEmitter {
 
   /**
    * @param {number | null} code - Exit code.
-   * @param {NodeJS.Signals | null} signal - Exit signal.
+   * @param {ProcessExitSignal} signal - Exit signal.
    * @returns {void}
    */
   onExit(code, signal) {
@@ -163,7 +166,7 @@ export default class ManagedProcess extends EventEmitter {
   }
 
   /**
-   * @param {NodeJS.Signals} signal - Signal to send.
+   * @param {"SIGTERM" | "SIGKILL"} signal - Signal to send.
    * @returns {void}
    */
   killProcessGroup(signal) {
@@ -184,7 +187,7 @@ export default class ManagedProcess extends EventEmitter {
   async waitForExit(timeoutMs) {
     if (!this.exitPromise) return true
 
-    let timer = /** @type {NodeJS.Timeout | undefined} */ (undefined)
+    let timer = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined)
     const timeoutPromise = new Promise((resolve) => {
       timer = setTimeout(() => resolve(false), timeoutMs)
     })
@@ -196,9 +199,7 @@ export default class ManagedProcess extends EventEmitter {
     return Boolean(result)
   }
 
-  /**
-   * @returns {Record<string, unknown>} Status payload.
-   */
+  /** @returns {ManagedProcessStatus} Status payload. */
   status() {
     return {
       command: this.command,
