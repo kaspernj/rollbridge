@@ -56,10 +56,11 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Add optional file logging with rotation guidance.
   - [ ] Add machine-readable JSON output flags for all CLI commands.
 - [ ] Config validation and doctoring.
-  - [ ] Add `validate` to parse config and report all config errors without starting the daemon.
+  - [x] Add `validate` to parse config and report all config errors without starting the daemon.
   - [ ] Add `doctor` to check control socket reachability, proxy port availability, process commands, release path, and writable log/state paths.
-  - [ ] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and unsupported lifecycle combinations.
-  - [ ] Include example fixes in validation output.
+  - [x] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and the single-proxied-process policy rule.
+  - [ ] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land.
+  - [x] Include example fixes in validation output.
 
 ## Minor Features
 

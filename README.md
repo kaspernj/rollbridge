@@ -75,6 +75,28 @@ Production-ready examples live in `examples/`, including
 
 ## Commands
 
+Validate a config without starting the daemon:
+
+```bash
+rollbridge validate --config rollbridge.yml
+```
+
+`validate` reports every config error at once with an example fix and exits
+non-zero when issues are found, so deploy tooling can gate on it. It checks
+required fields and types, duplicate process IDs, port ranges, that exactly one
+process is `proxied`, and that the proxied process defines a port range. Example
+output for a misconfigured file:
+
+```text
+Found 2 configuration issues in rollbridge.yml:
+
+1. Config must define exactly one proxied process; found 0
+   Fix: Mark exactly one process with policy: proxied so Rollbridge knows where to forward traffic.
+
+2. Duplicate process id: web
+   Fix: Give each process a unique id; "web" is used more than once.
+```
+
 Start the daemon:
 
 ```bash
