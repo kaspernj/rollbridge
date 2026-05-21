@@ -1,0 +1,214 @@
+// @ts-check
+
+import {EventEmitter} from "node:events"
+import {spawn} from "node:child_process"
+
+/**
+ * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
+ */
+
+export default class ManagedProcess extends EventEmitter {
+  /**
+   * @param {object} args - Options.
+   * @param {string} args.command - Shell command.
+   * @param {string | undefined} args.cwd - Working directory.
+   * @param {Record<string, string | undefined>} args.env - Environment.
+   * @param {string} args.id - Process id.
+   * @param {(message: string, data?: Record<string, unknown>) => void} args.logger - Logger callback.
+   * @param {number} args.restartDelayMs - Restart delay.
+   * @param {() => boolean} args.shouldRestart - Restart policy callback.
+   * @param {number} args.stopTimeoutMs - Stop timeout.
+   */
+  constructor({command, cwd, env, id, logger, restartDelayMs, shouldRestart, stopTimeoutMs}) {
+    super()
+
+    this.command = command
+    this.cwd = cwd
+    this.env = env
+    this.id = id
+    this.logger = logger
+    this.restartDelayMs = restartDelayMs
+    this.shouldRestart = shouldRestart
+    this.stopTimeoutMs = stopTimeoutMs
+    this.state = /** @type {ManagedProcessState} */ ("stopped")
+    this.logs = []
+    this.intentionalStop = false
+    this.restartTimer = undefined
+    this.child = undefined
+    this.exitPromise = undefined
+    this.pid = undefined
+    this.exitCode = undefined
+    this.exitSignal = undefined
+  }
+
+  /** @returns {Promise<void>} Resolves after spawn. */
+  async start() {
+    if (this.child) return
+
+    this.intentionalStop = false
+    this.exitCode = undefined
+    this.exitSignal = undefined
+    this.state = "starting"
+
+    await new Promise((resolve, reject) => {
+      const child = spawn(this.command, {
+        cwd: this.cwd,
+        detached: true,
+        env: {...process.env, ...this.env},
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"]
+      })
+
+      this.child = child
+      this.pid = child.pid
+      this.exitPromise = new Promise((exitResolve) => {
+        child.once("exit", (code, signal) => {
+          this.onExit(code, signal)
+          exitResolve(undefined)
+        })
+      })
+
+      child.once("spawn", () => {
+        this.state = "running"
+        this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null})
+        this.emit("started")
+        resolve(undefined)
+      })
+      child.once("error", (error) => {
+        this.state = "failed"
+        reject(error)
+      })
+      child.stdout.setEncoding("utf8")
+      child.stderr.setEncoding("utf8")
+      child.stdout.on("data", (chunk) => this.appendLog("stdout", chunk))
+      child.stderr.on("data", (chunk) => this.appendLog("stderr", chunk))
+    })
+  }
+
+  /**
+   * @param {"stdout" | "stderr"} stream - Stream name.
+   * @param {string} chunk - Output chunk.
+   * @returns {void}
+   */
+  appendLog(stream, chunk) {
+    for (const line of String(chunk).split(/\r?\n/)) {
+      if (!line) continue
+
+      this.logs.push({at: new Date().toISOString(), line, stream})
+
+      if (this.logs.length > 200) {
+        this.logs.splice(0, this.logs.length - 200)
+      }
+    }
+  }
+
+  /**
+   * @param {number | null} code - Exit code.
+   * @param {NodeJS.Signals | null} signal - Exit signal.
+   * @returns {void}
+   */
+  onExit(code, signal) {
+    const wasIntentional = this.intentionalStop
+
+    this.exitCode = code
+    this.exitSignal = signal
+    this.child = undefined
+    this.pid = undefined
+    this.exitPromise = undefined
+    this.state = wasIntentional ? "stopped" : "failed"
+    this.logger("process exited", {code, id: this.id, signal})
+    this.emit("exit", {code, signal})
+
+    if (!wasIntentional && this.shouldRestart()) {
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = undefined
+        this.start().catch((error) => {
+          this.logger("process restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
+        })
+      }, this.restartDelayMs)
+    }
+  }
+
+  /**
+   * @param {{timeoutMs?: number}} [options] - Stop options.
+   * @returns {Promise<void>} Resolves when stopped.
+   */
+  async stop(options = {}) {
+    this.intentionalStop = true
+
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = undefined
+    }
+
+    const child = this.child
+
+    if (!child || !child.pid) {
+      this.state = "stopped"
+      return
+    }
+
+    this.state = "stopping"
+    this.killProcessGroup("SIGTERM")
+    const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
+    const stopped = await this.waitForExit(timeoutMs)
+
+    if (!stopped) {
+      this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: child.pid})
+      this.killProcessGroup("SIGKILL")
+      await this.waitForExit(5000)
+    }
+
+    this.state = "stopped"
+  }
+
+  /**
+   * @param {NodeJS.Signals} signal - Signal to send.
+   * @returns {void}
+   */
+  killProcessGroup(signal) {
+    if (!this.child || !this.child.pid) return
+
+    try {
+      process.kill(-this.child.pid, signal)
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
+      throw error
+    }
+  }
+
+  /**
+   * @param {number} timeoutMs - Timeout.
+   * @returns {Promise<boolean>} True when the process exited before timeout.
+   */
+  async waitForExit(timeoutMs) {
+    if (!this.exitPromise) return true
+
+    let timer = /** @type {NodeJS.Timeout | undefined} */ (undefined)
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs)
+    })
+    const exitPromise = this.exitPromise.then(() => true)
+    const result = await Promise.race([exitPromise, timeoutPromise])
+
+    if (timer) clearTimeout(timer)
+
+    return Boolean(result)
+  }
+
+  /**
+   * @returns {Record<string, unknown>} Status payload.
+   */
+  status() {
+    return {
+      command: this.command,
+      cwd: this.cwd,
+      exitCode: this.exitCode,
+      exitSignal: this.exitSignal,
+      id: this.id,
+      logs: this.logs.slice(-20),
+      pid: this.pid,
+      state: this.state
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@kaspernj/switchyard",
+  "version": "0.1.0",
+  "description": "Zero-downtime process supervisor and local traffic switcher for deploy-managed apps.",
+  "type": "module",
+  "bin": {
+    "switchyard": "./bin/switchyard"
+  },
+  "scripts": {
+    "lint": "node --check bin/switchyard && node --check src/*.js && node --check test/*.js && node --check test/fixtures/*.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "http-proxy": "^1.18.1",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {}
+}
