@@ -87,7 +87,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 
 - [ ] Write a full config reference covering every field, default, and template variable.
 - [ ] Write a CLI reference for `daemon`, `ensure-daemon`, `deploy`, `status`, `stop`, `shutdown`, and future commands.
-- [ ] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
+- [x] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
 - [ ] Document memory checks and auto-restart behavior after the feature lands.
 - [ ] Document worker lifecycle hooks and safe background-job deployment patterns after the feature lands.
 - [ ] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples.
