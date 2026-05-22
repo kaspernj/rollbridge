@@ -192,6 +192,14 @@ rollbridge status --config rollbridge.js
 (`restarts`), last start time (`startedAt`), and current `uptimeMs` while
 running.
 
+Print the recent captured stdout/stderr per process (a one-shot snapshot of the
+retained `outputLines`, not a live stream):
+
+```bash
+rollbridge logs --config rollbridge.js
+rollbridge logs --config rollbridge.js --process web
+```
+
 Stop the active release:
 
 ```bash
