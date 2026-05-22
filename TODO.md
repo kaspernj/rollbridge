@@ -70,7 +70,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Add old-release cleanup policies by age, count, and stopped state.
 - [x] Add port allocation diagnostics when a range is exhausted.
 - [ ] Add optional startup command timeout before health checks begin.
-- [ ] Add process output retention config instead of a fixed recent-log count.
+- [x] Add process output retention config instead of a fixed recent-log count.
 - [ ] Add environment variable interpolation from the daemon environment.
 - [x] Add `--config` default lookup resolving to `rollbridge.js` when no path is given.
 - [ ] Add shell completion generation for common shells.

@@ -9,7 +9,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {{from: number, to: number}} PortRange
  * @typedef {{path: string, timeoutMs: number, intervalMs: number}} HealthConfig
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
+ * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number}} ProxyConfig
  * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig}} RollbridgeConfig
@@ -159,7 +159,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", policy: "companion", port: undefined, restartDelayMs: 1000}
+    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", outputLines: 50, policy: "companion", port: undefined, restartDelayMs: 1000}
   }
 
   const source = value
@@ -171,10 +171,29 @@ function normalizeProcess(value, index, proxy, issues) {
     gracefulStopMs: normalizeNumber(source.gracefulStopMs, `processes[${index}].gracefulStopMs`, issues, {default: proxy.forceStopTimeoutMs}),
     health: normalizeHealth(source.health, `processes[${index}].health`, proxy, issues),
     id: normalizeString(source.id, `processes[${index}].id`, issues),
+    outputLines: normalizeOutputLines(source.outputLines, `processes[${index}].outputLines`, issues),
     policy: normalizePolicy(source.policy, `processes[${index}].policy`, issues),
     port: normalizePortRange(source.port, `processes[${index}].port`, issues),
     restartDelayMs: normalizeNumber(source.restartDelayMs, `processes[${index}].restartDelayMs`, issues, {default: 1000})
   }
+}
+
+/**
+ * @param {JsonValue} value - Raw output retention value.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {number} Recent output lines to retain and report (default 50).
+ */
+function normalizeOutputLines(value, key, issues) {
+  const outputLines = normalizeNumber(value, key, issues, {default: 50})
+
+  if (!Number.isInteger(outputLines) || outputLines < 1) {
+    issues.push({fix: `Set ${key} to a positive integer number of lines, e.g. 50.`, message: `${key} must be a positive integer`})
+
+    return 50
+  }
+
+  return outputLines
 }
 
 /**

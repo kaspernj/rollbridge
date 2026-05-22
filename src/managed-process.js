@@ -8,7 +8,7 @@ import {spawn} from "node:child_process"
  * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
- * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
+ * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, outputLines: number, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
  * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, logs: ManagedProcessLog[], pid: number | undefined, state: ManagedProcessState}} ManagedProcessStatus
  */
 
@@ -20,11 +20,12 @@ export default class ManagedProcess extends EventEmitter {
    * @param {Record<string, string | undefined>} args.env - Environment.
    * @param {string} args.id - Process id.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger callback.
+   * @param {number} args.outputLines - Recent stdout/stderr lines to retain and report.
    * @param {number} args.restartDelayMs - Restart delay.
    * @param {() => boolean} args.shouldRestart - Restart policy callback.
    * @param {number} args.stopTimeoutMs - Stop timeout.
    */
-  constructor({command, cwd, env, id, logger, restartDelayMs, shouldRestart, stopTimeoutMs}) {
+  constructor({command, cwd, env, id, logger, outputLines, restartDelayMs, shouldRestart, stopTimeoutMs}) {
     super()
 
     this.command = command
@@ -32,6 +33,7 @@ export default class ManagedProcess extends EventEmitter {
     this.env = env
     this.id = id
     this.logger = logger
+    this.outputLines = outputLines
     this.restartDelayMs = restartDelayMs
     this.shouldRestart = shouldRestart
     this.stopTimeoutMs = stopTimeoutMs
@@ -100,6 +102,7 @@ export default class ManagedProcess extends EventEmitter {
     this.cwd = definition.cwd
     this.env = definition.env
     this.logger = definition.logger
+    this.outputLines = definition.outputLines
     this.restartDelayMs = definition.restartDelayMs
     this.shouldRestart = definition.shouldRestart
     this.stopTimeoutMs = definition.stopTimeoutMs
@@ -116,8 +119,8 @@ export default class ManagedProcess extends EventEmitter {
 
       this.logs.push({at: new Date().toISOString(), line, stream})
 
-      if (this.logs.length > 200) {
-        this.logs.splice(0, this.logs.length - 200)
+      if (this.logs.length > this.outputLines) {
+        this.logs.splice(0, this.logs.length - this.outputLines)
       }
     }
   }
@@ -224,7 +227,7 @@ export default class ManagedProcess extends EventEmitter {
       exitCode: this.exitCode,
       exitSignal: this.exitSignal,
       id: this.id,
-      logs: this.logs.slice(-20),
+      logs: this.logs.slice(-this.outputLines),
       pid: this.pid,
       state: this.state
     }

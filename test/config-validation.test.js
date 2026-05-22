@@ -55,6 +55,38 @@ test("validateConfig returns a normalized config and no issues for a valid confi
   assert.equal(config.proxy.port, 8182)
 })
 
+test("validateConfig defaults outputLines and accepts a positive override", () => {
+  const {config, issues} = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}},
+      {command: "run worker", id: "worker", outputLines: 5, policy: "companion"}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.deepEqual(issues, [])
+  assert.equal(config.processes[0].outputLines, 50)
+  assert.equal(config.processes[1].outputLines, 5)
+})
+
+test("validateConfig rejects a non-positive-integer outputLines with a fix", () => {
+  const {issues} = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", id: "web", outputLines: 0, policy: "proxied", port: {from: 18000, to: 18099}}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  const issue = issues.find((candidate) => candidate.message === "processes[0].outputLines must be a positive integer")
+
+  assert.ok(issue, `expected an outputLines issue in ${JSON.stringify(issues.map((candidate) => candidate.message))}`)
+  assert.match(issue.fix, /positive integer/)
+})
+
 test("normalizeConfig throws an aggregated error listing every issue", () => {
   assert.throws(
     () => normalizeConfig({
