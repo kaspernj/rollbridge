@@ -17,6 +17,7 @@ import YAML from "yaml"
  */
 
 const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton", "service"])
+const DEFAULT_CONFIG_FILENAMES = ["rollbridge.yml", "rollbridge.yaml", "rollbridge.json"]
 
 /**
  * Reads and parses a YAML or JSON config file without validating it.
@@ -40,6 +41,40 @@ export async function loadConfig(configPath) {
   const {absolutePath, rawConfig} = await parseConfigFile(configPath)
 
   return normalizeConfig(rawConfig, absolutePath)
+}
+
+/**
+ * Resolves the config path to use, falling back to a default lookup order when none is given.
+ * @param {string | undefined} configPath - Explicit `--config` path, if provided.
+ * @param {string} [cwd] - Directory to search for default config files.
+ * @returns {Promise<string>} The explicit path, or the first existing default config file.
+ */
+export async function resolveConfigPath(configPath, cwd = process.cwd()) {
+  if (configPath !== undefined) return configPath
+
+  for (const filename of DEFAULT_CONFIG_FILENAMES) {
+    const candidate = path.join(cwd, filename)
+
+    if (await configFileExists(candidate)) return candidate
+  }
+
+  throw new Error(`No config file found in ${cwd}. Pass --config <path> or add one of: ${DEFAULT_CONFIG_FILENAMES.join(", ")}.`)
+}
+
+/**
+ * @param {string} filePath - Candidate config file path.
+ * @returns {Promise<boolean>} True when the path exists and is a regular file.
+ */
+async function configFileExists(filePath) {
+  try {
+    const stats = await fs.stat(filePath)
+
+    return stats.isFile()
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false
+
+    throw error
+  }
 }
 
 /**

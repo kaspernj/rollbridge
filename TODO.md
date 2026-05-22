@@ -72,7 +72,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Add optional startup command timeout before health checks begin.
 - [ ] Add process output retention config instead of a fixed recent-log count.
 - [ ] Add environment variable interpolation from the daemon environment.
-- [ ] Add `--config` default lookup order, such as `rollbridge.yml`, `rollbridge.yaml`, then `rollbridge.json`.
+- [x] Add `--config` default lookup order, such as `rollbridge.yml`, `rollbridge.yaml`, then `rollbridge.json`.
 - [ ] Add shell completion generation for common shells.
 - [ ] Add npm package metadata such as repository, license, bugs, and homepage.
 - [ ] Add systemd service examples for the Rollbridge daemon.

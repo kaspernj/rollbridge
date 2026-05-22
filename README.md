@@ -76,6 +76,12 @@ Production-ready examples live in `examples/`, including
 
 ## Commands
 
+`--config` is optional for every command. When omitted, Rollbridge looks for
+`rollbridge.yml`, then `rollbridge.yaml`, then `rollbridge.json` in the current
+directory and uses the first one it finds. The examples below pass `--config`
+explicitly, but `rollbridge validate` (or any command) works with no flag when a
+default config file is present.
+
 Validate a config without starting the daemon:
 
 ```bash
