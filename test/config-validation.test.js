@@ -205,6 +205,40 @@ test("validate CLI command accepts a valid config without setting a failure exit
   }
 })
 
+test("validate --json emits a machine-readable result", async () => {
+  const validPath = await writeConfig({
+    application: "demo",
+    control: {path: "/tmp/rollbridge-json-valid.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+  const invalidPath = await writeConfig({
+    application: "demo",
+    processes: [{command: "run web", id: "web", policy: "proxied"}],
+    proxy: {port: 8182}
+  })
+
+  try {
+    const valid = JSON.parse((await captureCli(["node", "rollbridge", "validate", "--json", "-c", validPath])).output)
+
+    assert.equal(valid.valid, true)
+    assert.deepEqual(valid.issues, [])
+    assert.equal(valid.config.processes, 1)
+    assert.notEqual(process.exitCode, 1)
+
+    const invalid = JSON.parse((await captureCli(["node", "rollbridge", "validate", "--json", "-c", invalidPath])).output)
+
+    assert.equal(invalid.valid, false)
+    assert.equal(invalid.config, null)
+    assert.ok(invalid.issues.some((/** @type {{message: string}} */ issue) => /must define a port range/.test(issue.message)))
+    assert.equal(process.exitCode, 1)
+  } finally {
+    process.exitCode = 0
+    await fs.rm(path.dirname(validPath), {force: true, recursive: true})
+    await fs.rm(path.dirname(invalidPath), {force: true, recursive: true})
+  }
+})
+
 /**
  * @param {Record<string, import("../src/json.js").JsonValue>} config - Raw config object.
  * @returns {Promise<string>} Path to the written config module.

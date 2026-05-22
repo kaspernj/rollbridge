@@ -154,20 +154,33 @@ export async function runCli(argv) {
     .command("validate")
     .description("Parse the config and report all errors without starting the daemon.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--json", "Output machine-readable JSON")
     .action(async (options) => {
       let configPath
 
       try {
         configPath = await resolveConfigPath(options.config)
       } catch (error) {
-        console.error(error instanceof Error ? error.message : String(error))
+        const message = error instanceof Error ? error.message : String(error)
+
+        if (options.json) console.log(JSON.stringify({config: null, issues: [{fix: "Pass --config or add a rollbridge.js.", message}], path: null, valid: false}, null, 2))
+        else console.error(message)
         process.exitCode = 1
         return
       }
 
       const {config, issues} = await validateConfigFile(configPath)
+      const valid = issues.length === 0
 
-      if (issues.length === 0) {
+      if (options.json) {
+        const summary = valid ? {application: config.application, processes: config.processes.length, proxy: {host: config.proxy.host, port: config.proxy.port}} : null
+
+        console.log(JSON.stringify({config: summary, issues, path: configPath, valid}, null, 2))
+        if (!valid) process.exitCode = 1
+        return
+      }
+
+      if (valid) {
         const processCount = config.processes.length
 
         console.log(`${configPath} is valid: ${processCount} ${processCount === 1 ? "process" : "processes"}, proxy on ${config.proxy.host}:${config.proxy.port}.`)
@@ -188,13 +201,17 @@ export async function runCli(argv) {
     .command("doctor")
     .description("Check the environment before starting the daemon: config, control socket, and proxy port.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--json", "Output machine-readable JSON")
     .action(async (options) => {
       let configPath
 
       try {
         configPath = await resolveConfigPath(options.config)
       } catch (error) {
-        console.error(error instanceof Error ? error.message : String(error))
+        const message = error instanceof Error ? error.message : String(error)
+
+        if (options.json) console.log(JSON.stringify({checks: [{detail: message, name: "config", ok: false}], ok: false}, null, 2))
+        else console.error(message)
         process.exitCode = 1
         return
       }
@@ -210,19 +227,20 @@ export async function runCli(argv) {
         checks.push(...await runEnvironmentChecks(config))
       }
 
-      for (const check of checks) {
-        console.log(`${check.ok ? "✓" : "✗"} ${check.name}: ${check.detail}`)
-      }
-
       const failed = checks.filter((check) => !check.ok).length
 
-      if (failed > 0) {
-        console.error(`\n${failed} check${failed === 1 ? "" : "s"} failed.`)
-        process.exitCode = 1
-        return
+      if (options.json) {
+        console.log(JSON.stringify({checks, ok: failed === 0}, null, 2))
+      } else {
+        for (const check of checks) {
+          console.log(`${check.ok ? "✓" : "✗"} ${check.name}: ${check.detail}`)
+        }
+
+        if (failed === 0) console.log("\nAll checks passed.")
+        else console.error(`\n${failed} check${failed === 1 ? "" : "s"} failed.`)
       }
 
-      console.log("\nAll checks passed.")
+      if (failed > 0) process.exitCode = 1
     })
 
   program
@@ -230,6 +248,7 @@ export async function runCli(argv) {
     .description("Print recent stdout/stderr captured from managed processes.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .option("--process <id>", "Only show logs for the process with this id")
+    .option("--json", "Output machine-readable JSON")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
@@ -238,6 +257,13 @@ export async function runCli(argv) {
         path: config.control.path
       })
       const sources = collectLogSources(/** @type {import("./daemon.js").DaemonStatus} */ (response))
+
+      if (options.json) {
+        const filtered = options.process === undefined ? sources : sources.filter((source) => source.id === options.process)
+
+        console.log(JSON.stringify(filtered, null, 2))
+        return
+      }
 
       console.log(formatLogSources(sources, options.process))
     })
