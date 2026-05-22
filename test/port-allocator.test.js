@@ -33,18 +33,21 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(() => resolve(undefined)))
 }
 
-test("findAvailablePort reports reserved and occupied counts when a range is exhausted", async () => {
+test("findAvailablePort reports reserved and in-use counts when a range is exhausted", async () => {
   const {port, server} = await occupyPort()
+  // Use the occupied port as the upper bound so the range stays within valid TCP bounds.
+  const reservedPort = port - 1
+  const range = {from: reservedPort, to: port}
 
   try {
     await assert.rejects(
-      () => findAvailablePort({host, range: {from: port, to: port + 1}, usedPorts: new Set([port + 1])}),
+      () => findAvailablePort({host, range, usedPorts: new Set([reservedPort])}),
       (error) => {
         assert.ok(error instanceof Error)
-        assert.match(error.message, new RegExp(`No available ports in range ${port}-${port + 1}`))
+        assert.match(error.message, new RegExp(`No available ports in range ${reservedPort}-${port}`))
         assert.match(error.message, /2 ports on 127\.0\.0\.1/)
         assert.match(error.message, /1 reserved by this deploy/)
-        assert.match(error.message, /1 in use by other processes/)
+        assert.match(error.message, /1 already in use/)
 
         return true
       }
@@ -57,12 +60,15 @@ test("findAvailablePort reports reserved and occupied counts when a range is exh
 test("findAvailablePort skips the occupied port and records the allocated one", async () => {
   const {port, server} = await occupyPort()
   const usedPorts = /** @type {Set<number>} */ (new Set())
+  // Keep the upper bound at or below 65535 while still including the occupied port.
+  const from = Math.min(port, 65515)
+  const to = from + 20
 
   try {
-    const allocated = await findAvailablePort({host, range: {from: port, to: port + 20}, usedPorts})
+    const allocated = await findAvailablePort({host, range: {from, to}, usedPorts})
 
     assert.notEqual(allocated, port)
-    assert.ok(allocated > port && allocated <= port + 20)
+    assert.ok(allocated >= from && allocated <= to)
     assert.ok(usedPorts.has(allocated))
   } finally {
     await closeServer(server)
