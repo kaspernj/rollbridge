@@ -38,8 +38,10 @@ RestartSec=2
 KillMode=mixed
 KillSignal=SIGTERM
 
-# Allow time for releases to drain and processes to stop. Size this above
-# proxy.drainTimeoutMs plus the largest process gracefulStopMs in your config.
+# Allow time for the daemon to stop its managed processes. Size this above the
+# largest process gracefulStopMs in your config (the daemon SIGKILLs stragglers
+# after that). Note: `systemctl stop` does not drain HTTP/WebSocket connections;
+# draining happens only during `rollbridge deploy` release transitions.
 TimeoutStopSec=120
 
 [Install]

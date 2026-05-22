@@ -230,8 +230,11 @@ so its output goes to the journal (`journalctl -u rollbridge`). Key directives:
 - `KillMode=mixed` / `KillSignal=SIGTERM`: Rollbridge stops its own managed
   child process groups on `SIGTERM`, so systemd signals only the daemon and
   lets it shut down gracefully before escalating to `SIGKILL`.
-- `TimeoutStopSec`: give the daemon time to drain and stop processes; size it
-  above `proxy.drainTimeoutMs` plus the largest process `gracefulStopMs`.
+- `TimeoutStopSec`: give the daemon time to stop its managed processes; size it
+  above the largest process `gracefulStopMs` (the daemon `SIGKILL`s stragglers
+  after that). Note that `systemctl stop`/reboot stops processes but does **not**
+  drain HTTP/WebSocket connections — connection draining happens only during
+  `rollbridge deploy` release transitions.
 
 The daemon is long-lived and survives deploys. **Deploy with
 `rollbridge deploy` (or `rollbridge deploy --ensure-daemon`), not
