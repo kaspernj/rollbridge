@@ -93,8 +93,8 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Document worker lifecycle hooks and safe background-job deployment patterns after the feature lands.
 - [ ] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples.
 - [ ] Add an Nginx guide with WebSocket headers, timeouts, and common failure modes.
-- [ ] Add deploy-tool recipes that call Rollbridge CLI commands directly.
-- [ ] Add a Capistrano recipe showing shell commands only; do not add a Capistrano plugin or Rollbridge-specific Capistrano tasks.
+- [x] Add deploy-tool recipes that call Rollbridge CLI commands directly (`docs/deploy-recipes.md`).
+- [x] Add a Capistrano recipe showing shell commands only; do not add a Capistrano plugin or Rollbridge-specific Capistrano tasks (`docs/deploy-recipes.md`).
 - [ ] Add a TensorBuzz-specific runbook for current production ports, external services, deploy ordering, and rollback constraints.
 - [ ] Add troubleshooting docs for health-check failures, port conflicts, stale sockets, crash loops, and stuck draining releases.
 - [ ] Add a release checklist for maintainers using `npm run release:patch`.
