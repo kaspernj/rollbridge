@@ -60,7 +60,8 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Add machine-readable JSON output flags for all CLI commands.
 - [ ] Config validation and doctoring.
   - [x] Add `validate` to parse config and report all config errors without starting the daemon.
-  - [ ] Add `doctor` to check control socket reachability, proxy port availability, process commands, release path, and writable log/state paths.
+  - [x] Add `doctor` to check config validity, control socket reachability, proxy port availability, and control-socket directory writability.
+  - [ ] Extend `doctor` with process-command, release-path, and log/state-path checks once those are resolvable (rendered templates, persisted state).
   - [x] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and the single-proxied-process policy rule.
   - [ ] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land.
   - [x] Include example fixes in validation output.
