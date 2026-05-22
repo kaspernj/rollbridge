@@ -65,7 +65,8 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 
 ## Minor Features
 
-- [ ] Add socket permission and socket owner/group options for shared deploy users.
+- [x] Add a control-socket permission option (`control.mode`) for shared deploy users.
+- [ ] Add control-socket owner/group options for shared deploy users (needs name-to-id resolution).
 - [x] Make stale control socket diagnostics clearer when another daemon is still alive.
 - [ ] Add old-release cleanup policies by age, count, and stopped state.
 - [x] Add port allocation diagnostics when a range is exhausted.
