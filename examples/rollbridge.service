@@ -1,0 +1,46 @@
+# Example systemd unit for the long-running Rollbridge daemon.
+#
+# Install:
+#   sudo cp examples/rollbridge.service /etc/systemd/system/rollbridge.service
+#   # edit User/Group, WorkingDirectory, ExecStart path, and --config below
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rollbridge
+#
+# The daemon is long-lived and survives deploys. Deploys go through
+# `rollbridge deploy` (optionally `--ensure-daemon`), NOT `systemctl restart`.
+# Point --config at a stable, daemon-wide config file (release paths are passed
+# per deploy with `rollbridge deploy --release-path ...`).
+#
+# Find the absolute path to the installed CLI for ExecStart with:
+#   command -v rollbridge
+
+[Unit]
+Description=Rollbridge zero-downtime process supervisor
+After=network.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/srv/ticket-server
+ExecStart=/usr/local/bin/rollbridge daemon --config /etc/rollbridge/rollbridge.js
+
+# Optional: variables here are visible to the JS config (process.env) and to
+# `{{env.NAME}}` templates in process commands.
+# EnvironmentFile=/etc/rollbridge/ticket-server.env
+
+Restart=on-failure
+RestartSec=2
+
+# Rollbridge supervises its own child process groups and stops them on SIGTERM,
+# so send SIGTERM to the daemon only and let it drain/stop releases itself;
+# systemd SIGKILLs anything still alive after the timeout.
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Allow time for releases to drain and processes to stop. Size this above
+# proxy.drainTimeoutMs plus the largest process gracefulStopMs in your config.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
