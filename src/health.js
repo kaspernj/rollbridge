@@ -9,6 +9,10 @@
  * @returns {Promise<void>} Resolves when healthy.
  */
 export async function waitForHealth({health, host, port}) {
+  if (health.startDelayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, health.startDelayMs))
+  }
+
   const deadline = Date.now() + health.timeoutMs
   const url = `http://${host}:${port}${health.path}`
   let lastError = "no attempts"

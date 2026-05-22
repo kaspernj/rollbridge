@@ -117,6 +117,33 @@ test("validateConfig parses control.mode, defaults it to unset, and rejects inva
   assert.ok(invalid.issues.some((issue) => issue.message === "control.mode must be an octal file mode between 0 and 0o777"))
 })
 
+test("validateConfig defaults health.startDelayMs to 0, accepts an override, and rejects negatives", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} health - Health config under test, or undefined to omit it.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateHealth = (health) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", health, id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  const defaulted = validateHealth({path: "/ping"})
+
+  assert.deepEqual(defaulted.issues, [])
+  assert.equal(defaulted.config.processes[0].health?.startDelayMs, 0)
+
+  const custom = validateHealth({path: "/ping", startDelayMs: 2000})
+
+  assert.deepEqual(custom.issues, [])
+  assert.equal(custom.config.processes[0].health?.startDelayMs, 2000)
+
+  const negative = validateHealth({path: "/ping", startDelayMs: -1})
+
+  assert.ok(negative.issues.some((issue) => issue.message === "processes[0].health.startDelayMs must be a non-negative number"))
+})
+
 test("normalizeConfig throws an aggregated error listing every issue", () => {
   assert.throws(
     () => normalizeConfig({

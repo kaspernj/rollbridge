@@ -7,7 +7,7 @@ import {pathToFileURL} from "node:url"
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{from: number, to: number}} PortRange
- * @typedef {{path: string, timeoutMs: number, intervalMs: number}} HealthConfig
+ * @typedef {{path: string, startDelayMs: number, timeoutMs: number, intervalMs: number}} HealthConfig
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{mode?: number, path: string}} ControlConfig
@@ -291,8 +291,27 @@ function normalizeHealth(value, key, proxy, issues) {
   return {
     intervalMs: normalizeNumber(source.intervalMs, `${key}.intervalMs`, issues, {default: 250}),
     path: normalizeString(source.path, `${key}.path`, issues, {default: proxy.healthPath}),
+    startDelayMs: normalizeStartDelayMs(source.startDelayMs, `${key}.startDelayMs`, issues),
     timeoutMs: normalizeNumber(source.timeoutMs, `${key}.timeoutMs`, issues, {default: proxy.healthTimeoutMs})
   }
+}
+
+/**
+ * @param {JsonValue} value - Raw startup delay.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {number} Milliseconds to wait before the first health probe (default 0).
+ */
+function normalizeStartDelayMs(value, key, issues) {
+  const startDelayMs = normalizeNumber(value, key, issues, {default: 0})
+
+  if (startDelayMs < 0) {
+    issues.push({fix: `Set ${key} to a non-negative number of milliseconds, e.g. 0 or 2000.`, message: `${key} must be a non-negative number`})
+
+    return 0
+  }
+
+  return startDelayMs
 }
 
 /**
