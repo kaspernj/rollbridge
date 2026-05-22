@@ -47,8 +47,14 @@ export async function findAvailablePort({host, range, usedPorts}) {
     return port
   }
 
+  let reserved = 0
+  let occupied = 0
+
   for (let port = range.from; port <= range.to; port += 1) {
-    if (usedPorts.has(port)) continue
+    if (usedPorts.has(port)) {
+      reserved += 1
+      continue
+    }
 
     const availablePort = await tryPort({host, port})
 
@@ -56,7 +62,14 @@ export async function findAvailablePort({host, range, usedPorts}) {
       usedPorts.add(availablePort)
       return availablePort
     }
+
+    occupied += 1
   }
 
-  throw new Error(`No available ports in range ${range.from}-${range.to}`)
+  const total = range.to - range.from + 1
+
+  throw new Error(
+    `No available ports in range ${range.from}-${range.to} (${total} port${total === 1 ? "" : "s"} on ${host}): ` +
+    `${reserved} reserved by this deploy, ${occupied} in use by other processes. Widen the port range or free a port.`
+  )
 }

@@ -68,7 +68,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Add socket permission and socket owner/group options for shared deploy users.
 - [ ] Make stale control socket diagnostics clearer when another daemon is still alive.
 - [ ] Add old-release cleanup policies by age, count, and stopped state.
-- [ ] Add port allocation diagnostics when a range is exhausted.
+- [x] Add port allocation diagnostics when a range is exhausted.
 - [ ] Add optional startup command timeout before health checks begin.
 - [ ] Add process output retention config instead of a fixed recent-log count.
 - [ ] Add environment variable interpolation from the daemon environment.
