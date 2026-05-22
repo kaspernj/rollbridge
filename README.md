@@ -210,6 +210,38 @@ location / {
 }
 ```
 
+## Running under systemd
+
+Run the long-lived daemon as a systemd service so it starts on boot and is
+restarted if it crashes. A ready-to-edit unit lives at
+`examples/rollbridge.service`:
+
+```bash
+sudo cp examples/rollbridge.service /etc/systemd/system/rollbridge.service
+# edit User/Group, WorkingDirectory, the ExecStart path, and --config
+sudo systemctl daemon-reload
+sudo systemctl enable --now rollbridge
+sudo systemctl status rollbridge
+```
+
+The unit runs `rollbridge daemon --config <stable-config>` in the foreground,
+so its output goes to the journal (`journalctl -u rollbridge`). Key directives:
+
+- `KillMode=mixed` / `KillSignal=SIGTERM`: Rollbridge stops its own managed
+  child process groups on `SIGTERM`, so systemd signals only the daemon and
+  lets it shut down gracefully before escalating to `SIGKILL`.
+- `TimeoutStopSec`: give the daemon time to stop its managed processes; size it
+  above the largest process `gracefulStopMs` (the daemon `SIGKILL`s stragglers
+  after that). Note that `systemctl stop`/reboot stops processes but does **not**
+  drain HTTP/WebSocket connections — connection draining happens only during
+  `rollbridge deploy` release transitions.
+
+The daemon is long-lived and survives deploys. **Deploy with
+`rollbridge deploy` (or `rollbridge deploy --ensure-daemon`), not
+`systemctl restart`** — pointing `--config` at a stable, daemon-wide file while
+release paths are passed per deploy. Use `command -v rollbridge` to find the
+absolute CLI path for `ExecStart`.
+
 ## Deployment Notes
 
 Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For stable local brokers such as Velocious Beacon or `background-jobs-main`, use `service` when the process should survive deploys and restart from the latest successful release if it crashes.
