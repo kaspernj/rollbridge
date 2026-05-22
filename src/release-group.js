@@ -67,15 +67,43 @@ export default class ReleaseGroup extends EventEmitter {
         if (processConfig.policy === "proxied" && processConfig.port && processConfig.health) {
           await waitForHealth({
             health: processConfig.health,
-            host: this.config.proxy.host,
+            host: this.config.proxy.upstreamHost,
             port: this.ports[processConfig.id]
           })
         }
       }
     } catch (error) {
       this.state = "failed"
+      this.logStartupFailure(error)
       await this.stop()
       throw error
+    }
+  }
+
+  /**
+   * Logs process diagnostics before failed startup cleanup stops and removes the release processes.
+   * @param {unknown} error - Startup failure.
+   * @returns {void}
+   */
+  logStartupFailure(error) {
+    this.logger("release startup failed", {
+      error: error instanceof Error ? error.message : String(error),
+      releaseId: this.releaseId
+    })
+
+    for (const processInstance of this.processes.values()) {
+      const status = processInstance.status()
+
+      this.logger("release startup process status", {
+        command: status.command,
+        exitCode: status.exitCode ?? null,
+        exitSignal: status.exitSignal ?? null,
+        logs: status.logs,
+        pid: status.pid ?? null,
+        processId: status.id,
+        releaseId: this.releaseId,
+        state: status.state
+      })
     }
   }
 
@@ -112,7 +140,7 @@ export default class ReleaseGroup extends EventEmitter {
       }
 
       this.ports[processConfig.id] = await findAvailablePort({
-        host: this.config.proxy.host,
+        host: this.config.proxy.upstreamHost,
         range: processConfig.port,
         usedPorts
       })
@@ -186,7 +214,8 @@ export default class ReleaseGroup extends EventEmitter {
       processId: processConfig.id,
       proxy: {
         host: this.config.proxy.host,
-        port: this.config.proxy.port
+        port: this.config.proxy.port,
+        upstreamHost: this.config.proxy.upstreamHost
       },
       releaseId: this.releaseId,
       releasePath: this.releasePath,
@@ -211,7 +240,7 @@ export default class ReleaseGroup extends EventEmitter {
 
     return {
       process: processInstance,
-      target: `http://${this.config.proxy.host}:${port}`
+      target: `http://${this.config.proxy.upstreamHost}:${port}`
     }
   }
 

@@ -11,7 +11,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{mode?: number, path: string}} ControlConfig
- * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number}} ProxyConfig
+ * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
  * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
@@ -141,14 +141,27 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
  * @returns {ProxyConfig} Normalized proxy config.
  */
 function normalizeProxy(source, issues) {
+  const host = normalizeString(source.host, "proxy.host", issues, {default: "127.0.0.1"})
+
   return {
     drainTimeoutMs: normalizeNumber(source.drainTimeoutMs, "proxy.drainTimeoutMs", issues, {default: 60000}),
     forceStopTimeoutMs: normalizeNumber(source.forceStopTimeoutMs, "proxy.forceStopTimeoutMs", issues, {default: 10000}),
     healthPath: normalizeString(source.healthPath, "proxy.healthPath", issues, {default: "/ping"}),
     healthTimeoutMs: normalizeNumber(source.healthTimeoutMs, "proxy.healthTimeoutMs", issues, {default: 30000}),
-    host: normalizeString(source.host, "proxy.host", issues, {default: "127.0.0.1"}),
-    port: normalizeNumber(source.port, "proxy.port", issues, {default: 8182})
+    host,
+    port: normalizeNumber(source.port, "proxy.port", issues, {default: 8182}),
+    upstreamHost: normalizeString(source.upstreamHost, "proxy.upstreamHost", issues, {default: defaultUpstreamHost(host)})
   }
+}
+
+/**
+ * @param {string} host - Public proxy bind host.
+ * @returns {string} Default loopback upstream host for wildcard binds.
+ */
+function defaultUpstreamHost(host) {
+  if (host === "0.0.0.0" || host === "::") return "127.0.0.1"
+
+  return host
 }
 
 /**

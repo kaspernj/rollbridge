@@ -6,7 +6,8 @@ Start with these three commands — they diagnose most problems without guessing
 - `rollbridge doctor` — control socket reachability, socket-directory writability, and proxy-port availability before the daemon starts.
 - `rollbridge status` / `rollbridge logs` — live release/process state, restart counts, exit codes, connection counts, and recent process output.
 
-All of these support `--json` for scripting.
+For scripting, `validate`, `doctor`, and `logs` accept a `--json` flag, and
+`status` already prints JSON — so every command's output is easy to parse.
 
 ## Health-check failures
 

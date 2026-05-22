@@ -10,7 +10,7 @@ import ReleaseGroup from "./release-group.js"
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
- * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, proxy: {host: string, port: number | undefined}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  */
 
 export default class RollbridgeDaemon {
@@ -469,7 +469,8 @@ export default class RollbridgeDaemon {
       control: {...this.config.control},
       proxy: {
         host: this.config.proxy.host,
-        port: this.proxyPort ?? this.config.proxy.port
+        port: this.proxyPort ?? this.config.proxy.port,
+        upstreamHost: this.config.proxy.upstreamHost
       },
       releases: [...this.releases.values()].map((release) => release.status()),
       services: [...this.services.entries()].map(([id, processInstance]) => ({
