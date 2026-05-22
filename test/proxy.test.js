@@ -106,7 +106,7 @@ test("proxy returns 502 while the active release web process is down", async () 
 
 test("proxy recovers once the crashed web process restarts", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-proxy-"))
-  const daemon = new RollbridgeDaemon({config: buildConfig(root, 100), logger: () => {}})
+  const daemon = new RollbridgeDaemon({config: buildConfig(root, 300), logger: () => {}})
 
   await daemon.start()
 
@@ -116,7 +116,9 @@ test("proxy recovers once the crashed web process restarts", async () => {
 
     process.kill(-webPid(daemon, "v1"), "SIGKILL")
 
-    // After the crash the process restarts on the same port and the proxy serves traffic again.
+    // First confirm the crash actually takes the proxy down (502), so passing requires
+    // observing the outage, then confirm the restart brings the proxy back to 200.
+    await waitFor(async () => (await proxyFetch(daemon, "/release")).status === 502)
     await waitFor(async () => (await proxyFetch(daemon, "/release")).status === 200)
     assert.equal((await proxyFetch(daemon, "/release")).status, 200)
   } finally {
