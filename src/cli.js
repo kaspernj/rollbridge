@@ -7,6 +7,7 @@ import {spawn} from "node:child_process"
 import {Command} from "commander"
 import RollbridgeDaemon from "./daemon.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
+import {runEnvironmentChecks} from "./doctor.js"
 import {sendControlCommand} from "./control-client.js"
 
 const DEFAULT_DAEMON_START_TIMEOUT_MS = 10000
@@ -181,6 +182,47 @@ export async function runCli(argv) {
       })
 
       process.exitCode = 1
+    })
+
+  program
+    .command("doctor")
+    .description("Check the environment before starting the daemon: config, control socket, and proxy port.")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .action(async (options) => {
+      let configPath
+
+      try {
+        configPath = await resolveConfigPath(options.config)
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error))
+        process.exitCode = 1
+        return
+      }
+
+      const {config, issues} = await validateConfigFile(configPath)
+      /** @type {import("./doctor.js").DoctorCheck[]} */
+      const checks = []
+
+      if (issues.length > 0) {
+        checks.push({detail: `${issues.length} ${issues.length === 1 ? "issue" : "issues"} — run "rollbridge validate" for details`, name: "config", ok: false})
+      } else {
+        checks.push({detail: `valid: ${config.processes.length} ${config.processes.length === 1 ? "process" : "processes"}, proxy on ${config.proxy.host}:${config.proxy.port}`, name: "config", ok: true})
+        checks.push(...await runEnvironmentChecks(config))
+      }
+
+      for (const check of checks) {
+        console.log(`${check.ok ? "✓" : "✗"} ${check.name}: ${check.detail}`)
+      }
+
+      const failed = checks.filter((check) => !check.ok).length
+
+      if (failed > 0) {
+        console.error(`\n${failed} check${failed === 1 ? "" : "s"} failed.`)
+        process.exitCode = 1
+        return
+      }
+
+      console.log("\nAll checks passed.")
     })
 
   program

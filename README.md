@@ -252,6 +252,30 @@ Found 2 configuration issues in rollbridge.js:
    Fix: Give each process a unique id; "web" is used more than once.
 ```
 
+Check the environment before starting the daemon:
+
+```bash
+rollbridge doctor --config rollbridge.js
+```
+
+`doctor` validates the config and then probes the runtime environment, exiting
+non-zero if any check fails (so deploy tooling can gate on it):
+
+```text
+✓ config: valid: 4 processes, proxy on 127.0.0.1:8182
+✓ control socket: no daemon running; /tmp/rollbridge-ticket-server.sock is free to bind
+✓ control socket directory: /tmp is writable
+✓ proxy port: 127.0.0.1:8182 is available
+
+All checks passed.
+```
+
+A free control socket, a writable socket directory, and a bindable proxy port
+pass. Because `rollbridge daemon` cannot bind a socket or port that is already
+taken, doctor fails the relevant check when a Rollbridge daemon (or any other
+process) is already listening on the control socket or holding the proxy port —
+so a green `doctor` means a fresh daemon can actually start.
+
 Start the daemon:
 
 ```bash

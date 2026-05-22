@@ -512,7 +512,7 @@ function controlSocketBusyMessage(socketPath, inspection) {
  * @param {number} [timeoutMs] - How long to wait for a status response before treating the socket as busy.
  * @returns {Promise<ControlSocketInspection>} Whether the socket is live and, when it is Rollbridge, its identity.
  */
-async function inspectControlSocket(socketPath, timeoutMs = 1000) {
+export async function inspectControlSocket(socketPath, timeoutMs = 1000) {
   return await new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath)
     let buffer = ""
