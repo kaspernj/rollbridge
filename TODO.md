@@ -86,7 +86,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 
 ## Documentation TODO
 
-- [ ] Write a full config reference covering every field, default, and template variable.
+- [x] Write a full config reference covering every field, default, and template variable (`docs/config.md`).
 - [x] Write a CLI reference for `daemon`, `ensure-daemon`, `deploy`, `status`, `stop`, `shutdown`, and future commands (`docs/cli.md`).
 - [x] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
 - [ ] Document memory checks and auto-restart behavior after the feature lands.
