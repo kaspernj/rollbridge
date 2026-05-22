@@ -210,7 +210,7 @@ function normalizeSocketMode(value, key, issues) {
     if (Number.isInteger(value) && value >= 0 && value <= 0o777) return value
   } else if (typeof value === "string") {
     const cleaned = value.startsWith("0o") ? value.slice(2) : value
-    const mode = /^[0-7]{3,4}$/.test(cleaned) ? parseInt(cleaned, 8) : Number.NaN
+    const mode = /^[0-7]{1,4}$/.test(cleaned) ? parseInt(cleaned, 8) : Number.NaN
 
     if (Number.isInteger(mode) && mode >= 0 && mode <= 0o777) return mode
   }

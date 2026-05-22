@@ -104,6 +104,12 @@ test("validateConfig parses control.mode, defaults it to unset, and rejects inva
   assert.deepEqual(parsed.issues, [])
   assert.equal(parsed.config.control.mode, 0o660)
 
+  // Minimal octal strings are accepted, matching the numeric boundary (e.g. 0).
+  const minimal = validateControl({mode: "0", path: "/tmp/demo.sock"})
+
+  assert.deepEqual(minimal.issues, [])
+  assert.equal(minimal.config.control.mode, 0)
+
   assert.equal(validateControl({path: "/tmp/demo.sock"}).config.control.mode, undefined)
 
   const invalid = validateControl({mode: "abc", path: "/tmp/demo.sock"})
