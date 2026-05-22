@@ -26,6 +26,19 @@ test("releasesToPrune keeps the most recent stopped releases and never active or
   assert.deepEqual([...remove].sort(), ["v1", "v2"])
 })
 
+test("releasesToPrune keeps the later-deployed release when stoppedAt ties", () => {
+  const sameTime = "2026-05-22T00:00:05.000Z"
+  // Deploy order (oldest first): v1 then v2, both stopped in the same millisecond.
+  const releases = [
+    {releaseId: "v1", state: "stopped", stoppedAt: sameTime},
+    {releaseId: "v2", state: "stopped", stoppedAt: sameTime}
+  ]
+
+  const remove = releasesToPrune(releases, {keep: 1, maxAgeMs: 0}, Date.parse("2026-05-22T00:00:10.000Z"))
+
+  assert.deepEqual(remove, ["v1"])
+})
+
 test("releasesToPrune prunes stopped releases older than maxAgeMs", () => {
   const now = Date.parse("2026-05-22T00:01:00.000Z")
   const releases = [

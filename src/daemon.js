@@ -514,7 +514,7 @@ function requiredString(value, key) {
 
 /**
  * Selects stopped releases to prune by the retention policy, keeping the most recent.
- * @param {PrunableRelease[]} releases - Status of all tracked releases.
+ * @param {PrunableRelease[]} releases - Status of all tracked releases, in deploy order (oldest first).
  * @param {import("./config.js").ReleaseRetentionConfig} policy - Retention policy.
  * @param {number} now - Current epoch milliseconds.
  * @returns {string[]} Release ids to remove.
@@ -522,8 +522,9 @@ function requiredString(value, key) {
 export function releasesToPrune(releases, policy, now) {
   const stopped = releases
     .filter((release) => release.state === "stopped")
-    .map((release) => ({releaseId: release.releaseId, stoppedAtMs: release.stoppedAt ? Date.parse(release.stoppedAt) : 0}))
-    .sort((first, second) => second.stoppedAtMs - first.stoppedAtMs)
+    .map((release, index) => ({deployOrder: index, releaseId: release.releaseId, stoppedAtMs: release.stoppedAt ? Date.parse(release.stoppedAt) : 0}))
+    // Most recent first; ties (same stoppedAt millisecond) prefer the later-deployed release.
+    .sort((first, second) => second.stoppedAtMs - first.stoppedAtMs || second.deployOrder - first.deployOrder)
 
   /** @type {string[]} */
   const remove = []
