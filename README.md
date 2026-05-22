@@ -132,6 +132,10 @@ fails the process start with a clear error, so typos surface immediately.
 Production-ready examples live in `examples/`, including
 `examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment.
 
+See [`docs/config.md`](docs/config.md) for the full config reference — every
+field, its default, validation rules, template variables, and the environment
+variables Rollbridge injects.
+
 ## Process Policies
 
 Every process declares a `policy` that controls its lifecycle. Pick one per
