@@ -235,6 +235,9 @@ For machine-readable output, `deploy`, `status`, `stop`, `shutdown`, and
 a `--json` flag that switches their output to JSON (with the same exit codes),
 so deploy tooling can parse results.
 
+See [`docs/cli.md`](docs/cli.md) for the full per-command reference (every
+option, default, output shape, and exit code).
+
 Validate a config without starting the daemon:
 
 ```bash
