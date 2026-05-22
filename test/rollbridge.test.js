@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict"
 import fs from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -146,6 +147,69 @@ test("control socket accepts deploy and status commands", async () => {
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("starting a second daemon on a live control socket reports the running daemon", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const second = new RollbridgeDaemon({config: fixture.config, logger: () => {}})
+
+    await assert.rejects(
+      () => second.prepareControlSocketPath(),
+      (error) => {
+        assert.ok(error instanceof Error)
+        assert.match(error.message, /A Rollbridge daemon for application "rollbridge-test" is already running/)
+        assert.match(error.message, /active release: v1/)
+        assert.match(error.message, /rollbridge shutdown/)
+
+        return true
+      }
+    )
+
+    // The original daemon keeps its socket and still answers control commands.
+    const status = await sendControlCommand({command: {command: "status"}, path: fixture.config.control.path})
+    assert.equal(status.application, "rollbridge-test")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("a control socket held by a non-Rollbridge process reports a generic conflict", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
+  const socketPath = path.join(root, "busy.sock")
+  const connections = /** @type {Set<import("node:net").Socket>} */ (new Set())
+  const stranger = net.createServer((socket) => {
+    // Accept connections but never answer, so the probe falls through to its timeout.
+    connections.add(socket)
+    socket.on("error", () => {})
+    socket.on("close", () => connections.delete(socket))
+  })
+
+  await new Promise((resolve) => stranger.listen(socketPath, () => resolve(undefined)))
+
+  const config = normalizeConfig({
+    application: "rollbridge-test",
+    control: {path: socketPath},
+    processes: [{command: "true", id: "web", policy: "proxied", port: {from: 0, to: 0}}],
+    proxy: {host: "127.0.0.1", port: 0}
+  })
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+
+  try {
+    await assert.rejects(
+      () => daemon.prepareControlSocketPath(),
+      /The control socket .* is already in use by another process/
+    )
+  } finally {
+    for (const socket of connections) socket.destroy()
+    await new Promise((resolve) => stranger.close(() => resolve(undefined)))
+    await fs.rm(root, {force: true, recursive: true})
   }
 })
 
