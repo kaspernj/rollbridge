@@ -55,7 +55,8 @@ export default {
       id: "background-jobs-worker",
       policy: "companion",
       cwd: "{{releasePath}}",
-      command: "npx velocious background-jobs-worker"
+      command: "npx velocious background-jobs-worker",
+      outputLines: 200
     },
     {
       id: "background-jobs-main",
@@ -74,6 +75,10 @@ export default {
   ]
 }
 ```
+
+Each process retains its most recent stdout/stderr lines and reports them in
+`status`. Set `outputLines` (a positive integer, default 50) per process to keep
+more or fewer lines for chatty or quiet processes.
 
 A function export receives no arguments and lets you build the config at load
 time:
