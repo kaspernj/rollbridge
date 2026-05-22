@@ -144,6 +144,35 @@ test("validateConfig defaults health.startDelayMs to 0, accepts an override, and
   assert.ok(negative.issues.some((issue) => issue.message === "processes[0].health.startDelayMs must be a non-negative number"))
 })
 
+test("validateConfig defaults releaseRetention, accepts overrides, and rejects bad values", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} releaseRetention - Retention config under test, or undefined.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateRetention = (releaseRetention) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182},
+    releaseRetention
+  })
+
+  const defaulted = validateRetention(undefined)
+
+  assert.deepEqual(defaulted.issues, [])
+  assert.deepEqual(defaulted.config.releaseRetention, {keep: 10, maxAgeMs: 0})
+
+  const custom = validateRetention({keep: 3, maxAgeMs: 60000})
+
+  assert.deepEqual(custom.issues, [])
+  assert.deepEqual(custom.config.releaseRetention, {keep: 3, maxAgeMs: 60000})
+
+  const invalid = validateRetention({keep: -1, maxAgeMs: -5})
+
+  assert.ok(invalid.issues.some((issue) => issue.message === "releaseRetention.keep must be a non-negative integer"))
+  assert.ok(invalid.issues.some((issue) => issue.message === "releaseRetention.maxAgeMs must be a non-negative number"))
+})
+
 test("normalizeConfig throws an aggregated error listing every issue", () => {
   assert.throws(
     () => normalizeConfig({
