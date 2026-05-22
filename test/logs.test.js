@@ -81,6 +81,16 @@ test("logs CLI prints captured output per managed process", async () => {
     await runCli(["node", "rollbridge", "logs", "-c", path.join(root, "rollbridge.js")])
 
     assert.match(lines.join("\n"), /== web \[release v1 \(active\)\] ==/)
+
+    lines.length = 0
+    await runCli(["node", "rollbridge", "logs", "--json", "-c", path.join(root, "rollbridge.js")])
+
+    const parsed = JSON.parse(lines.join("\n"))
+    const web = parsed.find((/** @type {{id: string, logs: import("../src/managed-process.js").ManagedProcessLog[], source: string}} */ entry) => entry.id === "web")
+
+    assert.ok(web, "expected a web entry in the JSON output")
+    assert.match(web.source, /release v1 \(active\)/)
+    assert.ok(Array.isArray(web.logs))
   } finally {
     console.log = originalLog
     await daemon.shutdown()

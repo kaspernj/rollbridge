@@ -57,7 +57,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Add a `logs` CLI command (recent per-process output from status).
   - [ ] Add an `events` CLI command (after structured event history lands).
   - [ ] Add optional file logging with rotation guidance.
-  - [ ] Add machine-readable JSON output flags for all CLI commands.
+  - [x] Add machine-readable JSON output for all CLI commands (data commands print JSON; `validate`/`doctor`/`logs` take `--json`).
 - [ ] Config validation and doctoring.
   - [x] Add `validate` to parse config and report all config errors without starting the daemon.
   - [x] Add `doctor` to check config validity, control socket reachability, proxy port availability, and control-socket directory writability.

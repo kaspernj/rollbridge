@@ -192,3 +192,37 @@ test("doctor CLI fails and exits non-zero for an invalid config", async () => {
     await fs.rm(root, {force: true, recursive: true})
   }
 })
+
+test("doctor --json emits structured checks", async () => {
+  const okRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const okConfig = {
+    application: "doctor-json-test",
+    control: {path: path.join(okRoot, "rollbridge.sock")},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: await freePort()}
+  }
+
+  await fs.writeFile(path.join(okRoot, "rollbridge.js"), `module.exports = ${JSON.stringify(okConfig)}\n`)
+
+  const badRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+
+  await fs.writeFile(path.join(badRoot, "rollbridge.js"), "module.exports = {application: \"x\", proxy: {port: 8182}, processes: []}\n")
+
+  try {
+    const passing = JSON.parse(await captureCli(["node", "rollbridge", "doctor", "--json", "-c", path.join(okRoot, "rollbridge.js")]))
+
+    assert.equal(passing.ok, true)
+    assert.ok(passing.checks.some((/** @type {{name: string, ok: boolean}} */ check) => check.name === "proxy port" && check.ok === true))
+    assert.notEqual(process.exitCode, 1)
+
+    const failing = JSON.parse(await captureCli(["node", "rollbridge", "doctor", "--json", "-c", path.join(badRoot, "rollbridge.js")]))
+
+    assert.equal(failing.ok, false)
+    assert.ok(failing.checks.some((/** @type {{name: string, ok: boolean}} */ check) => check.name === "config" && check.ok === false))
+    assert.equal(process.exitCode, 1)
+  } finally {
+    process.exitCode = 0
+    await fs.rm(okRoot, {force: true, recursive: true})
+    await fs.rm(badRoot, {force: true, recursive: true})
+  }
+})

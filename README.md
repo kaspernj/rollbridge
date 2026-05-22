@@ -230,6 +230,11 @@ active and any service started during this deploy is rolled back.
 explicitly, but `rollbridge validate` (or any command) works with no flag when a
 `rollbridge.js` is present.
 
+For machine-readable output, `deploy`, `status`, `stop`, `shutdown`, and
+`ensure-daemon` already print JSON, and `validate`, `doctor`, and `logs` accept
+a `--json` flag that switches their output to JSON (with the same exit codes),
+so deploy tooling can parse results.
+
 Validate a config without starting the daemon:
 
 ```bash
