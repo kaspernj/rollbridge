@@ -270,10 +270,11 @@ non-zero if any check fails (so deploy tooling can gate on it):
 All checks passed.
 ```
 
-It reports whether a Rollbridge daemon is already running on the control socket
-(and recognises when another process holds it), whether the control socket's
-directory is writable, and whether the proxy port can be bound (or is already
-held by the running daemon).
+A free control socket, a writable socket directory, and a bindable proxy port
+pass. Because `rollbridge daemon` cannot bind a socket or port that is already
+taken, doctor fails the relevant check when a Rollbridge daemon (or any other
+process) is already listening on the control socket or holding the proxy port —
+so a green `doctor` means a fresh daemon can actually start.
 
 Start the daemon:
 

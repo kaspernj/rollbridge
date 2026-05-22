@@ -110,19 +110,21 @@ test("runEnvironmentChecks reports a missing control socket directory", async ()
   assert.match(directoryCheck.detail, /missing or not writable/)
 })
 
-test("runEnvironmentChecks recognises a running Rollbridge daemon", async () => {
+test("runEnvironmentChecks fails when a Rollbridge daemon already holds the socket and port", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
-  const config = buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: 0})
+  const config = buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort()})
   const daemon = new RollbridgeDaemon({config, logger: () => {}})
 
   await daemon.start()
 
   try {
     const checks = await runEnvironmentChecks(config)
+    const socketCheck = checkNamed(checks, "control socket")
 
-    assert.equal(checkNamed(checks, "control socket").ok, true)
-    assert.match(checkNamed(checks, "control socket").detail, /a Rollbridge daemon for "doctor-test" is already running/)
-    assert.match(checkNamed(checks, "proxy port").detail, /held by the running daemon/)
+    // A daemon already running means `rollbridge daemon` would fail to bind, so doctor must fail too.
+    assert.equal(socketCheck.ok, false)
+    assert.match(socketCheck.detail, /a Rollbridge daemon for "doctor-test" is already running/)
+    assert.equal(checkNamed(checks, "proxy port").ok, false)
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})

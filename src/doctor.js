@@ -23,7 +23,7 @@ export async function runEnvironmentChecks(config) {
 
   checks.push(controlSocketCheck(config, socketInspection))
   checks.push(await controlSocketDirectoryCheck(config))
-  checks.push(await proxyPortCheck(config, socketInspection))
+  checks.push(await proxyPortCheck(config))
 
   return checks
 }
@@ -57,10 +57,10 @@ function controlSocketCheck(config, inspection) {
   }
 
   if (inspection.application === undefined) {
-    return {detail: `another process is already listening on ${socketPath}`, name: "control socket", ok: false}
+    return {detail: `another process is already listening on ${socketPath}; the daemon would fail to bind it`, name: "control socket", ok: false}
   }
 
-  return {detail: `a Rollbridge daemon for "${inspection.application}" is already running on ${socketPath}`, name: "control socket", ok: true}
+  return {detail: `a Rollbridge daemon for "${inspection.application}" is already running on ${socketPath}; stop it before starting another`, name: "control socket", ok: false}
 }
 
 /**
@@ -71,7 +71,8 @@ async function controlSocketDirectoryCheck(config) {
   const directory = path.dirname(path.resolve(config.control.path))
 
   try {
-    await fs.access(directory, fsConstants.W_OK)
+    // Creating a Unix socket needs both write and search (execute) permission on the directory.
+    await fs.access(directory, fsConstants.W_OK | fsConstants.X_OK)
 
     return {detail: `${directory} is writable`, name: "control socket directory", ok: true}
   } catch {
@@ -81,16 +82,10 @@ async function controlSocketDirectoryCheck(config) {
 
 /**
  * @param {import("./config.js").RollbridgeConfig} config - Normalized config.
- * @param {{alive: boolean, application?: string} | {error: string}} inspection - Control socket probe result.
- * @returns {Promise<DoctorCheck>} Whether the proxy port is available.
+ * @returns {Promise<DoctorCheck>} Whether the proxy port can be bound.
  */
-async function proxyPortCheck(config, inspection) {
+async function proxyPortCheck(config) {
   const address = `${config.proxy.host}:${config.proxy.port}`
-
-  if (!("error" in inspection) && inspection.alive && inspection.application !== undefined) {
-    return {detail: `${address} is held by the running daemon`, name: "proxy port", ok: true}
-  }
-
   const bind = await canBindPort(config.proxy.host, config.proxy.port)
 
   if (bind.ok) {
