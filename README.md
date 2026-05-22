@@ -406,7 +406,7 @@ absolute CLI path for `ExecStart`.
 
 Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For stable local brokers such as Velocious Beacon or `background-jobs-main`, use `service` when the process should survive deploys and restart from the latest successful release if it crashes.
 
-See [`docs/deploy-recipes.md`](docs/deploy-recipes.md) for ready-to-use shell, CI, and Capistrano recipes that drive Rollbridge through its CLI.
+See [`docs/deploy-recipes.md`](docs/deploy-recipes.md) for ready-to-use shell, CI, and Capistrano recipes that drive Rollbridge through its CLI, and [`docs/troubleshooting.md`](docs/troubleshooting.md) for diagnosing health-check failures, port conflicts, stale sockets, crash loops, and stuck draining releases.
 
 ## Releasing
 
