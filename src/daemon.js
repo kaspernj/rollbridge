@@ -286,9 +286,7 @@ export default class RollbridgeDaemon {
     await this.replaceSingletons(release)
 
     if (previousRelease) {
-      previousRelease.drainAndStop(this.config.proxy.drainTimeoutMs).catch((error) => {
-        this.logger("release drain failed", {error: error instanceof Error ? error.message : String(error), releaseId: previousRelease.releaseId})
-      })
+      void this.drainAndPrune(previousRelease)
     }
 
     return {
@@ -407,6 +405,31 @@ export default class RollbridgeDaemon {
     if (release === this.activeRelease) this.activeRelease = undefined
 
     await release.stop()
+    this.pruneStoppedReleases()
+  }
+
+  /**
+   * Drains and stops a retired release in the background, then prunes stopped releases.
+   * @param {ReleaseGroup} release - Release to drain and stop.
+   * @returns {Promise<void>} Resolves once drained, stopped, and pruned.
+   */
+  async drainAndPrune(release) {
+    try {
+      await release.drainAndStop(this.config.proxy.drainTimeoutMs)
+    } catch (error) {
+      this.logger("release drain failed", {error: error instanceof Error ? error.message : String(error), releaseId: release.releaseId})
+    } finally {
+      this.pruneStoppedReleases()
+    }
+  }
+
+  /** @returns {void} Removes stopped releases beyond the retention policy. */
+  pruneStoppedReleases() {
+    const statuses = [...this.releases.values()].map((release) => release.status())
+
+    for (const releaseId of releasesToPrune(statuses, this.config.releaseRetention, Date.now())) {
+      this.releases.delete(releaseId)
+    }
   }
 
   /** @returns {Promise<void>} Stops proxy, control socket, and child processes. */
@@ -483,6 +506,37 @@ function requiredString(value, key) {
   }
 
   return value
+}
+
+/**
+ * @typedef {{releaseId: string, state: string, stoppedAt: string | undefined}} PrunableRelease
+ */
+
+/**
+ * Selects stopped releases to prune by the retention policy, keeping the most recent.
+ * @param {PrunableRelease[]} releases - Status of all tracked releases, in deploy order (oldest first).
+ * @param {import("./config.js").ReleaseRetentionConfig} policy - Retention policy.
+ * @param {number} now - Current epoch milliseconds.
+ * @returns {string[]} Release ids to remove.
+ */
+export function releasesToPrune(releases, policy, now) {
+  const stopped = releases
+    .filter((release) => release.state === "stopped")
+    .map((release, index) => ({deployOrder: index, releaseId: release.releaseId, stoppedAtMs: release.stoppedAt ? Date.parse(release.stoppedAt) : 0}))
+    // Most recent first; ties (same stoppedAt millisecond) prefer the later-deployed release.
+    .sort((first, second) => second.stoppedAtMs - first.stoppedAtMs || second.deployOrder - first.deployOrder)
+
+  /** @type {string[]} */
+  const remove = []
+
+  stopped.forEach((release, index) => {
+    const beyondKeep = index >= policy.keep
+    const tooOld = policy.maxAgeMs > 0 && release.stoppedAtMs > 0 && now - release.stoppedAtMs > policy.maxAgeMs
+
+    if (beyondKeep || tooOld) remove.push(release.releaseId)
+  })
+
+  return remove
 }
 
 /**

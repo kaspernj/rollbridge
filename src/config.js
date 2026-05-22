@@ -12,7 +12,8 @@ import {pathToFileURL} from "node:url"
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{mode?: number, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number}} ProxyConfig
- * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig}} RollbridgeConfig
+ * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
+ * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
  */
 
@@ -127,10 +128,11 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
     path: normalizeString(controlSource.path, "control.path", issues, {default: `/tmp/rollbridge-${application}.sock`})
   }
   const processes = processesSource.map((processSource, index) => normalizeProcess(processSource, index, proxy, issues))
+  const releaseRetention = normalizeReleaseRetention(objectAt(source.releaseRetention, "releaseRetention", issues, {}), issues)
 
   validateProcessSet(processes, issues)
 
-  return {config: {application, control, processes, proxy}, issues}
+  return {config: {application, control, processes, proxy, releaseRetention}, issues}
 }
 
 /**
@@ -195,6 +197,39 @@ function normalizeOutputLines(value, key, issues) {
   }
 
   return outputLines
+}
+
+/**
+ * @param {Record<string, JsonValue>} source - Raw release retention config.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {ReleaseRetentionConfig} Normalized release retention policy.
+ */
+function normalizeReleaseRetention(source, issues) {
+  const keep = normalizeNumber(source.keep, "releaseRetention.keep", issues, {default: 10})
+  const maxAgeMs = normalizeNumber(source.maxAgeMs, "releaseRetention.maxAgeMs", issues, {default: 0})
+
+  return {
+    keep: nonNegativeOrDefault(keep, "releaseRetention.keep", issues, 10, true),
+    maxAgeMs: nonNegativeOrDefault(maxAgeMs, "releaseRetention.maxAgeMs", issues, 0, false)
+  }
+}
+
+/**
+ * @param {number} value - Already type-normalized number.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @param {number} fallback - Value to use when invalid.
+ * @param {boolean} requireInteger - Whether the value must be an integer.
+ * @returns {number} The value when non-negative (and integer when required), else the fallback.
+ */
+function nonNegativeOrDefault(value, key, issues, fallback, requireInteger) {
+  if (value < 0 || (requireInteger && !Number.isInteger(value))) {
+    issues.push({fix: `Set ${key} to a non-negative ${requireInteger ? "integer" : "number"}, e.g. ${fallback}.`, message: `${key} must be a non-negative ${requireInteger ? "integer" : "number"}`})
+
+    return fallback
+  }
+
+  return value
 }
 
 /**

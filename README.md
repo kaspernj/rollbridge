@@ -90,6 +90,17 @@ after the process starts before the first health probe — like a readiness
 probe's initial delay, useful for apps with a known boot time. The delay runs
 before the `health.timeoutMs` window begins.
 
+Set `releaseRetention` to bound how many stopped (drained) releases the daemon
+keeps in memory and reports in `status`. `keep` (default `10`) retains the most
+recent stopped releases; `maxAgeMs` (default `0`, disabled) also prunes stopped
+releases older than that many milliseconds. The active and draining releases are
+never pruned. This is Rollbridge's own release records — your deploy tool still
+owns cleaning up on-disk release directories.
+
+```js
+releaseRetention: {keep: 5, maxAgeMs: 86400000}
+```
+
 A function export receives no arguments and lets you build the config at load
 time:
 
