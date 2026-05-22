@@ -55,6 +55,21 @@ test("validateConfig returns a normalized config and no issues for a valid confi
   assert.equal(config.proxy.port, 8182)
 })
 
+test("validateConfig defaults wildcard proxy upstreams to loopback", () => {
+  const {config, issues} = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", health: {path: "/ping"}, id: "web", policy: "proxied", port: {from: 18000, to: 18099}}
+    ],
+    proxy: {host: "0.0.0.0", port: 8182}
+  })
+
+  assert.deepEqual(issues, [])
+  assert.equal(config.proxy.host, "0.0.0.0")
+  assert.equal(config.proxy.upstreamHost, "127.0.0.1")
+})
+
 test("validateConfig defaults outputLines and accepts a positive override", () => {
   const {config, issues} = validateConfig({
     application: "demo",

@@ -74,7 +74,7 @@ export default class ReleaseGroup extends EventEmitter {
       }
     } catch (error) {
       this.state = "failed"
-      this.logStartupFailure(error)
+      this.logStartupFailure(error instanceof Error ? error : String(error))
       await this.stop()
       throw error
     }
@@ -82,12 +82,12 @@ export default class ReleaseGroup extends EventEmitter {
 
   /**
    * Logs process diagnostics before failed startup cleanup stops and removes the release processes.
-   * @param {unknown} error - Startup failure.
+   * @param {Error | string} error - Startup failure.
    * @returns {void}
    */
   logStartupFailure(error) {
     this.logger("release startup failed", {
-      error: error instanceof Error ? error.message : String(error),
+      error: error instanceof Error ? error.message : error,
       releaseId: this.releaseId
     })
 
