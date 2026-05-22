@@ -85,6 +85,11 @@ chmod the control socket after it binds. This restricts which users can send
 control commands — useful when several deploy users share a group. When unset,
 the socket keeps the default permissions from the daemon's umask.
 
+Set the proxied process's `health.startDelayMs` (default `0`) to wait that long
+after the process starts before the first health probe — like a readiness
+probe's initial delay, useful for apps with a known boot time. The delay runs
+before the `health.timeoutMs` window begins.
+
 A function export receives no arguments and lets you build the config at load
 time:
 
