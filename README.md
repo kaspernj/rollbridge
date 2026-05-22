@@ -80,6 +80,11 @@ Each process retains its most recent stdout/stderr lines and reports them in
 `status`. Set `outputLines` (a positive integer, default 50) per process to keep
 more or fewer lines for chatty or quiet processes.
 
+Set `control.mode` to an octal permission string (for example `"660"`) to
+chmod the control socket after it binds. This restricts which users can send
+control commands — useful when several deploy users share a group. When unset,
+the socket keeps the default permissions from the daemon's umask.
+
 A function export receives no arguments and lets you build the config at load
 time:
 

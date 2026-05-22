@@ -87,6 +87,36 @@ test("validateConfig rejects a non-positive-integer outputLines with a fix", () 
   assert.match(issue.fix, /positive integer/)
 })
 
+test("validateConfig parses control.mode, defaults it to unset, and rejects invalid modes", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} control - Control config under test.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateControl = (control) => validateConfig({
+    application: "demo",
+    control,
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  const parsed = validateControl({mode: "660", path: "/tmp/demo.sock"})
+
+  assert.deepEqual(parsed.issues, [])
+  assert.equal(parsed.config.control.mode, 0o660)
+
+  // Minimal octal strings are accepted, matching the numeric boundary (e.g. 0).
+  const minimal = validateControl({mode: "0", path: "/tmp/demo.sock"})
+
+  assert.deepEqual(minimal.issues, [])
+  assert.equal(minimal.config.control.mode, 0)
+
+  assert.equal(validateControl({path: "/tmp/demo.sock"}).config.control.mode, undefined)
+
+  const invalid = validateControl({mode: "abc", path: "/tmp/demo.sock"})
+
+  assert.ok(invalid.issues.some((issue) => issue.message === "control.mode must be an octal file mode between 0 and 0o777"))
+})
+
 test("normalizeConfig throws an aggregated error listing every issue", () => {
   assert.throws(
     () => normalizeConfig({

@@ -10,7 +10,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {{path: string, timeoutMs: number, intervalMs: number}} HealthConfig
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
- * @typedef {{path: string}} ControlConfig
+ * @typedef {{mode?: number, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number}} ProxyConfig
  * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
@@ -123,6 +123,7 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
   const processesSource = arrayAt(source.processes, "processes", issues)
   const proxy = normalizeProxy(proxySource, issues)
   const control = {
+    mode: normalizeSocketMode(controlSource.mode, "control.mode", issues),
     path: normalizeString(controlSource.path, "control.path", issues, {default: `/tmp/rollbridge-${application}.sock`})
   }
   const processes = processesSource.map((processSource, index) => normalizeProcess(processSource, index, proxy, issues))
@@ -194,6 +195,29 @@ function normalizeOutputLines(value, key, issues) {
   }
 
   return outputLines
+}
+
+/**
+ * @param {JsonValue} value - Raw socket permission mode.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {number | undefined} File mode bits (0 to 0o777), or undefined when unset.
+ */
+function normalizeSocketMode(value, key, issues) {
+  if (value === undefined || value === null) return undefined
+
+  if (typeof value === "number") {
+    if (Number.isInteger(value) && value >= 0 && value <= 0o777) return value
+  } else if (typeof value === "string") {
+    const cleaned = value.startsWith("0o") ? value.slice(2) : value
+    const mode = /^[0-7]{1,4}$/.test(cleaned) ? parseInt(cleaned, 8) : Number.NaN
+
+    if (Number.isInteger(mode) && mode >= 0 && mode <= 0o777) return mode
+  }
+
+  issues.push({fix: `Set ${key} to an octal permission string like "660" (or an octal number such as 0o660).`, message: `${key} must be an octal file mode between 0 and 0o777`})
+
+  return undefined
 }
 
 /**

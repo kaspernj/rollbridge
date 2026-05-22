@@ -213,6 +213,29 @@ test("a control socket held by a non-Rollbridge process reports a generic confli
   }
 })
 
+test("applies the configured control socket permission mode", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const config = normalizeConfig({
+    application: "rollbridge-test",
+    control: {mode: "660", path: socketPath},
+    processes: [{command: "true", id: "web", policy: "proxied", port: {from: 0, to: 0}}],
+    proxy: {host: "127.0.0.1", port: 0}
+  })
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+
+  await daemon.start()
+
+  try {
+    const stats = await fs.stat(socketPath)
+
+    assert.equal(stats.mode & 0o777, 0o660)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("deploy can ensure the daemon before sending the release command", async () => {
   const fixture = await createFixture()
   const configPath = await writeConfigFile(fixture.config, fixture.root)

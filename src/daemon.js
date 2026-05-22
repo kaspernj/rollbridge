@@ -74,6 +74,10 @@ export default class RollbridgeDaemon {
         resolve(undefined)
       })
     })
+
+    if (this.config.control.mode !== undefined) {
+      await fs.chmod(this.config.control.path, this.config.control.mode)
+    }
   }
 
   /** @returns {Promise<void>} Removes a stale Unix socket before binding, or fails clearly when a daemon is alive. */
