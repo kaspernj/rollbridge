@@ -187,6 +187,11 @@ Inspect state:
 rollbridge status --config rollbridge.js
 ```
 
+`status` reports each managed process's `state`, `pid`, recent `logs`, last
+`exitCode`/`exitSignal`, and — per process — its automatic-restart count
+(`restarts`), last start time (`startedAt`), and current `uptimeMs` while
+running.
+
 Stop the active release:
 
 ```bash
