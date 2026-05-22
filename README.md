@@ -123,10 +123,105 @@ Production-ready examples live in `examples/`, including
 
 ## Process Policies
 
-- `proxied`: the web/API process. Rollbridge forwards HTTP and WebSocket traffic to the active release and tracks connections for draining.
-- `companion`: a release-scoped support process. It starts with the release and stops after that release drains.
-- `singleton`: a one-at-a-time support process. Rollbridge stops the old singleton before starting the new one, so duplicate-unsafe schedulers or job dispatchers do not overlap.
-- `service`: a daemon-wide support process. Rollbridge starts it before release processes need it, leaves it running across deploys, and updates its restart template after a successful deploy.
+Every process declares a `policy` that controls its lifecycle. Pick one per
+process:
+
+| You need… | Use |
+| --- | --- |
+| The process that receives external HTTP/WebSocket traffic | `proxied` |
+| A per-release helper tied to the release lifecycle | `companion` |
+| Exactly one instance, never overlapping across deploys | `singleton` |
+| A long-lived shared broker that survives deploys | `service` |
+
+### `proxied`
+
+The web/API process — exactly one per config. Rollbridge forwards HTTP and
+WebSocket traffic to the active release's proxied process and tracks open
+connections so they can be drained on the next deploy. It must define a `port`
+range, is health-checked before traffic switches to a new release, and is
+auto-restarted while its release is active.
+
+```js
+{
+  id: "web",
+  policy: "proxied",
+  cwd: "{{releasePath}}",
+  command: "npx velocious server --host 127.0.0.1 --port {{port}}",
+  port: {from: 18182, to: 18299},
+  health: {path: "/ping", timeoutMs: 30000}
+}
+```
+
+### `companion`
+
+A release-scoped helper (for example a background worker bound to one release).
+It starts **before** the proxied process in the same release, so release-local
+dependencies are ready before the health check, and it is auto-restarted while
+its release is active. Each release gets its own companions; a release's
+companions stop when that release is drained and retired after a newer release
+takes over.
+
+```js
+{
+  id: "background-jobs-worker",
+  policy: "companion",
+  cwd: "{{releasePath}}",
+  command: "npx velocious background-jobs-worker",
+  gracefulStopMs: 60000
+}
+```
+
+### `singleton`
+
+A one-at-a-time helper for duplicate-unsafe schedulers or job dispatchers. After
+a new release becomes active, Rollbridge stops the old singleton and then starts
+the new one, so two copies never run at once. Use it when running the old and
+new copies simultaneously during a deploy would be unsafe.
+
+```js
+{
+  id: "scheduler",
+  policy: "singleton",
+  cwd: "{{releasePath}}",
+  command: "npx velocious scheduler"
+}
+```
+
+### `service`
+
+A daemon-wide broker that should outlive individual releases — for example
+Velocious Beacon or `background-jobs-main`. Rollbridge starts it once (before
+release processes that depend on it), keeps it running across deploys, and gives
+it a stable port that does not change between releases. After each successful
+deploy its restart template is refreshed to the latest release, so if it crashes
+it restarts from the newest good release. It keeps restarting until the daemon
+shuts down.
+
+```js
+{
+  id: "background-jobs-main",
+  policy: "service",
+  cwd: "{{releasePath}}",
+  command: "npx velocious background-jobs-main",
+  port: 7331
+}
+```
+
+### Deploy ordering
+
+On `rollbridge deploy`, Rollbridge:
+
+1. starts any `service` that is not already running;
+2. starts the new release's `companion`s, then its `proxied` process, and
+   health-checks the proxied process;
+3. switches new traffic to the new release;
+4. refreshes each `service`'s restart template to the new release;
+5. replaces `singleton`s (stops the old one, then starts the new one);
+6. drains the previous release's connections, then stops its `proxied` and
+   `companion` processes.
+
+If the new release fails to start or health-check, the previous release stays
+active and any service started during this deploy is rolled back.
 
 ## Commands
 
