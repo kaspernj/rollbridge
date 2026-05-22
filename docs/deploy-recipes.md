@@ -29,7 +29,9 @@ set -euo pipefail
 
 app_dir=/srv/ticket-server
 config=/etc/rollbridge/rollbridge.js
-revision="$(git rev-parse HEAD)"
+# Read the revision from the source repo (not the script's cwd, which may not be
+# a checkout under cron/systemd/CI).
+revision="$(git -C "$app_dir/repo" rev-parse HEAD)"
 release_path="$app_dir/releases/$(date -u +%Y%m%d%H%M%S)-$revision"
 
 # 1. Prepare the release.
