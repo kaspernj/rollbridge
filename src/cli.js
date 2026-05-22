@@ -26,7 +26,7 @@ export async function runCli(argv) {
 
   program
     .command("daemon")
-    .option("-c, --config <path>", "Config file path (defaults to rollbridge.yml, rollbridge.yaml, or rollbridge.json)")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
@@ -45,7 +45,7 @@ export async function runCli(argv) {
 
   program
     .command("deploy")
-    .option("-c, --config <path>", "Config file path (defaults to rollbridge.yml, rollbridge.yaml, or rollbridge.json)")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .requiredOption("--release-path <path>", "Release path")
     .option("--release-id <id>", "Release id")
     .option("--revision <sha>", "Revision")
@@ -84,7 +84,7 @@ export async function runCli(argv) {
   program
     .command("ensure-daemon")
     .description("Start the daemon if the control socket is not already accepting commands.")
-    .option("-c, --config <path>", "Config file path (defaults to rollbridge.yml, rollbridge.yaml, or rollbridge.json)")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .option("--daemon-log-path <path>", "Daemon log path")
     .option("--daemon-pid-path <path>", "Daemon PID file path")
     .option("--daemon-start-timeout-ms <ms>", "How long to wait for the daemon to accept control commands")
@@ -105,7 +105,7 @@ export async function runCli(argv) {
 
   program
     .command("status")
-    .option("-c, --config <path>", "Config file path (defaults to rollbridge.yml, rollbridge.yaml, or rollbridge.json)")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
@@ -119,7 +119,7 @@ export async function runCli(argv) {
 
   program
     .command("stop")
-    .option("-c, --config <path>", "Config file path (defaults to rollbridge.yml, rollbridge.yaml, or rollbridge.json)")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .option("--release-id <id>", "Release id")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
@@ -137,7 +137,7 @@ export async function runCli(argv) {
 
   program
     .command("shutdown")
-    .option("-c, --config <path>", "Config file path (defaults to rollbridge.yml, rollbridge.yaml, or rollbridge.json)")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
@@ -152,7 +152,7 @@ export async function runCli(argv) {
   program
     .command("validate")
     .description("Parse the config and report all errors without starting the daemon.")
-    .option("-c, --config <path>", "Config file path (defaults to rollbridge.yml, rollbridge.yaml, or rollbridge.json)")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
       let configPath
 
@@ -200,7 +200,7 @@ async function validateConfigFile(configPath) {
     const {config} = validateConfig({}, configPath)
     const message = error instanceof Error ? error.message : String(error)
 
-    return {config, issues: [{fix: "Ensure the file exists and contains valid YAML or JSON.", message}]}
+    return {config, issues: [{fix: "Ensure the file exists and exports a default Rollbridge config object.", message}]}
   }
 }
 

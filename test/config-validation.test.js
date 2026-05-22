@@ -76,15 +76,13 @@ test("normalizeConfig throws an aggregated error listing every issue", () => {
 })
 
 test("validate CLI command reports every issue with a fix and exits non-zero", async () => {
-  const configPath = await writeConfig([
-    "application: demo",
-    "proxy:",
-    "  port: 8182",
-    "processes:",
-    "  - id: web",
-    "    policy: proxied",
-    "    command: run web"
-  ])
+  const configPath = await writeConfig({
+    application: "demo",
+    processes: [
+      {command: "run web", id: "web", policy: "proxied"}
+    ],
+    proxy: {port: 8182}
+  })
 
   try {
     const {output} = await captureCli(["node", "rollbridge", "validate", "-c", configPath])
@@ -99,21 +97,14 @@ test("validate CLI command reports every issue with a fix and exits non-zero", a
 })
 
 test("validate CLI command accepts a valid config without setting a failure exit code", async () => {
-  const configPath = await writeConfig([
-    "application: demo",
-    "control:",
-    "  path: /tmp/rollbridge-cli-valid.sock",
-    "proxy:",
-    "  host: 127.0.0.1",
-    "  port: 8182",
-    "processes:",
-    "  - id: web",
-    "    policy: proxied",
-    "    command: run web",
-    "    port:",
-    "      from: 18000",
-    "      to: 18099"
-  ])
+  const configPath = await writeConfig({
+    application: "demo",
+    control: {path: "/tmp/rollbridge-cli-valid.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
 
   try {
     const {output} = await captureCli(["node", "rollbridge", "validate", "-c", configPath])
@@ -126,14 +117,15 @@ test("validate CLI command accepts a valid config without setting a failure exit
 })
 
 /**
- * @param {string[]} lines - YAML lines.
- * @returns {Promise<string>} Path to the written config file.
+ * @param {Record<string, import("../src/json.js").JsonValue>} config - Raw config object.
+ * @returns {Promise<string>} Path to the written config module.
  */
-async function writeConfig(lines) {
+async function writeConfig(config) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-validate-"))
-  const configPath = path.join(dir, "rollbridge.yml")
+  const configPath = path.join(dir, "rollbridge.js")
 
-  await fs.writeFile(configPath, `${lines.join("\n")}\n`)
+  // CommonJS so the module loads from a temp dir (no package.json) on any supported Node version.
+  await fs.writeFile(configPath, `module.exports = ${JSON.stringify(config, null, 2)}\n`)
 
   return configPath
 }

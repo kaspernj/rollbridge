@@ -356,9 +356,10 @@ async function processEvents(logPath) {
  * @returns {Promise<string>} Written config path.
  */
 async function writeConfigFile(config, root) {
-  const configPath = path.join(root, "rollbridge.json")
+  const configPath = path.join(root, "rollbridge.js")
 
-  await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
+  // CommonJS so the module loads from a temp dir (no package.json) on any supported Node version.
+  await fs.writeFile(configPath, `module.exports = ${JSON.stringify(config, null, 2)}\n`)
 
   return configPath
 }

@@ -2,7 +2,7 @@
 
 import fs from "node:fs/promises"
 import path from "node:path"
-import YAML from "yaml"
+import {pathToFileURL} from "node:url"
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
@@ -17,23 +17,32 @@ import YAML from "yaml"
  */
 
 const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton", "service"])
-const DEFAULT_CONFIG_FILENAMES = ["rollbridge.yml", "rollbridge.yaml", "rollbridge.json"]
+const DEFAULT_CONFIG_FILENAMES = ["rollbridge.js"]
 
 /**
- * Reads and parses a YAML or JSON config file without validating it.
+ * Imports a JavaScript config module without validating it.
+ *
+ * The module must `export default` either a config object or a function (sync or
+ * async) that returns one.
  * @param {string} configPath - Config path.
- * @returns {Promise<{absolutePath: string, rawConfig: JsonValue}>} Parsed config.
+ * @returns {Promise<{absolutePath: string, rawConfig: JsonValue}>} Imported config.
  */
 export async function parseConfigFile(configPath) {
   const absolutePath = path.resolve(configPath)
-  const rawText = await fs.readFile(absolutePath, "utf8")
-  const rawConfig = absolutePath.endsWith(".json") ? JSON.parse(rawText) : YAML.parse(rawText)
+  const moduleNamespace = await import(pathToFileURL(absolutePath).href)
+  const exported = moduleNamespace.default
+
+  if (exported === undefined) {
+    throw new Error(`Config module ${absolutePath} must export a default config object or function`)
+  }
+
+  const rawConfig = typeof exported === "function" ? await exported() : exported
 
   return {absolutePath, rawConfig}
 }
 
 /**
- * Loads a YAML or JSON config file.
+ * Loads a JavaScript config module.
  * @param {string} configPath - Config path.
  * @returns {Promise<RollbridgeConfig>} Normalized config.
  */
@@ -105,7 +114,7 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
   const source = isPlainObject(rawConfig) ? rawConfig : /** @type {Record<string, JsonValue>} */ ({})
 
   if (!isPlainObject(rawConfig)) {
-    issues.push({fix: "Provide a YAML or JSON mapping with application, proxy, and processes keys.", message: "Config must be an object"})
+    issues.push({fix: "Export a default config object with application, proxy, and processes keys.", message: "Config must be an object"})
   }
 
   const application = normalizeString(source.application, "application", issues, {default: path.basename(path.dirname(configPath))})
