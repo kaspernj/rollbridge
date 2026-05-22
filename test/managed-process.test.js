@@ -1,8 +1,12 @@
 // @ts-check
 
 import assert from "node:assert/strict"
+import path from "node:path"
 import test from "node:test"
+import {fileURLToPath} from "node:url"
 import ManagedProcess from "../src/managed-process.js"
+
+const crasherPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "crasher.js")
 
 /**
  * Builds a managed process that is never spawned, for exercising output retention directly.
@@ -21,6 +25,21 @@ function buildProcess(outputLines) {
     shouldRestart: () => false,
     stopTimeoutMs: 1000
   })
+}
+
+/**
+ * @param {() => boolean} callback - Probe.
+ * @returns {Promise<void>} Resolves once the probe returns true.
+ */
+async function waitFor(callback) {
+  const deadline = Date.now() + 3000
+
+  while (Date.now() < deadline) {
+    if (callback()) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+
+  throw new Error("Timed out waiting for condition")
 }
 
 test("retains and reports only the configured number of recent output lines", () => {
@@ -43,4 +62,45 @@ test("keeps every output line when fewer than the retention limit are produced",
   const {logs} = managed.status()
 
   assert.deepEqual(logs.map((entry) => entry.line), ["one", "two"])
+})
+
+test("reports zeroed restart and uptime fields before the process starts", () => {
+  const status = buildProcess(50).status()
+
+  assert.equal(status.restarts, 0)
+  assert.equal(status.startedAt, undefined)
+  assert.equal(status.uptimeMs, undefined)
+  assert.equal(status.state, "stopped")
+})
+
+test("counts automatic restarts and reports startedAt and uptime while running", async () => {
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} ${JSON.stringify(crasherPath)}`,
+    cwd: undefined,
+    env: {},
+    id: "crasher",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 20,
+    shouldRestart: () => true,
+    stopTimeoutMs: 500
+  })
+
+  try {
+    await managed.start()
+
+    const initial = managed.status()
+
+    assert.equal(initial.restarts, 0)
+    assert.equal(initial.state, "running")
+    assert.equal(typeof initial.startedAt, "string")
+    assert.ok(typeof initial.uptimeMs === "number" && initial.uptimeMs >= 0)
+
+    // The fixture exits non-zero ~40ms after each start, so it keeps auto-restarting.
+    await waitFor(() => managed.status().restarts >= 2)
+
+    assert.ok(managed.status().restarts >= 2)
+  } finally {
+    await managed.stop()
+  }
 })

@@ -9,7 +9,7 @@ import {spawn} from "node:child_process"
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
  * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, outputLines: number, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
- * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, logs: ManagedProcessLog[], pid: number | undefined, state: ManagedProcessState}} ManagedProcessStatus
+ * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, logs: ManagedProcessLog[], pid: number | undefined, restarts: number, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
 export default class ManagedProcess extends EventEmitter {
@@ -39,6 +39,8 @@ export default class ManagedProcess extends EventEmitter {
     this.stopTimeoutMs = stopTimeoutMs
     this.state = /** @type {ManagedProcessState} */ ("stopped")
     this.logs = /** @type {ManagedProcessLog[]} */ ([])
+    this.restarts = 0
+    this.startedAtMs = /** @type {number | undefined} */ (undefined)
     this.intentionalStop = false
     this.restartTimer = undefined
     this.child = undefined
@@ -77,6 +79,7 @@ export default class ManagedProcess extends EventEmitter {
 
       child.once("spawn", () => {
         this.state = "running"
+        this.startedAtMs = Date.now()
         this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null})
         this.emit("started")
         resolve(undefined)
@@ -145,6 +148,7 @@ export default class ManagedProcess extends EventEmitter {
     if (!wasIntentional && this.shouldRestart()) {
       this.restartTimer = setTimeout(() => {
         this.restartTimer = undefined
+        this.restarts += 1
         this.start().catch((error) => {
           this.logger("process restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
         })
@@ -229,7 +233,10 @@ export default class ManagedProcess extends EventEmitter {
       id: this.id,
       logs: this.logs.slice(-this.outputLines),
       pid: this.pid,
-      state: this.state
+      restarts: this.restarts,
+      startedAt: this.startedAtMs === undefined ? undefined : new Date(this.startedAtMs).toISOString(),
+      state: this.state,
+      uptimeMs: this.state === "running" && this.startedAtMs !== undefined ? Date.now() - this.startedAtMs : undefined
     }
   }
 }
