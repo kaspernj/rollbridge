@@ -6,7 +6,7 @@ import path from "node:path"
 import {spawn} from "node:child_process"
 import {Command} from "commander"
 import RollbridgeDaemon from "./daemon.js"
-import {loadConfig, parseConfigFile, validateConfig} from "./config.js"
+import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
 import {sendControlCommand} from "./control-client.js"
 
 const DEFAULT_DAEMON_START_TIMEOUT_MS = 10000
@@ -26,9 +26,10 @@ export async function runCli(argv) {
 
   program
     .command("daemon")
-    .requiredOption("-c, --config <path>", "Config file path")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
-      const config = await loadConfig(options.config)
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
       const daemon = new RollbridgeDaemon({config})
 
       await daemon.start()
@@ -44,7 +45,7 @@ export async function runCli(argv) {
 
   program
     .command("deploy")
-    .requiredOption("-c, --config <path>", "Config file path")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .requiredOption("--release-path <path>", "Release path")
     .option("--release-id <id>", "Release id")
     .option("--revision <sha>", "Revision")
@@ -53,13 +54,14 @@ export async function runCli(argv) {
     .option("--daemon-pid-path <path>", "PID file path used when --ensure-daemon starts the daemon")
     .option("--daemon-start-timeout-ms <ms>", "How long to wait for an ensured daemon to accept control commands")
     .action(async (options) => {
-      const config = await loadConfig(options.config)
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
 
       if (options.ensureDaemon) {
         await ensureDaemonRunning({
           argv,
           config,
-          configPath: options.config,
+          configPath,
           logPath: options.daemonLogPath,
           pidPath: options.daemonPidPath,
           timeoutMs: normalizeTimeoutMs(options.daemonStartTimeoutMs)
@@ -82,16 +84,17 @@ export async function runCli(argv) {
   program
     .command("ensure-daemon")
     .description("Start the daemon if the control socket is not already accepting commands.")
-    .requiredOption("-c, --config <path>", "Config file path")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .option("--daemon-log-path <path>", "Daemon log path")
     .option("--daemon-pid-path <path>", "Daemon PID file path")
     .option("--daemon-start-timeout-ms <ms>", "How long to wait for the daemon to accept control commands")
     .action(async (options) => {
-      const config = await loadConfig(options.config)
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
       const response = await ensureDaemonRunning({
         argv,
         config,
-        configPath: options.config,
+        configPath,
         logPath: options.daemonLogPath,
         pidPath: options.daemonPidPath,
         timeoutMs: normalizeTimeoutMs(options.daemonStartTimeoutMs)
@@ -102,9 +105,10 @@ export async function runCli(argv) {
 
   program
     .command("status")
-    .requiredOption("-c, --config <path>", "Config file path")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
-      const config = await loadConfig(options.config)
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
       const response = await sendControlCommand({
         command: {command: "status"},
         path: config.control.path
@@ -115,10 +119,11 @@ export async function runCli(argv) {
 
   program
     .command("stop")
-    .requiredOption("-c, --config <path>", "Config file path")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .option("--release-id <id>", "Release id")
     .action(async (options) => {
-      const config = await loadConfig(options.config)
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
       const response = await sendControlCommand({
         command: {
           command: "stop",
@@ -132,9 +137,10 @@ export async function runCli(argv) {
 
   program
     .command("shutdown")
-    .requiredOption("-c, --config <path>", "Config file path")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
-      const config = await loadConfig(options.config)
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
       const response = await sendControlCommand({
         command: {command: "shutdown"},
         path: config.control.path
@@ -146,18 +152,28 @@ export async function runCli(argv) {
   program
     .command("validate")
     .description("Parse the config and report all errors without starting the daemon.")
-    .requiredOption("-c, --config <path>", "Config file path")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {
-      const {config, issues} = await validateConfigFile(options.config)
+      let configPath
+
+      try {
+        configPath = await resolveConfigPath(options.config)
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error))
+        process.exitCode = 1
+        return
+      }
+
+      const {config, issues} = await validateConfigFile(configPath)
 
       if (issues.length === 0) {
         const processCount = config.processes.length
 
-        console.log(`${options.config} is valid: ${processCount} ${processCount === 1 ? "process" : "processes"}, proxy on ${config.proxy.host}:${config.proxy.port}.`)
+        console.log(`${configPath} is valid: ${processCount} ${processCount === 1 ? "process" : "processes"}, proxy on ${config.proxy.host}:${config.proxy.port}.`)
         return
       }
 
-      console.error(`Found ${issues.length} configuration ${issues.length === 1 ? "issue" : "issues"} in ${options.config}:`)
+      console.error(`Found ${issues.length} configuration ${issues.length === 1 ? "issue" : "issues"} in ${configPath}:`)
 
       issues.forEach((issue, index) => {
         console.error(`\n${index + 1}. ${issue.message}`)
@@ -184,7 +200,7 @@ async function validateConfigFile(configPath) {
     const {config} = validateConfig({}, configPath)
     const message = error instanceof Error ? error.message : String(error)
 
-    return {config, issues: [{fix: "Ensure the file exists and contains valid YAML or JSON.", message}]}
+    return {config, issues: [{fix: "Ensure the file exists and exports a default Rollbridge config object.", message}]}
   }
 }
 

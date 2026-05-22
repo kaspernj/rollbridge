@@ -19,53 +19,79 @@ npm run all-checks
 
 ## Config
 
-```yaml
-application: ticket-server
+A Rollbridge config is a JavaScript module that `export default`s a config
+object. It can also export a function (sync or async) that returns the object,
+which is handy for computing values from the environment. Write it in your
+project's module system — `export default` for ESM (`"type": "module"`) or
+`module.exports` for CommonJS.
 
-control:
-  path: /tmp/rollbridge-ticket-server.sock
+```js
+// rollbridge.js
+export default {
+  application: "ticket-server",
 
-proxy:
-  host: 127.0.0.1
-  port: 8182
-  healthPath: /ping
-  healthTimeoutMs: 30000
-  drainTimeoutMs: 60000
-  forceStopTimeoutMs: 10000
+  control: {
+    path: "/tmp/rollbridge-ticket-server.sock"
+  },
 
-processes:
-  - id: beacon
-    policy: companion
-    cwd: "{{releasePath}}"
-    command: "env VELOCIOUS_BEACON_PORT={{port}} npx velocious beacon"
-    port:
-      from: 17330
-      to: 17399
+  proxy: {
+    host: "127.0.0.1",
+    port: 8182,
+    healthPath: "/ping",
+    healthTimeoutMs: 30000,
+    drainTimeoutMs: 60000,
+    forceStopTimeoutMs: 10000
+  },
 
-  - id: background-jobs-worker
-    policy: companion
-    cwd: "{{releasePath}}"
-    command: "npx velocious background-jobs-worker"
+  processes: [
+    {
+      id: "beacon",
+      policy: "companion",
+      cwd: "{{releasePath}}",
+      command: "env VELOCIOUS_BEACON_PORT={{port}} npx velocious beacon",
+      port: {from: 17330, to: 17399}
+    },
+    {
+      id: "background-jobs-worker",
+      policy: "companion",
+      cwd: "{{releasePath}}",
+      command: "npx velocious background-jobs-worker"
+    },
+    {
+      id: "background-jobs-main",
+      policy: "service",
+      cwd: "{{releasePath}}",
+      command: "npx velocious background-jobs-main"
+    },
+    {
+      id: "web",
+      policy: "proxied",
+      cwd: "{{releasePath}}",
+      command: "npx velocious server --host 127.0.0.1 --port {{port}}",
+      port: {from: 18182, to: 18299},
+      health: {path: "/ping", timeoutMs: 30000}
+    }
+  ]
+}
+```
 
-  - id: background-jobs-main
-    policy: service
-    cwd: "{{releasePath}}"
-    command: "npx velocious background-jobs-main"
+A function export receives no arguments and lets you build the config at load
+time:
 
-  - id: web
-    policy: proxied
-    cwd: "{{releasePath}}"
-    command: "npx velocious server --host 127.0.0.1 --port {{port}}"
-    port:
-      from: 18182
-      to: 18299
-    health:
-      path: /ping
-      timeoutMs: 30000
+```js
+// rollbridge.js
+export default () => ({
+  application: process.env.APP_NAME || "ticket-server",
+  control: {path: `/tmp/rollbridge-${process.env.APP_NAME || "ticket-server"}.sock`},
+  proxy: {host: "127.0.0.1", port: 8182},
+  processes: [
+    {id: "web", policy: "proxied", cwd: "{{releasePath}}", command: "npx velocious server --port {{port}}", port: {from: 18182, to: 18299}}
+  ]
+})
 ```
 
 Production-ready examples live in `examples/`, including
-`examples/tensorbuzz.com.yml` for the current TensorBuzz backend deployment.
+`examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment.
 
 ## Process Policies
 
@@ -76,10 +102,15 @@ Production-ready examples live in `examples/`, including
 
 ## Commands
 
+`--config` is optional for every command. When omitted, Rollbridge looks for
+`rollbridge.js` in the current directory. The examples below pass `--config`
+explicitly, but `rollbridge validate` (or any command) works with no flag when a
+`rollbridge.js` is present.
+
 Validate a config without starting the daemon:
 
 ```bash
-rollbridge validate --config rollbridge.yml
+rollbridge validate --config rollbridge.js
 ```
 
 `validate` reports every config error at once with an example fix and exits
@@ -89,7 +120,7 @@ process is `proxied`, and that the proxied process defines a port range. Example
 output for a misconfigured file:
 
 ```text
-Found 2 configuration issues in rollbridge.yml:
+Found 2 configuration issues in rollbridge.js:
 
 1. Config must define exactly one proxied process; found 0
    Fix: Mark exactly one process with policy: proxied so Rollbridge knows where to forward traffic.
@@ -101,43 +132,43 @@ Found 2 configuration issues in rollbridge.yml:
 Start the daemon:
 
 ```bash
-rollbridge daemon --config rollbridge.yml
+rollbridge daemon --config rollbridge.js
 ```
 
 Start the daemon only when it is not already running:
 
 ```bash
-rollbridge ensure-daemon --config rollbridge.yml --daemon-log-path log/rollbridge.log --daemon-pid-path tmp/pids/rollbridge.pid
+rollbridge ensure-daemon --config rollbridge.js --daemon-log-path log/rollbridge.log --daemon-pid-path tmp/pids/rollbridge.pid
 ```
 
 Deploy a prepared release:
 
 ```bash
-rollbridge deploy --config rollbridge.yml --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
+rollbridge deploy --config rollbridge.js --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
 ```
 
 Deploy and start the daemon first when needed:
 
 ```bash
-rollbridge deploy --ensure-daemon --config rollbridge.yml --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
+rollbridge deploy --ensure-daemon --config rollbridge.js --release-path /home/dev/ticket-server/releases/20260521073000/ticket-server --revision abc123
 ```
 
 Inspect state:
 
 ```bash
-rollbridge status --config rollbridge.yml
+rollbridge status --config rollbridge.js
 ```
 
 Stop the active release:
 
 ```bash
-rollbridge stop --config rollbridge.yml
+rollbridge stop --config rollbridge.js
 ```
 
 Shut down the daemon and managed processes:
 
 ```bash
-rollbridge shutdown --config rollbridge.yml
+rollbridge shutdown --config rollbridge.js
 ```
 
 ## Nginx
