@@ -78,7 +78,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Add systemd service examples for the Rollbridge daemon.
 - [x] Add tests for malformed control socket JSON and unknown control commands.
 - [ ] Add tests for duplicate IDs and singleton replacement failure behavior.
-- [ ] Add tests for proxy behavior when the active release exits unexpectedly.
+- [x] Add tests for proxy behavior when the active release exits unexpectedly.
 
 ## Documentation TODO
 
