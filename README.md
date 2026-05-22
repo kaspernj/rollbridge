@@ -95,6 +95,19 @@ export default () => ({
 })
 ```
 
+### Template variables
+
+A process `command`, `cwd`, and `env` values support `{{...}}` placeholders
+rendered when the process starts:
+
+- `{{releasePath}}`, `{{releaseId}}`, `{{revision}}`, `{{application}}`, `{{processId}}`
+- `{{port}}` — the port allocated to this process; `{{ports.<id>}}` — another process's allocated port
+- `{{proxy.host}}`, `{{proxy.port}}`
+- `{{env.<NAME>}}` — a variable from the daemon's own environment, e.g. `{{env.HOME}}`
+
+Referencing a placeholder with no value (including an unset `{{env.<NAME>}}`)
+fails the process start with a clear error, so typos surface immediately.
+
 Production-ready examples live in `examples/`, including
 `examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment.
 

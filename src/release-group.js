@@ -180,6 +180,7 @@ export default class ReleaseGroup extends EventEmitter {
   contextForProcess(processConfig) {
     return {
       application: this.config.application,
+      env: {...process.env},
       port: this.ports[processConfig.id],
       ports: this.ports,
       processId: processConfig.id,

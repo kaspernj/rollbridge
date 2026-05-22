@@ -71,7 +71,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Add port allocation diagnostics when a range is exhausted.
 - [ ] Add optional startup command timeout before health checks begin.
 - [x] Add process output retention config instead of a fixed recent-log count.
-- [ ] Add environment variable interpolation from the daemon environment.
+- [x] Add environment variable interpolation from the daemon environment.
 - [x] Add `--config` default lookup resolving to `rollbridge.js` when no path is given.
 - [ ] Add shell completion generation for common shells.
 - [ ] Add npm package metadata such as repository, license, bugs, and homepage.
