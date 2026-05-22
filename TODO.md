@@ -54,7 +54,8 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Add structured event history for deploys, switches, stops, crashes, memory restarts, and failed commands.
   - [x] Add restart counters and uptime to status (exit reasons already reported via `exitCode`/`exitSignal`/`state`).
   - [ ] Add memory stats and child-process-tree details to status (with memory supervision).
-  - [ ] Add `logs` and `events` CLI commands.
+  - [x] Add a `logs` CLI command (recent per-process output from status).
+  - [ ] Add an `events` CLI command (after structured event history lands).
   - [ ] Add optional file logging with rotation guidance.
   - [ ] Add machine-readable JSON output flags for all CLI commands.
 - [ ] Config validation and doctoring.

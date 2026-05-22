@@ -183,7 +183,78 @@ export async function runCli(argv) {
       process.exitCode = 1
     })
 
+  program
+    .command("logs")
+    .description("Print recent stdout/stderr captured from managed processes.")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--process <id>", "Only show logs for the process with this id")
+    .action(async (options) => {
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const response = await sendControlCommand({
+        command: {command: "status"},
+        path: config.control.path
+      })
+      const sources = collectLogSources(/** @type {import("./daemon.js").DaemonStatus} */ (response))
+
+      console.log(formatLogSources(sources, options.process))
+    })
+
   await program.parseAsync(argv)
+}
+
+/**
+ * @typedef {{id: string, logs: import("./managed-process.js").ManagedProcessLog[], source: string}} LogSource
+ */
+
+/**
+ * Flattens managed-process logs from a daemon status payload, labelling each process by origin.
+ * @param {import("./daemon.js").DaemonStatus} status - Daemon status payload.
+ * @returns {LogSource[]} One entry per managed process.
+ */
+function collectLogSources(status) {
+  /** @type {LogSource[]} */
+  const sources = []
+
+  for (const release of status.releases) {
+    for (const processStatus of release.processes) {
+      sources.push({id: processStatus.id, logs: processStatus.logs, source: `release ${release.releaseId} (${release.state})`})
+    }
+  }
+
+  for (const service of status.services) {
+    sources.push({id: service.process.id, logs: service.process.logs, source: "service"})
+  }
+
+  for (const singleton of status.singletons) {
+    sources.push({id: singleton.process.id, logs: singleton.process.logs, source: "singleton"})
+  }
+
+  return sources
+}
+
+/**
+ * Formats collected log sources for display, optionally filtered to a single process id.
+ * @param {LogSource[]} sources - Collected log sources.
+ * @param {string | undefined} processFilter - Only include the process with this id when set.
+ * @returns {string} Human-readable log output.
+ */
+export function formatLogSources(sources, processFilter) {
+  const matched = processFilter === undefined ? sources : sources.filter((source) => source.id === processFilter)
+
+  if (matched.length === 0) {
+    return processFilter === undefined ? "No managed processes." : `No process found with id "${processFilter}".`
+  }
+
+  return matched
+    .map((source) => {
+      const header = `== ${source.id} [${source.source}] ==`
+
+      if (source.logs.length === 0) return `${header}\n  (no recent output)`
+
+      return `${header}\n${source.logs.map((log) => `  ${log.at} [${log.stream}] ${log.line}`).join("\n")}`
+    })
+    .join("\n\n")
 }
 
 /**
