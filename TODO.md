@@ -66,7 +66,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 ## Minor Features
 
 - [ ] Add socket permission and socket owner/group options for shared deploy users.
-- [ ] Make stale control socket diagnostics clearer when another daemon is still alive.
+- [x] Make stale control socket diagnostics clearer when another daemon is still alive.
 - [ ] Add old-release cleanup policies by age, count, and stopped state.
 - [x] Add port allocation diagnostics when a range is exhausted.
 - [ ] Add optional startup command timeout before health checks begin.

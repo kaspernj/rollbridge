@@ -76,10 +76,12 @@ export default class RollbridgeDaemon {
     })
   }
 
-  /** @returns {Promise<void>} Removes a stale Unix socket before binding. */
+  /** @returns {Promise<void>} Removes a stale Unix socket before binding, or fails clearly when a daemon is alive. */
   async prepareControlSocketPath() {
-    if (await controlSocketAcceptsConnections(this.config.control.path)) {
-      throw new Error(`Control socket already accepts connections: ${this.config.control.path}`)
+    const existing = await inspectControlSocket(this.config.control.path)
+
+    if (existing.alive) {
+      throw new Error(controlSocketBusyMessage(this.config.control.path, existing))
     }
 
     try {
@@ -479,26 +481,95 @@ function requiredString(value, key) {
 }
 
 /**
- * @param {string} socketPath - Control socket path.
- * @returns {Promise<boolean>} True when an existing daemon is reachable.
+ * @typedef {{alive: boolean, application?: string, activeReleaseId?: string | null}} ControlSocketInspection
  */
-async function controlSocketAcceptsConnections(socketPath) {
+
+/**
+ * Builds an operator-facing message explaining why the control socket cannot be bound.
+ * @param {string} socketPath - Control socket path.
+ * @param {ControlSocketInspection} inspection - Result of probing the socket.
+ * @returns {string} Diagnostic message.
+ */
+function controlSocketBusyMessage(socketPath, inspection) {
+  if (inspection.application === undefined) {
+    return `The control socket ${socketPath} is already in use by another process. Stop that process or set a different control.path.`
+  }
+
+  const releaseDetail = inspection.activeReleaseId ? `active release: ${inspection.activeReleaseId}` : "no active release"
+
+  return `A Rollbridge daemon for application "${inspection.application}" is already running on ${socketPath} (${releaseDetail}). ` +
+    `Run "rollbridge status" to inspect it or "rollbridge shutdown" to stop it, or set a different control.path.`
+}
+
+/**
+ * Probes an existing control socket to see whether a daemon is alive, and identifies it when it is Rollbridge.
+ * @param {string} socketPath - Control socket path.
+ * @param {number} [timeoutMs] - How long to wait for a status response before treating the socket as busy.
+ * @returns {Promise<ControlSocketInspection>} Whether the socket is live and, when it is Rollbridge, its identity.
+ */
+async function inspectControlSocket(socketPath, timeoutMs = 1000) {
   return await new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath)
+    let buffer = ""
+    let settled = false
+    let timer = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined)
 
-    socket.once("connect", () => {
-      socket.end()
-      resolve(true)
+    const finish = (/** @type {ControlSocketInspection} */ result) => {
+      if (settled) return
+
+      settled = true
+      if (timer) clearTimeout(timer)
+      socket.destroy()
+      resolve(result)
+    }
+
+    timer = setTimeout(() => finish({alive: true}), timeoutMs)
+    socket.setEncoding("utf8")
+    socket.once("connect", () => socket.write(`${JSON.stringify({command: "status"})}\n`))
+    socket.on("data", (chunk) => {
+      buffer += chunk
+      const newlineIndex = buffer.indexOf("\n")
+
+      if (newlineIndex < 0) return
+
+      const status = parseControlStatus(buffer.slice(0, newlineIndex))
+
+      finish(status ? {activeReleaseId: status.activeReleaseId, alive: true, application: status.application} : {alive: true})
     })
     socket.once("error", (error) => {
-      if (error && typeof error === "object" && "code" in error) {
-        if (error.code === "ENOENT" || error.code === "ECONNREFUSED") {
-          resolve(false)
-          return
-        }
+      if (settled) return
+
+      if (error && typeof error === "object" && "code" in error && (error.code === "ENOENT" || error.code === "ECONNREFUSED")) {
+        settled = true
+        if (timer) clearTimeout(timer)
+        resolve({alive: false})
+        return
       }
 
+      settled = true
+      if (timer) clearTimeout(timer)
       reject(error)
     })
   })
+}
+
+/**
+ * Parses a control status response line into a Rollbridge identity, if it is one.
+ * @param {string} line - JSON response line.
+ * @returns {{application: string, activeReleaseId: string | null} | undefined} Identity, or undefined when unrecognized.
+ */
+function parseControlStatus(line) {
+  /** @type {JsonValue} */
+  let parsed
+
+  try {
+    parsed = JSON.parse(line)
+  } catch {
+    return undefined
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
+  if (typeof parsed.application !== "string") return undefined
+
+  return {activeReleaseId: typeof parsed.activeReleaseId === "string" ? parsed.activeReleaseId : null, application: parsed.application}
 }
