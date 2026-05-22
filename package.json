@@ -2,6 +2,25 @@
   "name": "rollbridge",
   "version": "0.1.2",
   "description": "Zero-downtime process supervisor and local traffic switcher for deploy-managed apps.",
+  "keywords": [
+    "deploy",
+    "zero-downtime",
+    "process-supervisor",
+    "reverse-proxy",
+    "websocket",
+    "rollbridge",
+    "velocious"
+  ],
+  "homepage": "https://github.com/kaspernj/rollbridge#readme",
+  "bugs": {
+    "url": "https://github.com/kaspernj/rollbridge/issues"
+  },
+  "license": "MIT",
+  "author": "kaspernj <kasper@diestoeckels.de>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kaspernj/rollbridge.git"
+  },
   "type": "module",
   "bin": {
     "rollbridge": "./bin/rollbridge"

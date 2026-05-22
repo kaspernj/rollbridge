@@ -398,3 +398,7 @@ Maintainers can publish a patch release from the latest default branch:
 ```bash
 npm run release:patch
 ```
+
+## License
+
+Rollbridge is released under the [MIT License](LICENSE).
