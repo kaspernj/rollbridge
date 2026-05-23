@@ -371,6 +371,10 @@ location / {
 }
 ```
 
+See [`docs/nginx.md`](docs/nginx.md) for the full guide — WebSocket upgrade
+headers, timeouts for long-lived connections, forwarded headers, and common
+failure modes (502/503, dropped WebSockets).
+
 ## Running under systemd
 
 Run the long-lived daemon as a systemd service so it starts on boot and is
