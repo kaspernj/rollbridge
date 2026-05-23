@@ -56,7 +56,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Add memory stats and child-process-tree details to status (with memory supervision). (`rssBytes`/`memoryRestarts`/`lastMemoryRestartAt` plus `children`: the sampled process tree with each member's pid, command, and RSS.)
   - [x] Add a `logs` CLI command (recent per-process output from status).
   - [x] Add an `events` CLI command (after structured event history lands).
-  - [ ] Add optional file logging with rotation guidance.
+  - [x] Add optional file logging with rotation guidance (`docs/logging.md`; daemon log file via `--daemon-log-path`, logrotate `copytruncate`).
   - [x] Add machine-readable JSON output for all CLI commands (data commands print JSON; `validate`/`doctor`/`logs` take `--json`).
 - [ ] Config validation and doctoring.
   - [x] Add `validate` to parse config and report all config errors without starting the daemon.

@@ -486,6 +486,10 @@ The daemon is long-lived and survives deploys. **Deploy with
 release paths are passed per deploy. Use `command -v rollbridge` to find the
 absolute CLI path for `ExecStart`.
 
+See [`docs/logging.md`](docs/logging.md) for where the daemon's JSON logs go
+(stdout / journald / the `--daemon-log-path` file) and how to rotate them — the
+daemon holds its log file open, so logrotate needs `copytruncate`.
+
 ## Deployment Notes
 
 Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For stable local brokers such as Velocious Beacon or `background-jobs-main`, use `service` when the process should survive deploys and restart from the latest successful release if it crashes.

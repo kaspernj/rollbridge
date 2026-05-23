@@ -46,7 +46,8 @@ already accepting commands, waits until it responds, then prints the daemon
 status JSON. Idempotent — safe to call before every deploy.
 
 - `--daemon-log-path <path>` — file the detached daemon's stdout/stderr is
-  appended to. Default: `/tmp/rollbridge-<application>.log`.
+  appended to. Default: `/tmp/rollbridge-<application>.log`. See
+  [`logging.md`](logging.md) for the log format and rotation guidance.
 - `--daemon-pid-path <path>` — file the detached daemon's PID is written to.
   Default: `/tmp/rollbridge-<application>.pid`.
 - `--daemon-start-timeout-ms <ms>` — how long to wait for the daemon to accept
