@@ -143,6 +143,10 @@ Rollbridge runs `quietCommand`, then drains (`drainCommand`/`drainTimeoutMs`),
 then `stopCommand`/`stopSignal`, then `SIGKILL` after `gracefulStopMs` when
 gracefully stopping the process. Each hook is bounded so it can't wedge a stop.
 
+Set `nonBlockingDrain: true` on a worker companion to start its graceful stop the
+moment its release is retired — in parallel with the proxied connection drain,
+not after it — so new workers handle new work while the old workers finish theirs.
+
 See [`docs/workers.md`](docs/workers.md) for the full safe background-job worker
 deployment pattern — companion policy, `replicas`, and finishing in-flight jobs
 on deploy with `stopSignal`/`lifecycle` + `gracefulStopMs`.

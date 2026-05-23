@@ -194,6 +194,17 @@ test("validateConfig defaults replicas, accepts companion replicas, and rejects 
   // A "#" in a process id (reserved for replica instance ids) is rejected.
   assert.ok(validateWorker({command: "run worker", id: "work#er", policy: "companion"}).issues
     .some((issue) => /must not contain "#"/.test(issue.message)))
+
+  // nonBlockingDrain defaults to false, is accepted on a companion, and rejected elsewhere.
+  assert.equal(validateWorker({command: "run worker", id: "worker", policy: "companion"}).config.processes[1].nonBlockingDrain, false)
+
+  const draining = validateWorker({command: "run worker", id: "worker", nonBlockingDrain: true, policy: "companion"})
+
+  assert.deepEqual(draining.issues, [])
+  assert.equal(draining.config.processes[1].nonBlockingDrain, true)
+
+  assert.ok(validateWorker({command: "run b", id: "broker", nonBlockingDrain: true, policy: "service"}).issues
+    .some((issue) => /can only set nonBlockingDrain on a companion/.test(issue.message)))
 })
 
 test("validateConfig defaults stopSignal, accepts valid signals, and rejects unknown ones", () => {
