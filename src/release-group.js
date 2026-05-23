@@ -81,6 +81,14 @@ export default class ReleaseGroup extends EventEmitter {
   }
 
   /**
+   * @param {string} id - Process id.
+   * @returns {ManagedProcess | undefined} This release's managed process with the given id, if present.
+   */
+  getProcess(id) {
+    return this.processes.get(id)
+  }
+
+  /**
    * Logs process diagnostics before failed startup cleanup stops and removes the release processes.
    * @param {Error | string} error - Startup failure.
    * @returns {void}

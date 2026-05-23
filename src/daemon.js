@@ -233,6 +233,13 @@ export default class RollbridgeDaemon {
       return this.status()
     }
 
+    if (commandName === "restart") {
+      return await this.restartProcesses({
+        policy: stringOrUndefined(data.policy),
+        processId: stringOrUndefined(data.processId)
+      })
+    }
+
     if (commandName === "shutdown") {
       setImmediate(() => {
         this.shutdown().catch((error) => {
@@ -393,6 +400,73 @@ export default class RollbridgeDaemon {
       this.singletons.set(processConfig.id, singleton)
       await singleton.start()
     }
+  }
+
+  /**
+   * Restarts running non-proxied processes selected by id or policy, or all of them.
+   *
+   * The proxied process is never restarted in place (that would drop traffic); use a
+   * deploy for a zero-downtime replacement.
+   * @param {{policy?: string, processId?: string}} selector - Restart selector; restarts all non-proxied processes when both are omitted.
+   * @returns {Promise<Record<string, JsonValue>>} The ids that were restarted.
+   */
+  async restartProcesses({policy, processId} = {}) {
+    if (policy === "proxied" || (processId !== undefined && this.isProxiedId(processId))) {
+      throw new Error('The proxied process cannot be restarted in place; use "rollbridge deploy" for a zero-downtime replacement.')
+    }
+
+    const targets = this.collectRestartTargets({policy, processId})
+
+    if (processId !== undefined && targets.length === 0) {
+      throw new Error(`No running process with id "${processId}" to restart.`)
+    }
+
+    for (const target of targets) {
+      this.logger("process restart requested", {processId: target.id})
+      await target.process.stop()
+      await target.process.start()
+    }
+
+    return {restarted: targets.map((target) => target.id)}
+  }
+
+  /**
+   * @param {{policy?: string, processId?: string}} selector - Restart selector.
+   * @returns {{id: string, process: import("./managed-process.js").default}[]} Running non-proxied processes matching the selector.
+   */
+  collectRestartTargets({policy, processId}) {
+    const targets = /** @type {{id: string, process: import("./managed-process.js").default}[]} */ ([])
+
+    for (const processConfig of this.config.processes) {
+      if (processConfig.policy === "proxied") continue
+      if (processId !== undefined && processConfig.id !== processId) continue
+      if (policy !== undefined && processConfig.policy !== policy) continue
+
+      const process = this.findProcessInstance(processConfig)
+
+      if (process) targets.push({id: processConfig.id, process})
+    }
+
+    return targets
+  }
+
+  /**
+   * @param {import("./config.js").ProcessConfig} processConfig - Process definition.
+   * @returns {import("./managed-process.js").default | undefined} The running instance, if any.
+   */
+  findProcessInstance(processConfig) {
+    if (processConfig.policy === "service") return this.services.get(processConfig.id)
+    if (processConfig.policy === "singleton") return this.singletons.get(processConfig.id)
+
+    return this.activeRelease ? this.activeRelease.getProcess(processConfig.id) : undefined
+  }
+
+  /**
+   * @param {string} id - Process id.
+   * @returns {boolean} True when the id belongs to the proxied process.
+   */
+  isProxiedId(id) {
+    return this.config.processes.some((processConfig) => processConfig.policy === "proxied" && processConfig.id === id)
   }
 
   /**

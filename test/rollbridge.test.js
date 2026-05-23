@@ -205,6 +205,112 @@ test("service processes start before releases and restart with the latest deploy
   }
 })
 
+test("restart bounces a single process by id", async () => {
+  const fixture = await createFixture({includeService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const before = pidsById(daemon.status())
+    const result = await daemon.restartProcesses({processId: "beacon"})
+
+    assert.deepEqual(result.restarted, ["beacon"])
+
+    const after = pidsById(daemon.status())
+
+    assert.ok(before.beacon && after.beacon, "beacon should have a pid before and after")
+    assert.notEqual(after.beacon, before.beacon)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("restart with no selector bounces every non-proxied process but not the proxied one", async () => {
+  const fixture = await createFixture({includeCompanion: true, includeService: true, includeSingleton: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const before = pidsById(daemon.status())
+    const result = await daemon.restartProcesses()
+    const restarted = /** @type {string[]} */ (result.restarted)
+
+    assert.deepEqual([...restarted].sort(), ["beacon", "jobs-main", "worker"])
+
+    const after = pidsById(daemon.status())
+
+    assert.equal(after.web, before.web, "proxied process should not be restarted")
+    assert.notEqual(after.beacon, before.beacon)
+    assert.notEqual(after["jobs-main"], before["jobs-main"])
+    assert.notEqual(after.worker, before.worker)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("restart --policy targets only processes with that policy", async () => {
+  const fixture = await createFixture({includeCompanion: true, includeService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const before = pidsById(daemon.status())
+    const result = await daemon.restartProcesses({policy: "companion"})
+
+    assert.deepEqual(result.restarted, ["worker"])
+
+    const after = pidsById(daemon.status())
+
+    assert.notEqual(after.worker, before.worker)
+    assert.equal(after.beacon, before.beacon, "the service should be left running")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("restart refuses the proxied process and reports unknown ids", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    await assert.rejects(() => daemon.restartProcesses({processId: "web"}), /proxied process cannot be restarted/)
+    await assert.rejects(() => daemon.restartProcesses({policy: "proxied"}), /proxied process cannot be restarted/)
+    await assert.rejects(() => daemon.restartProcesses({processId: "missing"}), /No running process with id "missing"/)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("the restart control command bounces a process over the socket", async () => {
+  const fixture = await createFixture({includeService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const before = pidsById(daemon.status())
+    const response = await sendControlCommand({
+      command: {command: "restart", processId: "beacon"},
+      path: fixture.config.control.path
+    })
+
+    assert.deepEqual(response.restarted, ["beacon"])
+    assert.notEqual(pidsById(daemon.status()).beacon, before.beacon)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("control socket accepts deploy and status commands", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)
@@ -368,7 +474,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{includeService?: boolean, includeSingleton?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
+ * @param {{includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
  * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -388,6 +494,14 @@ async function createFixture(options = {}) {
       policy: "service",
       port: {from: 0, to: 0},
       restartDelayMs: 50
+    })
+  }
+
+  if (options.includeCompanion) {
+    processes.push({
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+      id: "worker",
+      policy: "companion"
     })
   }
 
@@ -497,6 +611,27 @@ function statusRelease(daemon, releaseId) {
   assert.ok(release, `Release ${releaseId} should be present`)
 
   return release
+}
+
+/**
+ * Maps process id to pid across the active release, services, and singletons.
+ * @param {import("../src/daemon.js").DaemonStatus} status - Daemon status payload.
+ * @returns {Record<string, number | undefined>} Process id to current pid.
+ */
+function pidsById(status) {
+  /** @type {Record<string, number | undefined>} */
+  const pids = {}
+
+  for (const release of status.releases) {
+    if (release.state !== "active") continue
+
+    for (const processStatus of release.processes) pids[processStatus.id] = processStatus.pid
+  }
+
+  for (const service of status.services) pids[service.id] = service.process.pid
+  for (const singleton of status.singletons) pids[singleton.id] = singleton.process.pid
+
+  return pids
 }
 
 /**

@@ -365,6 +365,15 @@ Stop the active release:
 rollbridge stop --config rollbridge.js
 ```
 
+Restart non-proxied processes in place — all of them, one by id, or a policy
+group (the proxied process is never restarted; use `deploy` for that):
+
+```bash
+rollbridge restart --config rollbridge.js                      # all non-proxied processes
+rollbridge restart --config rollbridge.js --process background-jobs-worker
+rollbridge restart --config rollbridge.js --policy companion
+```
+
 Shut down the daemon and managed processes:
 
 ```bash

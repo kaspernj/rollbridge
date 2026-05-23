@@ -137,6 +137,33 @@ export async function runCli(argv) {
     })
 
   program
+    .command("restart")
+    .description("Restart running non-proxied processes (by id, by policy, or all).")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--process <id>", "Restart only the process with this id")
+    .option("--policy <policy>", "Restart only processes with this policy (companion, singleton, or service)")
+    .action(async (options) => {
+      if (options.policy !== undefined && !["companion", "service", "singleton"].includes(options.policy)) {
+        console.error("--policy must be one of: companion, singleton, service.")
+        process.exitCode = 1
+        return
+      }
+
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const response = await sendControlCommand({
+        command: {
+          command: "restart",
+          policy: options.policy,
+          processId: options.process
+        },
+        path: config.control.path
+      })
+
+      console.log(JSON.stringify(response, null, 2))
+    })
+
+  program
     .command("shutdown")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .action(async (options) => {

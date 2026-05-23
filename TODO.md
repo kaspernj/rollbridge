@@ -28,7 +28,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Worker auto-restart and restart policy controls.
   - [x] Add config for max restarts, restart window, exponential backoff, and disabled restart behavior (per-process `restart` policy).
   - [ ] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events.
-  - [ ] Add a `restart` CLI command for a single process, a policy group, or all non-proxied workers.
+  - [x] Add a `restart` CLI command for a single process, a policy group, or all non-proxied workers.
   - [ ] Keep restart behavior safe for job workers by using lifecycle hooks before termination.
 - [ ] Graceful job-worker lifecycle.
   - [ ] Add generic lifecycle hooks such as `quietCommand`, `drainCommand`, `drainTimeoutMs`, and `stopCommand`.
