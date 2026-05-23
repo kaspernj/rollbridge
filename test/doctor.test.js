@@ -1,6 +1,8 @@
 // @ts-check
 
 import assert from "node:assert/strict"
+import {spawn} from "node:child_process"
+import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
@@ -9,20 +11,23 @@ import test from "node:test"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {runEnvironmentChecks} from "../src/doctor.js"
+import {writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
 
 /**
  * @param {object} args - Options.
  * @param {string} args.controlPath - Control socket path.
  * @param {number} args.proxyPort - Proxy port.
+ * @param {string} [args.statePath] - State file path.
  * @returns {import("../src/config.js").RollbridgeConfig} Normalized config.
  */
-function buildConfig({controlPath, proxyPort}) {
+function buildConfig({controlPath, proxyPort, statePath}) {
   return normalizeConfig({
     application: "doctor-test",
     control: {path: controlPath},
     processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
-    proxy: {host: "127.0.0.1", port: proxyPort}
+    proxy: {host: "127.0.0.1", port: proxyPort},
+    ...(statePath ? {statePath} : {})
   })
 }
 
@@ -98,6 +103,58 @@ test("runEnvironmentChecks reports an unavailable proxy port", async () => {
     assert.match(proxyCheck.detail, /unavailable/)
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("runEnvironmentChecks checks the state path directory and reports no orphans when none exist", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+
+  try {
+    const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort(), statePath: path.join(root, "state.json")}))
+
+    assert.equal(checkNamed(checks, "state path directory").ok, true)
+    assert.equal(checkNamed(checks, "orphaned processes").ok, true)
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("runEnvironmentChecks omits state checks when no statePath is configured", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+
+  try {
+    const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort()}))
+
+    assert.ok(!checks.some((check) => check.name === "state path directory"))
+    assert.ok(!checks.some((check) => check.name === "orphaned processes"))
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("runEnvironmentChecks reports orphaned processes left in the state file", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const statePath = path.join(root, "state.json")
+  const leftover = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio: "ignore"})
+
+  await once(leftover, "spawn")
+
+  try {
+    await writeState(statePath, {
+      activeReleaseId: "v1",
+      releases: [{processes: [{id: "worker", pid: leftover.pid}], releaseId: "v1"}],
+      services: [],
+      singletons: []
+    })
+
+    const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort(), statePath}))
+    const orphanCheck = checkNamed(checks, "orphaned processes")
+
+    assert.equal(orphanCheck.ok, false)
+    assert.match(orphanCheck.detail, new RegExp(`worker \\(pid ${leftover.pid}\\)`))
+  } finally {
+    leftover.kill("SIGKILL")
     await fs.rm(root, {force: true, recursive: true})
   }
 })
