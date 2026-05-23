@@ -166,6 +166,21 @@ snapshot of each process's `outputLines`, not a live stream. `--process <id>`
 limits output to one process. With `--json`, prints
 `[{"id", "source", "logs": [{"at", "line", "stream"}]}]`.
 
+## `events`
+
+```
+rollbridge events [--config <path>] [--limit <count>] [--json]
+```
+
+Prints the daemon's recent structured event history — deploys (`deploy
+starting`, `traffic switched`, `deploy failed`), release stops (`release
+stopped`, `release drained`), process lifecycle (`process started`, `process
+exited`, `restart limit reached`, `process restart requested`), and failed
+control commands (`command failed`). Each event has a timestamp, a message, and
+a structured data payload. The daemon keeps the most recent 1000 events in
+memory (cleared on restart). `--limit <count>` shows only the most recent
+`count`. With `--json`, prints `[{"at", "message", "data"}]`.
+
 ## Exit codes
 
 - `0` — success.

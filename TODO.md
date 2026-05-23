@@ -51,11 +51,11 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Define how rollback interacts with singleton workers and draining releases.
   - [ ] Document migration constraints for rollback.
 - [ ] Observability and diagnostics.
-  - [ ] Add structured event history for deploys, switches, stops, crashes, memory restarts, and failed commands.
+  - [x] Add structured event history for deploys, switches, stops, crashes, memory restarts, and failed commands. (In-memory `EventLog` tapping the daemon logger; memory-restart events populate once memory supervision logs them.)
   - [x] Add restart counters and uptime to status (exit reasons already reported via `exitCode`/`exitSignal`/`state`).
   - [ ] Add memory stats and child-process-tree details to status (with memory supervision).
   - [x] Add a `logs` CLI command (recent per-process output from status).
-  - [ ] Add an `events` CLI command (after structured event history lands).
+  - [x] Add an `events` CLI command (after structured event history lands).
   - [ ] Add optional file logging with rotation guidance.
   - [x] Add machine-readable JSON output for all CLI commands (data commands print JSON; `validate`/`doctor`/`logs` take `--json`).
 - [ ] Config validation and doctoring.

@@ -295,7 +295,59 @@ export async function runCli(argv) {
       console.log(formatLogSources(sources, options.process))
     })
 
+  program
+    .command("events")
+    .description("Print recent structured daemon events (deploys, switches, stops, crashes, restarts, failures).")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--limit <count>", "Show only the most recent <count> events")
+    .option("--json", "Output machine-readable JSON")
+    .action(async (options) => {
+      let limit
+
+      if (options.limit !== undefined) {
+        limit = Number(options.limit)
+
+        if (!Number.isInteger(limit) || limit < 1) {
+          console.error("--limit must be a positive integer.")
+          process.exitCode = 1
+          return
+        }
+      }
+
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const response = await sendControlCommand({
+        command: {command: "events", limit},
+        path: config.control.path
+      })
+      const events = /** @type {import("./event-log.js").DaemonEvent[]} */ (response.events ?? [])
+
+      if (options.json) {
+        console.log(JSON.stringify(events, null, 2))
+        return
+      }
+
+      console.log(formatEvents(events))
+    })
+
   await program.parseAsync(argv)
+}
+
+/**
+ * Formats structured daemon events as human-readable lines.
+ * @param {import("./event-log.js").DaemonEvent[]} events - Recent events, oldest first.
+ * @returns {string} One line per event, or a placeholder when empty.
+ */
+export function formatEvents(events) {
+  if (events.length === 0) return "No events recorded yet."
+
+  return events
+    .map((event) => {
+      const data = Object.keys(event.data).length > 0 ? ` ${JSON.stringify(event.data)}` : ""
+
+      return `${event.at}  ${event.message}${data}`
+    })
+    .join("\n")
 }
 
 /**
