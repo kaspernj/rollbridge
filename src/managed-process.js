@@ -65,7 +65,6 @@ export default class ManagedProcess extends EventEmitter {
     this.intentionalStop = false
     this.exitCode = undefined
     this.exitSignal = undefined
-    this.lastStartReason = reason
     this.state = "starting"
 
     await new Promise((resolve, reject) => {
@@ -89,6 +88,7 @@ export default class ManagedProcess extends EventEmitter {
       child.once("spawn", () => {
         this.state = "running"
         this.startedAtMs = Date.now()
+        this.lastStartReason = reason
         this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null, reason})
         this.emit("started")
         resolve(undefined)

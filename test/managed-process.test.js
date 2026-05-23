@@ -155,6 +155,24 @@ test("records the manual start reason", async () => {
   }
 })
 
+test("does not record a start reason when the spawn fails", async () => {
+  const managed = new ManagedProcess({
+    command: "true",
+    cwd: "/nonexistent-rollbridge-spawn-dir",
+    env: {},
+    id: "broken",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopTimeoutMs: 500
+  })
+
+  // The cwd does not exist, so the spawn fails before the process ever runs.
+  await assert.rejects(() => managed.start("manual"))
+  assert.equal(managed.status().lastStartReason, undefined)
+})
+
 test("does not auto-restart when the restart policy is disabled (maxRestarts: 0)", async () => {
   const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: 0, windowMs: 0})
 
