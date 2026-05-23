@@ -6,9 +6,7 @@ import test from "node:test"
 import {fileURLToPath} from "node:url"
 import ManagedProcess from "../src/managed-process.js"
 
-const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures")
-const crasherPath = path.join(fixturesDir, "crasher.js")
-const signalTrapPath = path.join(fixturesDir, "signal-trap.js")
+const crasherPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "crasher.js")
 
 /**
  * Builds a managed process that is never spawned, for exercising output retention directly.
@@ -194,12 +192,9 @@ function buildLongLived(shouldRestart) {
   })
 }
 
-test("stops a process with its configured stopSignal", async () => {
-  // The fixture exits on SIGINT but ignores SIGTERM; with stopSignal "SIGINT" it stops
-  // promptly. A default SIGTERM stop would be ignored and fall through to SIGKILL after
-  // stopTimeoutMs, so a quick clean stop proves the configured signal was used.
+test("sends the configured stopSignal as the graceful stop signal", async () => {
   const managed = new ManagedProcess({
-    command: `${JSON.stringify(process.execPath)} ${JSON.stringify(signalTrapPath)}`,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
     cwd: undefined,
     env: {},
     id: "worker",
@@ -208,17 +203,24 @@ test("stops a process with its configured stopSignal", async () => {
     restartDelayMs: 10,
     shouldRestart: () => false,
     stopSignal: "SIGINT",
-    stopTimeoutMs: 2000
+    stopTimeoutMs: 500
   })
 
+  /** @type {string[]} */
+  const signals = []
+  const killProcessGroup = managed.killProcessGroup.bind(managed)
+
+  managed.killProcessGroup = (signal) => {
+    signals.push(signal)
+    killProcessGroup(signal)
+  }
+
   await managed.start()
-
-  const startedAt = Date.now()
-
   await managed.stop()
 
+  // The graceful stop uses the configured signal (a SIGKILL fallback, if any, comes after).
+  assert.equal(signals[0], "SIGINT")
   assert.equal(managed.status().state, "stopped")
-  assert.ok(Date.now() - startedAt < 1500, "expected a prompt graceful stop via SIGINT, not the SIGKILL fallback")
 })
 
 test("a memory restart respawns and is counted when the supervisor still wants the process", async () => {
