@@ -133,6 +133,10 @@ fails the process start with a clear error, so typos surface immediately.
 Production-ready examples live in `examples/`, including
 `examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment.
 
+See [`docs/velocious.md`](docs/velocious.md) for a Velocious deployment guide —
+how Beacon, background-jobs-main, background-jobs-worker, and the web process map
+to Rollbridge policies, with startup ordering and deploy behavior.
+
 See [`docs/config.md`](docs/config.md) for the full config reference — every
 field, its default, validation rules, template variables, and the environment
 variables Rollbridge injects.

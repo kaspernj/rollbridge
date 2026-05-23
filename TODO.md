@@ -91,7 +91,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
 - [ ] Document memory checks and auto-restart behavior after the feature lands.
 - [ ] Document worker lifecycle hooks and safe background-job deployment patterns after the feature lands.
-- [ ] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples.
+- [x] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples (`docs/velocious.md`).
 - [x] Add an Nginx guide with WebSocket headers, timeouts, and common failure modes (`docs/nginx.md`).
 - [x] Add deploy-tool recipes that call Rollbridge CLI commands directly (`docs/deploy-recipes.md`).
 - [x] Add a Capistrano recipe showing shell commands only; do not add a Capistrano plugin or Rollbridge-specific Capistrano tasks (`docs/deploy-recipes.md`).
