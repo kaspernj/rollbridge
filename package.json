@@ -1,6 +1,6 @@
 {
   "name": "rollbridge",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Zero-downtime process supervisor and local traffic switcher for deploy-managed apps.",
   "keywords": [
     "deploy",
