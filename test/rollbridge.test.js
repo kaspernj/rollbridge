@@ -141,6 +141,38 @@ test("singleton processes restart without overlap during deploy", async () => {
   }
 })
 
+test("a failed singleton replacement surfaces the error after stopping the old singleton", async () => {
+  // The singleton's working directory is per-release; only the v1 directory exists, so
+  // the v2 replacement cannot spawn (ENOENT on cwd) and its start() rejects.
+  const fixture = await createFixture({includeSingleton: true, singletonCwd: "{{releasePath}}/{{releaseId}}"})
+  const daemon = await startDaemon(fixture.config)
+
+  await fs.mkdir(path.join(fixture.root, "v1"))
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await waitFor(async () => (await processEvents(fixture.singletonLogPath)).some((event) => event.event === "start" && event.releaseId === "v1"))
+
+    // The new release's singleton fails to start, so the deploy surfaces the error.
+    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}))
+
+    // The old singleton is stopped before the new one is started, so two copies never
+    // overlap — even when the replacement then fails.
+    await waitFor(async () => (await processEvents(fixture.singletonLogPath)).some((event) => event.event === "stop" && event.releaseId === "v1"))
+
+    const status = daemon.status()
+
+    // Traffic switches before singletons are replaced, so the new release is already active,
+    // but its singleton is left failed with no replacement running.
+    assert.equal(status.activeReleaseId, "v2")
+    assert.equal(status.singletons.length, 1)
+    assert.equal(status.singletons[0].process.state, "failed")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("service processes start before releases and restart with the latest deploy template", async () => {
   const fixture = await createFixture({includeService: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
@@ -336,7 +368,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{includeService?: boolean, includeSingleton?: boolean, proxyHost?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
+ * @param {{includeService?: boolean, includeSingleton?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
  * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -376,6 +408,7 @@ async function createFixture(options = {}) {
   if (options.includeSingleton) {
     processes.push({
       command: `${JSON.stringify(process.execPath)} ${JSON.stringify(singletonAppPath)}`,
+      ...(options.singletonCwd ? {cwd: options.singletonCwd} : {}),
       env: {
         ROLLBRIDGE_SINGLETON_LOG: singletonLogPath
       },
