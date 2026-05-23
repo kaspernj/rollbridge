@@ -100,6 +100,29 @@ Stops the active release (or the release named by `--release-id`) and prints the
 updated status JSON. With no active release, the proxy answers `503` until the
 next deploy.
 
+## `restart`
+
+```
+rollbridge restart [--config <path>] [--process <id>] [--policy <policy>]
+```
+
+Restarts **non-proxied** processes and prints `{"restarted": [<ids>]}`. Like
+`systemctl restart`, a running process is bounced (stop, then start) and a
+crashed or stopped one is revived — so this is also how you bring back a process
+that exhausted its `restart` budget (see [`config.md`](config.md#processesrestart)).
+Selectors:
+
+- no selector — restart every non-proxied process (companions, singletons, and services);
+- `--process <id>` — restart only that process;
+- `--policy <companion|singleton|service>` — restart only processes with that policy.
+
+The proxied process is never restarted in place — that would drop traffic.
+Targeting it (by id or `--policy proxied`) is an error; use `rollbridge deploy`
+for a zero-downtime replacement. `--process <id>` with an id that is not a
+managed process (unknown, or a companion with no active release) is also an
+error. Restarting a `service` bounces a shared broker (for example Velocious
+Beacon), which briefly disrupts every process that depends on it.
+
 ## `shutdown`
 
 ```
