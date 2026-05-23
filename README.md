@@ -37,6 +37,7 @@ export default {
   proxy: {
     host: "127.0.0.1",
     port: 8182,
+    upstreamHost: "127.0.0.1",
     healthPath: "/ping",
     healthTimeoutMs: 30000,
     drainTimeoutMs: 60000,
@@ -123,7 +124,7 @@ rendered when the process starts:
 
 - `{{releasePath}}`, `{{releaseId}}`, `{{revision}}`, `{{application}}`, `{{processId}}`
 - `{{port}}` — the port allocated to this process; `{{ports.<id>}}` — another process's allocated port
-- `{{proxy.host}}`, `{{proxy.port}}`
+- `{{proxy.host}}`, `{{proxy.port}}`, `{{proxy.upstreamHost}}`
 - `{{env.<NAME>}}` — a variable from the daemon's own environment, e.g. `{{env.HOME}}`
 
 Referencing a placeholder with no value (including an unset `{{env.<NAME>}}`)
@@ -406,7 +407,7 @@ absolute CLI path for `ExecStart`.
 
 Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For stable local brokers such as Velocious Beacon or `background-jobs-main`, use `service` when the process should survive deploys and restart from the latest successful release if it crashes.
 
-See [`docs/deploy-recipes.md`](docs/deploy-recipes.md) for ready-to-use shell, CI, and Capistrano recipes that drive Rollbridge through its CLI.
+See [`docs/deploy-recipes.md`](docs/deploy-recipes.md) for ready-to-use shell, CI, and Capistrano recipes that drive Rollbridge through its CLI, and [`docs/troubleshooting.md`](docs/troubleshooting.md) for diagnosing health-check failures, port conflicts, stale sockets, crash loops, and stuck draining releases.
 
 ## Releasing
 

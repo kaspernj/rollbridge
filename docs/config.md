@@ -38,8 +38,9 @@ export default {
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `proxy.host` | string | `"127.0.0.1"` | Interface the stable proxy binds, and the host used to reach release processes. |
+| `proxy.host` | string | `"127.0.0.1"` | Interface the stable proxy binds. |
 | `proxy.port` | number | `8182` | Stable port Nginx (or another front end) points at. |
+| `proxy.upstreamHost` | string | `proxy.host`, or `"127.0.0.1"` when `proxy.host` is `0.0.0.0`/`::` | Host Rollbridge uses for release health checks and proxy targets. |
 | `proxy.healthPath` | string | `"/ping"` | Default health-check path for proxied processes. |
 | `proxy.healthTimeoutMs` | number | `30000` | Default health-check timeout for proxied processes. |
 | `proxy.drainTimeoutMs` | number | `60000` | How long to drain open connections from a retired release before stopping it. |
@@ -97,7 +98,7 @@ start with a clear error.
 | `{{processId}}` | This process's `id`. |
 | `{{port}}` | The port allocated to this process. |
 | `{{ports.<id>}}` | The port allocated to another process. |
-| `{{proxy.host}}`, `{{proxy.port}}` | The configured proxy host/port. |
+| `{{proxy.host}}`, `{{proxy.port}}`, `{{proxy.upstreamHost}}` | The configured proxy bind host/port and upstream host. |
 | `{{env.<NAME>}}` | A variable from the daemon's own environment, e.g. `{{env.HOME}}`. |
 
 ## Injected environment variables

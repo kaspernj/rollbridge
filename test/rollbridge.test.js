@@ -64,6 +64,57 @@ test("failed health check leaves the previous release active", async () => {
   }
 })
 
+test("wildcard proxy bind host targets release processes through loopback", async () => {
+  const fixture = await createFixture({proxyHost: "0.0.0.0"})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const status = daemon.status()
+    const release = statusRelease(daemon, "v1")
+
+    assert.ok(daemon.activeRelease, "expected active release")
+    assert.equal(status.proxy.host, "0.0.0.0")
+    assert.equal(status.proxy.upstreamHost, "127.0.0.1")
+    assert.equal(daemon.activeRelease.proxyTarget().target, `http://127.0.0.1:${release.ports.web}`)
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("failed release startup logs process output before cleanup", async () => {
+  const fixture = await createFixture({webCommand: `${JSON.stringify(process.execPath)} -e "console.log('startup stdout'); console.error('startup stderr'); const http = require('node:http'); http.createServer((_request, response) => { response.writeHead(500); response.end('bad') }).listen(Number(process.env.ROLLBRIDGE_PORT), '127.0.0.1')"`, webHealthTimeoutMs: 500})
+  /** @type {Array<{data?: Record<string, import("../src/json.js").JsonValue>, message: string}>} */
+  const logs = []
+  const daemon = new RollbridgeDaemon({
+    config: fixture.config,
+    logger: (message, data = {}) => logs.push({data, message})
+  })
+
+  await daemon.start()
+
+  try {
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"}),
+      /Health check failed/
+    )
+
+    const processStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.processId === "web")
+
+    assert.ok(processStatusLog, "expected failed web process diagnostics to be logged")
+    assert.ok(processStatusLog.data, "expected diagnostic data")
+    assert.ok(Array.isArray(processStatusLog.data.logs), "expected retained process output in diagnostics")
+    assert.ok(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stdout"))
+    assert.ok(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stderr"))
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("singleton processes restart without overlap during deploy", async () => {
   const fixture = await createFixture({includeSingleton: true})
   const daemon = await startDaemon(fixture.config)
@@ -285,7 +336,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{includeService?: boolean, includeSingleton?: boolean, webDependsOnService?: boolean}} [options] - Fixture options.
+ * @param {{includeService?: boolean, includeSingleton?: boolean, proxyHost?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
  * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -309,13 +360,13 @@ async function createFixture(options = {}) {
   }
 
   processes.push({
-    command: options.webDependsOnService
+    command: options.webCommand || (options.webDependsOnService
       ? `${JSON.stringify(process.execPath)} ${JSON.stringify(dependentAppPath)}`
-      : `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
+      : `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`),
     health: {
       intervalMs: 50,
       path: "/ping",
-      timeoutMs: 3000
+      timeoutMs: options.webHealthTimeoutMs || 3000
     },
     id: "web",
     policy: "proxied",
@@ -344,7 +395,7 @@ async function createFixture(options = {}) {
       forceStopTimeoutMs: 500,
       healthPath: "/ping",
       healthTimeoutMs: 3000,
-      host: "127.0.0.1",
+      host: options.proxyHost || "127.0.0.1",
       port: 0
     }
   })
