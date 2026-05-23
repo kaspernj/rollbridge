@@ -127,6 +127,17 @@ to gracefully stop the process and `SIGKILL`s it only if it hasn't exited within
 {id: "worker", policy: "companion", command: "…", stopSignal: "SIGINT", gracefulStopMs: 60000}
 ```
 
+Set `replicas` on a port-less `companion` to run a pool of identical workers.
+Each instance runs as `<id>#<index>` (`worker#0`, `worker#1`, …) — visible in
+`status` and targetable by `rollbridge restart` (base id for all, `worker#0` for
+one) — and gets `{{replicaIndex}}`/`{{replicaCount}}` and
+`ROLLBRIDGE_REPLICA_INDEX`/`_COUNT` so each instance can pick a distinct shard or
+queue. See [`docs/config.md`](docs/config.md#processesreplicas).
+
+```js
+{id: "worker", policy: "companion", command: "npx velocious background-jobs-worker", replicas: 4}
+```
+
 Set `releaseRetention` to bound how many stopped (drained) releases the daemon
 keeps in memory and reports in `status`. `keep` (default `10`) retains the most
 recent stopped releases; `maxAgeMs` (default `0`, disabled) also prunes stopped

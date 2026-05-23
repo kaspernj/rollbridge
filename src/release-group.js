@@ -11,7 +11,7 @@ import {waitForHealth} from "./health.js"
  * @typedef {"starting" | "active" | "draining" | "stopped" | "failed"} ReleaseState
  * @typedef {{http: number, websocket: number}} ReleaseConnections
  * @typedef {{activatedAt: string | undefined, connectionCount: number, connections: ReleaseConnections, drainStartedAt: string | undefined, ports: Record<string, number>, processes: import("./managed-process.js").ManagedProcessStatus[], releaseId: string, releasePath: string, revision: string, state: ReleaseState, stoppedAt: string | undefined}} ReleaseStatus
- * @typedef {{shouldRestart?: () => boolean}} BuildProcessOptions
+ * @typedef {{count?: number, index?: number, instanceId?: string, shouldRestart?: () => boolean}} BuildProcessOptions
  */
 
 /**
@@ -20,6 +20,15 @@ import {waitForHealth} from "./health.js"
  */
 function envId(id) {
   return id.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()
+}
+
+/**
+ * @param {import("./config.js").ProcessConfig} processConfig - Process config.
+ * @param {number} index - Zero-based replica index.
+ * @returns {string} The instance id: the bare process id for a single replica, or `id#index`.
+ */
+function replicaInstanceId(processConfig, index) {
+  return processConfig.replicas > 1 ? `${processConfig.id}#${index}` : processConfig.id
 }
 
 export default class ReleaseGroup extends EventEmitter {
@@ -60,9 +69,13 @@ export default class ReleaseGroup extends EventEmitter {
       await this.allocatePorts()
 
       for (const processConfig of this.releaseProcessStartOrder()) {
-        const processInstance = this.buildProcess(processConfig)
-        this.processes.set(processConfig.id, processInstance)
-        await processInstance.start("deploy")
+        for (let index = 0; index < processConfig.replicas; index += 1) {
+          const instanceId = replicaInstanceId(processConfig, index)
+          const processInstance = this.buildProcess(processConfig, {count: processConfig.replicas, index, instanceId})
+
+          this.processes.set(instanceId, processInstance)
+          await processInstance.start("deploy")
+        }
 
         if (processConfig.policy === "proxied" && processConfig.port && processConfig.health) {
           await waitForHealth({
@@ -86,6 +99,25 @@ export default class ReleaseGroup extends EventEmitter {
    */
   getProcess(id) {
     return this.processes.get(id)
+  }
+
+  /**
+   * Returns the running instances of a process config — one for a single process, or every
+   * replica (`id#0`, `id#1`, …) for a replicated one.
+   * @param {string} configId - Base process id from the config.
+   * @returns {{id: string, process: ManagedProcess}[]} Matching instances, ordered by instance id.
+   */
+  getProcesses(configId) {
+    /** @type {{id: string, process: ManagedProcess}[]} */
+    const instances = []
+
+    for (const [instanceId, processInstance] of this.processes) {
+      if (instanceId === configId || instanceId.startsWith(`${configId}#`)) {
+        instances.push({id: instanceId, process: processInstance})
+      }
+    }
+
+    return instances
   }
 
   /**
@@ -164,10 +196,13 @@ export default class ReleaseGroup extends EventEmitter {
    * @returns {ManagedProcess} Managed process.
    */
   buildProcess(processConfig, options = {}) {
-    const context = this.contextForProcess(processConfig)
+    const index = options.index ?? 0
+    const count = options.count ?? 1
+    const instanceId = options.instanceId ?? processConfig.id
+    const context = this.contextForProcess(processConfig, {count, index})
     const renderedEnv = /** @type {Record<string, string>} */ (renderObject(processConfig.env, context))
     const processEnv = {
-      ...this.baseEnvironment(processConfig),
+      ...this.baseEnvironment(processConfig, {count, index}),
       ...renderedEnv
     }
 
@@ -175,8 +210,8 @@ export default class ReleaseGroup extends EventEmitter {
       command: renderTemplate(processConfig.command, context),
       cwd: processConfig.cwd ? renderTemplate(processConfig.cwd, context) : this.releasePath,
       env: processEnv,
-      id: processConfig.id,
-      logger: (message, data = {}) => this.logger(message, {processId: processConfig.id, releaseId: this.releaseId, ...data}),
+      id: instanceId,
+      logger: (message, data = {}) => this.logger(message, {processId: instanceId, releaseId: this.releaseId, ...data}),
       memory: processConfig.memory,
       outputLines: processConfig.outputLines,
       restart: processConfig.restart,
@@ -189,15 +224,18 @@ export default class ReleaseGroup extends EventEmitter {
 
   /**
    * @param {import("./config.js").ProcessConfig} processConfig - Process config.
+   * @param {{count: number, index: number}} replica - Replica index and total count.
    * @returns {Record<string, string>} Base environment.
    */
-  baseEnvironment(processConfig) {
+  baseEnvironment(processConfig, replica = {count: 1, index: 0}) {
     /** @type {Record<string, string>} */
     const env = {
       ROLLBRIDGE_APPLICATION: this.config.application,
       ROLLBRIDGE_PROCESS_ID: processConfig.id,
       ROLLBRIDGE_RELEASE_ID: this.releaseId,
       ROLLBRIDGE_RELEASE_PATH: this.releasePath,
+      ROLLBRIDGE_REPLICA_COUNT: String(replica.count),
+      ROLLBRIDGE_REPLICA_INDEX: String(replica.index),
       ROLLBRIDGE_REVISION: this.revision
     }
 
@@ -214,9 +252,10 @@ export default class ReleaseGroup extends EventEmitter {
 
   /**
    * @param {import("./config.js").ProcessConfig} processConfig - Process config.
+   * @param {{count: number, index: number}} replica - Replica index and total count.
    * @returns {Record<string, JsonValue>} Template context.
    */
-  contextForProcess(processConfig) {
+  contextForProcess(processConfig, replica = {count: 1, index: 0}) {
     return {
       application: this.config.application,
       env: {...process.env},
@@ -230,6 +269,8 @@ export default class ReleaseGroup extends EventEmitter {
       },
       releaseId: this.releaseId,
       releasePath: this.releasePath,
+      replicaCount: replica.count,
+      replicaIndex: replica.index,
       revision: this.revision
     }
   }

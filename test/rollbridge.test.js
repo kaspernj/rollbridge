@@ -206,6 +206,36 @@ test("service processes start before releases and restart with the latest deploy
   }
 })
 
+test("a replicated companion starts one instance per replica, and restart targets one or all", async () => {
+  const fixture = await createFixture({companionReplicas: 3})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const release = daemon.status().releases.find((candidate) => candidate.state === "active")
+
+    assert.ok(release)
+
+    const workerIds = release.processes.filter((processStatus) => processStatus.id.startsWith("worker")).map((processStatus) => processStatus.id).sort()
+
+    assert.deepEqual(workerIds, ["worker#0", "worker#1", "worker#2"])
+
+    // A specific replica id restarts only that replica.
+    const one = await daemon.restartProcesses({processId: "worker#1"})
+
+    assert.deepEqual(one.restarted, ["worker#1"])
+
+    // The base id restarts every replica.
+    const all = /** @type {string[]} */ ((await daemon.restartProcesses({processId: "worker"})).restarted)
+
+    assert.deepEqual([...all].sort(), ["worker#0", "worker#1", "worker#2"])
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("restart bounces a single process by id", async () => {
   const fixture = await createFixture({includeService: true})
   const daemon = await startDaemon(fixture.config)
@@ -770,7 +800,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
+ * @param {{companionReplicas?: number, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
  * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -798,6 +828,15 @@ async function createFixture(options = {}) {
       command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
       id: "worker",
       policy: "companion"
+    })
+  }
+
+  if (options.companionReplicas) {
+    processes.push({
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+      id: "worker",
+      policy: "companion",
+      replicas: options.companionReplicas
     })
   }
 

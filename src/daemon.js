@@ -538,12 +538,14 @@ export default class RollbridgeDaemon {
 
     for (const processConfig of this.config.processes) {
       if (processConfig.policy === "proxied") continue
-      if (processId !== undefined && processConfig.id !== processId) continue
       if (policy !== undefined && processConfig.policy !== policy) continue
 
-      const process = this.findProcessInstance(processConfig)
+      for (const instance of this.runningInstances(processConfig)) {
+        // A processId selector matches the base config id (all replicas) or one replica's id.
+        if (processId !== undefined && processId !== processConfig.id && processId !== instance.id) continue
 
-      if (process) targets.push({id: processConfig.id, process})
+        targets.push(instance)
+      }
     }
 
     return targets
@@ -551,13 +553,22 @@ export default class RollbridgeDaemon {
 
   /**
    * @param {import("./config.js").ProcessConfig} processConfig - Process definition.
-   * @returns {import("./managed-process.js").default | undefined} The running instance, if any.
+   * @returns {{id: string, process: import("./managed-process.js").default}[]} Running instances (replicas) for this config.
    */
-  findProcessInstance(processConfig) {
-    if (processConfig.policy === "service") return this.services.get(processConfig.id)
-    if (processConfig.policy === "singleton") return this.singletons.get(processConfig.id)
+  runningInstances(processConfig) {
+    if (processConfig.policy === "service") {
+      const service = this.services.get(processConfig.id)
 
-    return this.activeRelease ? this.activeRelease.getProcess(processConfig.id) : undefined
+      return service ? [{id: processConfig.id, process: service}] : []
+    }
+
+    if (processConfig.policy === "singleton") {
+      const singleton = this.singletons.get(processConfig.id)
+
+      return singleton ? [{id: processConfig.id, process: singleton}] : []
+    }
+
+    return this.activeRelease ? this.activeRelease.getProcesses(processConfig.id) : []
   }
 
   /**

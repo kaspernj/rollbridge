@@ -41,6 +41,28 @@ test("templates interpolate values from the daemon environment", () => {
   }
 })
 
+test("replica processes get a replica index, count, and template context", () => {
+  const config = normalizeConfig({
+    application: "demo",
+    control: {path: "/tmp/rollbridge-release-group.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 0, to: 0}},
+      {command: "worker {{replicaIndex}}/{{replicaCount}}", env: {SLOT: "{{replicaIndex}}"}, id: "worker", policy: "companion", replicas: 3}
+    ],
+    proxy: {host: "127.0.0.1", port: 0}
+  })
+  const release = new ReleaseGroup({config, logger: () => {}, releaseId: "v1", releasePath: "/tmp/rel", revision: "v1"})
+  const workerConfig = release.config.processes[1]
+  const replica = release.buildProcess(workerConfig, {count: 3, index: 1, instanceId: "worker#1"})
+
+  assert.equal(replica.id, "worker#1")
+  assert.equal(replica.command, "worker 1/3")
+  assert.equal(replica.env.ROLLBRIDGE_REPLICA_INDEX, "1")
+  assert.equal(replica.env.ROLLBRIDGE_REPLICA_COUNT, "3")
+  assert.equal(replica.env.ROLLBRIDGE_PROCESS_ID, "worker")
+  assert.equal(replica.env.SLOT, "1")
+})
+
 test("a referenced daemon environment variable that is unset fails fast", () => {
   const release = buildRelease({
     command: "run {{env.ROLLBRIDGE_ENV_MISSING}}",
