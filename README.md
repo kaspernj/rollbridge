@@ -348,8 +348,9 @@ rollbridge status --config rollbridge.js
 
 `status` reports each managed process's `state`, `pid`, recent `logs`, last
 `exitCode`/`exitSignal`, and — per process — its automatic-restart count
-(`restarts`), last start time (`startedAt`), and current `uptimeMs` while
-running.
+(`restarts`), last start time (`startedAt`), current `uptimeMs` while running,
+and why it last started (`lastStartReason`: `deploy`, `crash`, or `manual`). The
+same reason appears on each `process started` entry in `rollbridge events`.
 
 Print the recent captured stdout/stderr per process (a one-shot snapshot of the
 retained `outputLines`, not a live stream):

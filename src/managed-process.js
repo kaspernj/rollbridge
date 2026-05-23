@@ -6,10 +6,11 @@ import {spawn} from "node:child_process"
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
+ * @typedef {"deploy" | "crash" | "manual" | "memory"} ManagedProcessStartReason
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
  * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
- * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, logs: ManagedProcessLog[], pid: number | undefined, restarts: number, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
+ * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], pid: number | undefined, restarts: number, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
 export default class ManagedProcess extends EventEmitter {
@@ -40,6 +41,7 @@ export default class ManagedProcess extends EventEmitter {
     this.shouldRestart = shouldRestart
     this.stopTimeoutMs = stopTimeoutMs
     this.state = /** @type {ManagedProcessState} */ ("stopped")
+    this.lastStartReason = /** @type {ManagedProcessStartReason | undefined} */ (undefined)
     this.logs = /** @type {ManagedProcessLog[]} */ ([])
     this.restarts = 0
     this.recentRestarts = /** @type {number[]} */ ([])
@@ -53,8 +55,11 @@ export default class ManagedProcess extends EventEmitter {
     this.exitSignal = undefined
   }
 
-  /** @returns {Promise<void>} Resolves after spawn. */
-  async start() {
+  /**
+   * @param {ManagedProcessStartReason} [reason] - Why the process is being started (deploy by default; "crash" on auto-restart, "manual" via the restart command).
+   * @returns {Promise<void>} Resolves after spawn.
+   */
+  async start(reason = "deploy") {
     if (this.child) return
 
     this.intentionalStop = false
@@ -83,7 +88,8 @@ export default class ManagedProcess extends EventEmitter {
       child.once("spawn", () => {
         this.state = "running"
         this.startedAtMs = Date.now()
-        this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null})
+        this.lastStartReason = reason
+        this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null, reason})
         this.emit("started")
         resolve(undefined)
       })
@@ -206,7 +212,7 @@ export default class ManagedProcess extends EventEmitter {
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined
       this.restarts += 1
-      this.start().catch((error) => {
+      this.start("crash").catch((error) => {
         this.logger("process restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
       })
     }, delayMs)
@@ -287,6 +293,7 @@ export default class ManagedProcess extends EventEmitter {
       exitCode: this.exitCode,
       exitSignal: this.exitSignal,
       id: this.id,
+      lastStartReason: this.lastStartReason,
       logs: this.logs.slice(-this.outputLines),
       pid: this.pid,
       restarts: this.restarts,

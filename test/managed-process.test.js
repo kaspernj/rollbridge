@@ -125,6 +125,54 @@ function buildCrasher(restart) {
   })
 }
 
+test("records the start reason, marking crash auto-restarts", async () => {
+  const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0})
+
+  try {
+    await managed.start()
+
+    assert.equal(managed.status().lastStartReason, "deploy")
+
+    // The fixture crashes ~40ms after each start, so it auto-restarts with reason "crash".
+    await waitFor(() => managed.status().restarts >= 1)
+
+    assert.equal(managed.status().lastStartReason, "crash")
+  } finally {
+    await managed.stop()
+  }
+})
+
+test("records the manual start reason", async () => {
+  // Restarts disabled, so the crash does not overwrite the manual reason.
+  const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: 0, windowMs: 0})
+
+  try {
+    await managed.start("manual")
+
+    assert.equal(managed.status().lastStartReason, "manual")
+  } finally {
+    await managed.stop()
+  }
+})
+
+test("does not record a start reason when the spawn fails", async () => {
+  const managed = new ManagedProcess({
+    command: "true",
+    cwd: "/nonexistent-rollbridge-spawn-dir",
+    env: {},
+    id: "broken",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopTimeoutMs: 500
+  })
+
+  // The cwd does not exist, so the spawn fails before the process ever runs.
+  await assert.rejects(() => managed.start("manual"))
+  assert.equal(managed.status().lastStartReason, undefined)
+})
+
 test("does not auto-restart when the restart policy is disabled (maxRestarts: 0)", async () => {
   const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: 0, windowMs: 0})
 

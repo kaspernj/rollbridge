@@ -62,7 +62,7 @@ export default class ReleaseGroup extends EventEmitter {
       for (const processConfig of this.releaseProcessStartOrder()) {
         const processInstance = this.buildProcess(processConfig)
         this.processes.set(processConfig.id, processInstance)
-        await processInstance.start()
+        await processInstance.start("deploy")
 
         if (processConfig.policy === "proxied" && processConfig.port && processConfig.health) {
           await waitForHealth({
