@@ -83,6 +83,25 @@ export async function runCli(argv) {
     })
 
   program
+    .command("rollback")
+    .description("Roll back to a previous release: re-start it, health-check it, and switch traffic.")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--release-id <id>", "Release id to roll back to (defaults to the most recently retired release)")
+    .action(async (options) => {
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const response = await sendControlCommand({
+        command: {
+          command: "rollback",
+          releaseId: options.releaseId
+        },
+        path: config.control.path
+      })
+
+      console.log(JSON.stringify(response, null, 2))
+    })
+
+  program
     .command("ensure-daemon")
     .description("Start the daemon if the control socket is not already accepting commands.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")

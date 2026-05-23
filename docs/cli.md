@@ -79,6 +79,35 @@ active and the command errors.
 - `--ensure-daemon` — start the daemon first if it isn't running (honors the
   same `--daemon-*` options as `ensure-daemon`).
 
+## `rollback`
+
+```
+rollbridge rollback [--config <path>] [--release-id <id>]
+```
+
+Rolls back to a previously-active release by re-running the deploy flow on its
+retained metadata: it re-starts that release, health-checks the proxied process,
+switches traffic, replaces singletons, and drains the current release — exactly
+like a deploy. With no `--release-id`, it targets the **most recently retired**
+release (the one active just before the current). Prints the same
+`{"activeReleaseId", "previousReleaseId"}` result as `deploy`.
+
+Because rollback reuses the deploy flow, a failed rollback (the target won't
+start or health-check) leaves the current release active and errors — it never
+takes the site down. Singletons are replaced (old stopped, then the target's
+started) and the current release is drained, just like any deploy.
+
+Errors when there is no previous release, the `--release-id` is not a retained
+release, or the target is already active. Only releases Rollbridge still retains
+(see [`releaseRetention`](config.md#releaseretention)) can be rolled back to.
+
+**Migration constraints.** Rollback only manages processes — it does **not**
+revert database migrations or other external state. The target release's on-disk
+directory must still exist, and its code must be compatible with the current
+schema. Keep migrations backwards-compatible (the same rule that lets old and
+new releases overlap during a deploy) so rolling code back to a retained release
+stays safe.
+
 ## `status`
 
 ```

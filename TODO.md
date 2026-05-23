@@ -45,11 +45,11 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Reconnect status to still-running child processes after daemon restart where possible.
   - [ ] Detect and report orphaned Rollbridge-managed processes.
   - [ ] Add a recovery mode for safe startup after daemon crash or machine reboot.
-- [ ] Rollback support.
-  - [ ] Keep enough release metadata to switch traffic back to a previous healthy release.
-  - [ ] Add a `rollback` CLI command that health-checks the target before switching.
-  - [ ] Define how rollback interacts with singleton workers and draining releases.
-  - [ ] Document migration constraints for rollback.
+- [x] Rollback support.
+  - [x] Keep enough release metadata to switch traffic back to a previous healthy release.
+  - [x] Add a `rollback` CLI command that health-checks the target before switching.
+  - [x] Define how rollback interacts with singleton workers and draining releases. (Reuses the deploy flow: replaces singletons and drains the current release.)
+  - [x] Document migration constraints for rollback.
 - [ ] Observability and diagnostics.
   - [x] Add structured event history for deploys, switches, stops, crashes, memory restarts, and failed commands. (In-memory `EventLog` tapping the daemon logger; memory-restart events populate once memory supervision logs them.)
   - [x] Add restart counters and uptime to status (exit reasons already reported via `exitCode`/`exitSignal`/`state`).

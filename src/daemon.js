@@ -259,6 +259,10 @@ export default class RollbridgeDaemon {
       })
     }
 
+    if (commandName === "rollback") {
+      return await this.rollback({releaseId: stringOrUndefined(data.releaseId)})
+    }
+
     if (commandName === "shutdown") {
       setImmediate(() => {
         this.shutdown().catch((error) => {
@@ -320,6 +324,45 @@ export default class RollbridgeDaemon {
       activeReleaseId: release.releaseId,
       previousReleaseId: previousRelease ? previousRelease.releaseId : null
     }
+  }
+
+  /**
+   * Rolls back to a previously-active release by re-running the deploy flow on its
+   * retained metadata: it re-starts the target release, health-checks it, switches
+   * traffic, replaces singletons, and drains the current release — just like a deploy,
+   * so a failed rollback leaves the current release active.
+   * @param {{releaseId?: string}} [args] - Target release id; defaults to the most recently retired release.
+   * @returns {Promise<Record<string, JsonValue>>} The rollback result.
+   */
+  async rollback({releaseId} = {}) {
+    const target = releaseId ? this.releases.get(releaseId) : this.previousRelease()
+
+    if (!target) {
+      throw new Error(releaseId ? `No retained release "${releaseId}" to roll back to.` : "No previous release to roll back to.")
+    }
+
+    if (target === this.activeRelease) {
+      throw new Error(`Release "${target.releaseId}" is already active.`)
+    }
+
+    this.logger("rollback starting", {releaseId: target.releaseId, releasePath: target.releasePath})
+
+    return await this.deploy({releaseId: target.releaseId, releasePath: target.releasePath, revision: target.revision})
+  }
+
+  /**
+   * @returns {ReleaseGroup | undefined} The most recently active release other than the current one, if any.
+   */
+  previousRelease() {
+    /** @type {ReleaseGroup | undefined} */
+    let previous
+
+    for (const release of this.releases.values()) {
+      if (release === this.activeRelease || !release.activatedAt) continue
+      if (!previous || Date.parse(release.activatedAt) >= Date.parse(/** @type {string} */ (previous.activatedAt))) previous = release
+    }
+
+    return previous
   }
 
   /**
