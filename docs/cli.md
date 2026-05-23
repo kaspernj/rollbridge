@@ -184,8 +184,12 @@ rollbridge doctor [--config <path>] [--json]
 
 Validates the config, then probes the environment: whether a daemon already
 holds the control socket, whether the control socket's directory is writable,
-and whether the proxy port can be bound. Exits `1` when any check fails (so a
-green `doctor` means a fresh daemon can start). With `--json`, prints
+and whether the proxy port can be bound. When [`statePath`](config.md#statepath)
+is configured, it also checks that the state file's directory is writable and
+reports any **orphaned processes** — managed processes still alive in a prior
+state file, left by a daemon that didn't shut down cleanly (advisory; a recycled
+pid can be a false positive, so verify before stopping). Exits `1` when any check
+fails (so a green `doctor` means a fresh daemon can start). With `--json`, prints
 `{"checks": [{"name", "ok", "detail"}], "ok"}`.
 
 ## `logs`

@@ -6,7 +6,7 @@ import net from "node:net"
 import httpProxy from "http-proxy"
 import EventLog from "./event-log.js"
 import ReleaseGroup from "./release-group.js"
-import {clearState, readState, writeState} from "./state-store.js"
+import {clearState, liveProcesses, readState, writeState} from "./state-store.js"
 import {resolveGroupId, resolveUserId} from "./system-ids.js"
 
 const EVENT_HISTORY_LIMIT = 1000
@@ -671,48 +671,14 @@ export default class RollbridgeDaemon {
   async reportOrphans() {
     if (!this.statePath) return
 
-    const prior = await readState(this.statePath)
+    const orphans = liveProcesses(await readState(this.statePath))
 
-    if (!prior) return
-
-    try {
-      const snapshot = /** @type {DaemonStatus} */ (prior)
-      const orphans = /** @type {{id: string, pid: number, releaseId: string | null}[]} */ ([])
-
-      for (const release of snapshot.releases) {
-        for (const process of release.processes) {
-          if (process.pid !== undefined && this.isProcessAlive(process.pid)) orphans.push({id: process.id, pid: process.pid, releaseId: release.releaseId})
-        }
-      }
-
-      for (const {id, process} of [...snapshot.services, ...snapshot.singletons]) {
-        if (process.pid !== undefined && this.isProcessAlive(process.pid)) orphans.push({id, pid: process.pid, releaseId: null})
-      }
-
-      for (const orphan of orphans) {
-        this.logger("orphaned managed process detected", {pid: orphan.pid, processId: orphan.id, releaseId: orphan.releaseId})
-      }
-
-      if (orphans.length > 0) {
-        this.logger("orphaned processes from a previous daemon", {count: orphans.length, hint: "a previous daemon did not shut down cleanly; verify these pids and stop any leftovers"})
-      }
-    } catch (error) {
-      this.logger("orphan detection failed", {error: error instanceof Error ? error.message : String(error)})
+    for (const orphan of orphans) {
+      this.logger("orphaned managed process detected", {pid: orphan.pid, processId: orphan.id, releaseId: orphan.releaseId})
     }
-  }
 
-  /**
-   * @param {number} pid - Process id to probe.
-   * @returns {boolean} True when a process with this pid exists (alive).
-   */
-  isProcessAlive(pid) {
-    try {
-      process.kill(pid, 0)
-
-      return true
-    } catch (error) {
-      // EPERM means the process exists but is owned by another user — still alive.
-      return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM")
+    if (orphans.length > 0) {
+      this.logger("orphaned processes from a previous daemon", {count: orphans.length, hint: "a previous daemon did not shut down cleanly; verify these pids and stop any leftovers"})
     }
   }
 

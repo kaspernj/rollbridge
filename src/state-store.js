@@ -54,3 +54,50 @@ export async function readState(path) {
 export async function clearState(path) {
   await fs.rm(path, {force: true})
 }
+
+/**
+ * @param {number} pid - Process id to probe.
+ * @returns {boolean} True when a process with this pid exists (alive).
+ */
+export function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0)
+
+    return true
+  } catch (error) {
+    // EPERM means the process exists but is owned by another user — still alive.
+    return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM")
+  }
+}
+
+/**
+ * Finds managed processes recorded in a persisted snapshot whose pids are still alive — the
+ * orphans left by a daemon that did not shut down cleanly. Advisory (a recycled pid can be a
+ * false positive); returns an empty list for a missing or unexpectedly shaped snapshot.
+ * @param {JsonValue | undefined} state - A persisted state snapshot (from {@link readState}).
+ * @param {(pid: number) => boolean} [alive] - Process-liveness probe (defaults to {@link isProcessAlive}).
+ * @returns {{id: string, pid: number, releaseId: string | null}[]} Live persisted processes.
+ */
+export function liveProcesses(state, alive = isProcessAlive) {
+  if (!state) return []
+
+  const live = /** @type {{id: string, pid: number, releaseId: string | null}[]} */ ([])
+
+  try {
+    const snapshot = /** @type {import("./daemon.js").DaemonStatus} */ (state)
+
+    for (const release of snapshot.releases) {
+      for (const process of release.processes) {
+        if (typeof process.pid === "number" && alive(process.pid)) live.push({id: process.id, pid: process.pid, releaseId: release.releaseId})
+      }
+    }
+
+    for (const {id, process} of [...snapshot.services, ...snapshot.singletons]) {
+      if (typeof process.pid === "number" && alive(process.pid)) live.push({id, pid: process.pid, releaseId: null})
+    }
+  } catch {
+    return []
+  }
+
+  return live
+}

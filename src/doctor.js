@@ -5,6 +5,7 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import path from "node:path"
 import {inspectControlSocket} from "./daemon.js"
+import {liveProcesses, readState} from "./state-store.js"
 
 /**
  * @typedef {{detail: string, name: string, ok: boolean}} DoctorCheck
@@ -25,7 +26,53 @@ export async function runEnvironmentChecks(config) {
   checks.push(await controlSocketDirectoryCheck(config))
   checks.push(await proxyPortCheck(config))
 
+  if (config.statePath !== undefined) {
+    // A live daemon persists its own (live) pids into the state file, so they are not orphans.
+    const daemonRunning = !("error" in socketInspection) && socketInspection.alive
+
+    checks.push(await statePathDirectoryCheck(config.statePath))
+    checks.push(await orphanCheck(config.statePath, daemonRunning))
+  }
+
   return checks
+}
+
+/**
+ * @param {string} statePath - Configured state file path.
+ * @returns {Promise<DoctorCheck>} Whether the state file's directory is writable.
+ */
+async function statePathDirectoryCheck(statePath) {
+  const directory = path.dirname(path.resolve(statePath))
+
+  try {
+    await fs.access(directory, fsConstants.W_OK | fsConstants.X_OK)
+
+    return {detail: `${directory} is writable`, name: "state path directory", ok: true}
+  } catch {
+    return {detail: `${directory} is missing or not writable; state cannot be persisted`, name: "state path directory", ok: false}
+  }
+}
+
+/**
+ * @param {string} statePath - Configured state file path.
+ * @param {boolean} daemonRunning - Whether a Rollbridge daemon is currently live on the control socket.
+ * @returns {Promise<DoctorCheck>} Whether any orphaned managed processes from a prior daemon are still alive.
+ */
+async function orphanCheck(statePath, daemonRunning) {
+  if (daemonRunning) {
+    // The running daemon owns the pids in the state file; they are managed, not orphaned.
+    return {detail: "a daemon is running; its managed processes are not orphans", name: "orphaned processes", ok: true}
+  }
+
+  const orphans = liveProcesses(await readState(statePath))
+
+  if (orphans.length === 0) {
+    return {detail: "no leftover processes from a previous daemon", name: "orphaned processes", ok: true}
+  }
+
+  const summary = orphans.map((orphan) => `${orphan.id} (pid ${orphan.pid})`).join(", ")
+
+  return {detail: `${orphans.length} possible orphaned process${orphans.length === 1 ? "" : "es"} still running: ${summary} — verify and stop any leftovers`, name: "orphaned processes", ok: false}
 }
 
 /**
