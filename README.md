@@ -103,6 +103,18 @@ restart. With no `restart` block, a crashed process keeps restarting after
 restart: {maxRestarts: 5, windowMs: 60000, backoffFactor: 2, maxDelayMs: 30000}
 ```
 
+Set a process's `memory` policy to supervise its resident memory (RSS) and
+gracefully restart it when it grows too large. `memory.limitBytes` is the RSS
+limit (measured across the whole process group, not just the wrapper);
+`memory.warnBytes` logs a warning before the limit; `memory.checkIntervalMs`
+(default `5000`) sets how often RSS is sampled. A memory restart is reported in
+`status` and recorded in `events` (a `process started` with `reason: "memory"`).
+See [`docs/config.md`](docs/config.md#processesmemory).
+
+```js
+memory: {limitBytes: 536870912, warnBytes: 402653184, checkIntervalMs: 5000}
+```
+
 Set `releaseRetention` to bound how many stopped (drained) releases the daemon
 keeps in memory and reports in `status`. `keep` (default `10`) retains the most
 recent stopped releases; `maxAgeMs` (default `0`, disabled) also prunes stopped
@@ -349,8 +361,10 @@ rollbridge status --config rollbridge.js
 `status` reports each managed process's `state`, `pid`, recent `logs`, last
 `exitCode`/`exitSignal`, and — per process — its automatic-restart count
 (`restarts`), last start time (`startedAt`), current `uptimeMs` while running,
-and why it last started (`lastStartReason`: `deploy`, `crash`, or `manual`). The
-same reason appears on each `process started` entry in `rollbridge events`.
+and why it last started (`lastStartReason`: `deploy`, `crash`, `manual`, or
+`memory`). The same reason appears on each `process started` entry in
+`rollbridge events`. For memory-supervised processes it also reports current
+`rssBytes`, `memoryRestarts`, and `lastMemoryRestartAt`.
 
 Print the recent captured stdout/stderr per process (a one-shot snapshot of the
 retained `outputLines`, not a live stream):

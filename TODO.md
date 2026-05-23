@@ -19,12 +19,12 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 
 ## Major Features
 
-- [ ] Memory supervision.
-  - [ ] Add per-process memory config with an RSS limit, check interval, warning threshold, and restart policy.
-  - [ ] Measure the managed process tree, not only the shell wrapper PID.
-  - [ ] Report memory stats and last memory-triggered restart in `status`.
-  - [ ] Restart memory-heavy workers gracefully when possible, with a forced stop timeout.
-  - [ ] Add tests with a fixture process that allocates memory above the configured limit.
+- [x] Memory supervision.
+  - [x] Add per-process memory config with an RSS limit, check interval, warning threshold, and restart policy.
+  - [x] Measure the managed process tree, not only the shell wrapper PID. (Sums RSS across the process group via `/proc`.)
+  - [x] Report memory stats and last memory-triggered restart in `status`.
+  - [x] Restart memory-heavy workers gracefully when possible, with a forced stop timeout.
+  - [x] Add tests with a fixture process that allocates memory above the configured limit.
 - [ ] Worker auto-restart and restart policy controls.
   - [x] Add config for max restarts, restart window, exponential backoff, and disabled restart behavior (per-process `restart` policy).
   - [x] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events. (Per-process `lastStartReason` + a `reason` on the `process started` event; the `memory` reason is wired and fires once memory supervision restarts a process.)
@@ -53,7 +53,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Observability and diagnostics.
   - [x] Add structured event history for deploys, switches, stops, crashes, memory restarts, and failed commands. (In-memory `EventLog` tapping the daemon logger; memory-restart events populate once memory supervision logs them.)
   - [x] Add restart counters and uptime to status (exit reasons already reported via `exitCode`/`exitSignal`/`state`).
-  - [ ] Add memory stats and child-process-tree details to status (with memory supervision).
+  - [ ] Add memory stats and child-process-tree details to status (with memory supervision). (Done: process-group `rssBytes`/`memoryRestarts`/`lastMemoryRestartAt`. Remaining: a per-child-process tree breakdown.)
   - [x] Add a `logs` CLI command (recent per-process output from status).
   - [x] Add an `events` CLI command (after structured event history lands).
   - [ ] Add optional file logging with rotation guidance.
@@ -89,7 +89,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Write a full config reference covering every field, default, and template variable (`docs/config.md`).
 - [x] Write a CLI reference for `daemon`, `ensure-daemon`, `deploy`, `status`, `stop`, `shutdown`, and future commands (`docs/cli.md`).
 - [x] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
-- [ ] Document memory checks and auto-restart behavior after the feature lands.
+- [x] Document memory checks and auto-restart behavior after the feature lands (`docs/config.md` → `processes[].memory`).
 - [ ] Document worker lifecycle hooks and safe background-job deployment patterns after the feature lands.
 - [x] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples (`docs/velocious.md`).
 - [x] Add an Nginx guide with WebSocket headers, timeouts, and common failure modes (`docs/nginx.md`).

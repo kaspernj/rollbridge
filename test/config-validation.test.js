@@ -126,6 +126,40 @@ test("validateConfig defaults the restart policy, accepts overrides, and rejects
   assert.ok(validateRestart({maxRestarts: 1.5}).issues.some((issue) => issue.message === "processes[0].restart.maxRestarts must be a non-negative integer"))
 })
 
+test("validateConfig normalizes memory supervision and rejects bad values", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} memory - Memory config under test, or undefined to omit it.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateMemory = (memory) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", memory, policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  // Omitted → monitoring off.
+  assert.equal(validateMemory(undefined).config.processes[0].memory, undefined)
+
+  const custom = validateMemory({checkIntervalMs: 2000, limitBytes: 1048576, warnBytes: 524288})
+
+  assert.deepEqual(custom.issues, [])
+  assert.deepEqual(custom.config.processes[0].memory, {checkIntervalMs: 2000, limitBytes: 1048576, warnBytes: 524288})
+
+  // Defaults checkIntervalMs and warnBytes when only limitBytes is given.
+  const defaulted = validateMemory({limitBytes: 1048576})
+
+  assert.deepEqual(defaulted.issues, [])
+  assert.deepEqual(defaulted.config.processes[0].memory, {checkIntervalMs: 5000, limitBytes: 1048576, warnBytes: 0})
+
+  const invalid = validateMemory({checkIntervalMs: 0, limitBytes: 0, warnBytes: -1})
+  const messages = invalid.issues.map((issue) => issue.message)
+
+  assert.ok(messages.includes("processes[0].memory.limitBytes must be a positive integer"), JSON.stringify(messages))
+  assert.ok(messages.includes("processes[0].memory.warnBytes must be a non-negative integer"), JSON.stringify(messages))
+  assert.ok(messages.includes("processes[0].memory.checkIntervalMs must be a positive number"), JSON.stringify(messages))
+})
+
 test("validateConfig rejects a non-positive-integer outputLines with a fix", () => {
   const {issues} = validateConfig({
     application: "demo",

@@ -70,6 +70,7 @@ release records; the deploy tool still owns on-disk release directories.
 | `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | `SIGTERM`→`SIGKILL` window for this process. |
 | `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
 | `restart` | object | unlimited restarts, constant delay | Automatic-restart policy: cap, rolling window, and backoff (see below). |
+| `memory` | object | unset (no monitoring) | Memory supervision: restart the process when its RSS exceeds a limit (see below). |
 | `outputLines` | positive integer | `50` | Recent stdout/stderr lines retained per process and reported by `status`/`logs`. |
 
 ### `processes[].restart`
@@ -89,6 +90,28 @@ restarted again.
 With the defaults a crashed process restarts indefinitely after `restartDelayMs`.
 Pair `backoffFactor`/`windowMs` to back off and self-heal after a clean run, or
 set `maxRestarts` to give up on a process stuck in a crash loop.
+
+### `processes[].memory`
+
+Monitors the resident memory (RSS) of the process and **gracefully restarts** it
+(`SIGTERM`, then `SIGKILL` after `gracefulStopMs`) when it exceeds `limitBytes`.
+RSS is measured across the whole managed process group (the spawned wrapper and
+its children), not just the wrapper. Omit `memory` to disable monitoring. Memory
+measurement uses `/proc` and is a no-op on platforms without it.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `memory.limitBytes` | positive integer | **required** | RSS limit in bytes; exceeding it restarts the process. |
+| `memory.warnBytes` | non-negative integer | `0` (off) | Log a `memory warning` once when RSS first crosses this threshold (set below `limitBytes`). |
+| `memory.checkIntervalMs` | positive number | `5000` | How often to measure RSS. |
+
+```js
+{id: "worker", policy: "companion", command: "…", memory: {limitBytes: 536870912, warnBytes: 402653184, checkIntervalMs: 5000}}
+```
+
+A memory restart is reported in `status` (`memoryRestarts`, `lastMemoryRestartAt`,
+current `rssBytes`) and recorded in the event history (a `process started` event
+with `reason: "memory"`).
 
 ### `processes[].health`
 
@@ -146,3 +169,4 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `control.mode` must be an octal mode between `0` and `0o777`.
 - `outputLines` and `releaseRetention.keep` must be positive/non-negative integers; `health.startDelayMs` and `releaseRetention.maxAgeMs` must be non-negative numbers.
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
+- When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.

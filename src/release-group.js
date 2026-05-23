@@ -177,6 +177,7 @@ export default class ReleaseGroup extends EventEmitter {
       env: processEnv,
       id: processConfig.id,
       logger: (message, data = {}) => this.logger(message, {processId: processConfig.id, releaseId: this.releaseId, ...data}),
+      memory: processConfig.memory,
       outputLines: processConfig.outputLines,
       restart: processConfig.restart,
       restartDelayMs: processConfig.restartDelayMs,

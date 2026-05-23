@@ -441,6 +441,7 @@ export default class RollbridgeDaemon {
         cwd: nextDefinition.cwd,
         env: nextDefinition.env,
         logger: nextDefinition.logger,
+        memory: nextDefinition.memory,
         outputLines: nextDefinition.outputLines,
         restart: nextDefinition.restart,
         restartDelayMs: nextDefinition.restartDelayMs,

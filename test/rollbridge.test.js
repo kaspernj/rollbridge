@@ -16,6 +16,7 @@ const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
 const dependentAppPath = path.join(currentDir, "fixtures", "dependent-app.js")
 const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
+const memoryHogPath = path.join(currentDir, "fixtures", "memory-hog.js")
 const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 const singletonAppPath = path.join(currentDir, "fixtures", "singleton-app.js")
 
@@ -430,6 +431,36 @@ test("the events command honors --limit and records failed commands", async () =
   }
 })
 
+test("a process over its memory limit is restarted with reason memory", {skip: process.platform !== "linux" && "requires /proc (Linux)"}, async () => {
+  const limitBytes = 64 * 1024 * 1024
+  const fixture = await createFixture({memoryLimitBytes: limitBytes})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // The hog allocates ~4x the limit, so the monitor restarts it.
+    await waitFor(() => (activeProcessStatus(daemon, "hog")?.memoryRestarts ?? 0) >= 1, 10000)
+
+    const hog = activeProcessStatus(daemon, "hog")
+
+    assert.ok(hog, "hog process should be present")
+    assert.ok(hog.memoryRestarts >= 1, `expected a memory restart, got ${hog.memoryRestarts}`)
+    assert.equal(hog.lastStartReason, "memory")
+    assert.equal(typeof hog.lastMemoryRestartAt, "string")
+
+    // rssBytes is sampled on the monitor's interval; wait for a measurement of the running process.
+    await waitFor(() => {
+      const rssBytes = activeProcessStatus(daemon, "hog")?.rssBytes
+
+      return typeof rssBytes === "number" && rssBytes > 0
+    }, 5000)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("rollback re-activates the previous release and switches traffic back", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)
@@ -704,7 +735,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
+ * @param {{includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
  * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -731,6 +762,18 @@ async function createFixture(options = {}) {
     processes.push({
       command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
       id: "worker",
+      policy: "companion"
+    })
+  }
+
+  if (options.memoryLimitBytes) {
+    processes.push({
+      command: `${JSON.stringify(process.execPath)} ${JSON.stringify(memoryHogPath)}`,
+      env: {
+        ROLLBRIDGE_HOG_BYTES: String(options.memoryLimitBytes * 4)
+      },
+      id: "hog",
+      memory: {checkIntervalMs: 100, limitBytes: options.memoryLimitBytes, warnBytes: 0},
       policy: "companion"
     })
   }
@@ -902,10 +945,11 @@ async function writeConfigFile(config, root) {
 
 /**
  * @param {() => Promise<boolean> | boolean} callback - Probe callback.
+ * @param {number} [timeoutMs] - How long to wait before giving up (default 3000).
  * @returns {Promise<void>} Resolves when callback returns true.
  */
-async function waitFor(callback) {
-  const deadline = Date.now() + 3000
+async function waitFor(callback, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
 
   while (Date.now() < deadline) {
     if (await callback()) return
@@ -913,4 +957,15 @@ async function waitFor(callback) {
   }
 
   throw new Error("Timed out waiting for condition")
+}
+
+/**
+ * @param {RollbridgeDaemon} daemon - Daemon.
+ * @param {string} processId - Process id within the active release.
+ * @returns {import("../src/managed-process.js").ManagedProcessStatus | undefined} The process status, if present.
+ */
+function activeProcessStatus(daemon, processId) {
+  const release = daemon.status().releases.find((candidate) => candidate.state === "active")
+
+  return release ? release.processes.find((processStatus) => processStatus.id === processId) : undefined
 }
