@@ -167,6 +167,45 @@ pattern (companion + `replicas` + `stopSignal`/`lifecycle` hooks +
 `gracefulStopMs`), the old/new worker overlap, and what's still on the roadmap (a
 non-blocking drain mode).
 
+### Worker recipe
+
+A complete `background-jobs-worker` entry that runs a pool and finishes in-flight
+jobs across a deploy:
+
+```js
+{
+  id: "background-jobs-worker",
+  policy: "companion",
+  cwd: "{{releasePath}}/backend",
+  env: {
+    NODE_ENV: "production",
+    VELOCIOUS_ENV: "production",
+    VELOCIOUS_BEACON_PORT: "{{ports.beacon}}",
+    VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"
+  },
+  command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- wait-for-it 127.0.0.1:{{ports.background-jobs-main}} --strict -- npx velocious background-jobs-worker",
+  replicas: 4,
+  gracefulStopMs: 60000
+}
+```
+
+- `replicas: 4` runs four worker instances (`background-jobs-worker#0` … `#3`),
+  each with `ROLLBRIDGE_REPLICA_INDEX`/`ROLLBRIDGE_REPLICA_COUNT` if you shard work.
+- On deploy the new release's workers start before traffic switches; the old
+  release's workers receive `SIGTERM` (the default `stopSignal`) when the old
+  release is retired, then `SIGKILL` after `gracefulStopMs` — so size
+  `gracefulStopMs` to your longest job. Both releases' workers briefly consume the
+  shared queue, so keep job code backwards-compatible and jobs idempotent.
+
+If your worker quiesces on a command or a non-default signal, add a `lifecycle`
+block — Rollbridge runs `quietCommand`, drains for up to `drainTimeoutMs`, then
+stops. For example, send a quiet signal to the worker's process group before the
+drain:
+
+```js
+lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}
+```
+
 ### Choosing the jobs-main policy
 
 `background-jobs-main` is duplicate-unsafe (you never want two coordinators), so
