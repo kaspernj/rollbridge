@@ -153,6 +153,11 @@ test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values",
 
   assert.ok(messages.includes("processes[0].lifecycle.drainTimeoutMs must be a non-negative number"), JSON.stringify(messages))
   assert.ok(messages.includes("processes[0].lifecycle.quietCommand must be a string"), JSON.stringify(messages))
+
+  // drainCommand needs a positive drainTimeoutMs to bound it; otherwise the drain step is skipped.
+  assert.ok(validateLifecycle({drainCommand: "drain"}).issues
+    .some((issue) => issue.message === "processes[0].lifecycle.drainCommand requires a positive processes[0].lifecycle.drainTimeoutMs"))
+  assert.deepEqual(validateLifecycle({drainCommand: "drain", drainTimeoutMs: 1000}).issues, [])
 })
 
 test("validateConfig defaults replicas, accepts companion replicas, and rejects bad placements", () => {

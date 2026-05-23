@@ -266,6 +266,34 @@ test("a configured stopCommand is used instead of the stop signal", async () => 
   }
 })
 
+test("a failing lifecycle hook is logged but does not fail the stop", async () => {
+  /** @type {string[]} */
+  const messages = []
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    lifecycle: {drainTimeoutMs: 0, quietCommand: `${JSON.stringify("/bin/sh")} -c "exit 3"`},
+    logger: (message) => { messages.push(message) },
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: 2000
+  })
+
+  try {
+    await managed.start()
+    await managed.stop()
+
+    assert.equal(managed.status().state, "stopped")
+    assert.ok(messages.includes("quiet command exited non-zero"), `expected a non-zero hook log, got ${messages.join(",")}`)
+  } finally {
+    await managed.stop()
+  }
+})
+
 test("a hanging lifecycle hook is bounded so stop still completes", async () => {
   const managed = new ManagedProcess({
     command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,

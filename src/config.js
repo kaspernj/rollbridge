@@ -331,6 +331,10 @@ function normalizeLifecycle(value, key, issues) {
   if (value.drainCommand !== undefined) lifecycle.drainCommand = normalizeString(value.drainCommand, `${key}.drainCommand`, issues)
   if (value.stopCommand !== undefined) lifecycle.stopCommand = normalizeString(value.stopCommand, `${key}.stopCommand`, issues)
 
+  if (lifecycle.drainCommand !== undefined && lifecycle.drainTimeoutMs <= 0) {
+    issues.push({fix: `Set ${key}.drainTimeoutMs to a positive number to bound ${key}.drainCommand; with 0 the drain step is skipped and the command never runs.`, message: `${key}.drainCommand requires a positive ${key}.drainTimeoutMs`})
+  }
+
   return lifecycle
 }
 

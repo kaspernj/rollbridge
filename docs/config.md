@@ -113,8 +113,8 @@ job worker quiesce and finish in-flight work before it is terminated. Omit
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `lifecycle.quietCommand` | string | unset | Run first to tell the process to stop accepting new work. |
-| `lifecycle.drainCommand` | string | unset | Run after quieting to wait until the process has drained (it blocks until done). When unset, Rollbridge instead waits up to `drainTimeoutMs` for the process to exit on its own. |
-| `lifecycle.drainTimeoutMs` | non-negative number | `0` | Maximum time to wait for the drain step (`0` skips waiting). |
+| `lifecycle.drainCommand` | string | unset | Run after quieting to wait until the process has drained (it blocks until done). When unset, Rollbridge instead waits up to `drainTimeoutMs` for the process to exit on its own. Requires a positive `drainTimeoutMs` (which bounds it). |
+| `lifecycle.drainTimeoutMs` | non-negative number | `0` | Bounds the drain step. `0` **skips the drain step entirely** (no `drainCommand`, no wait). |
 | `lifecycle.stopCommand` | string | unset | Run to stop the process instead of sending `stopSignal`, if it is still running after draining. |
 
 The full stop sequence is: run `quietCommand` → drain (`drainCommand`, or wait
@@ -232,4 +232,4 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
-- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number.
+- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`.

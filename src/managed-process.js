@@ -354,10 +354,12 @@ export default class ManagedProcess extends EventEmitter {
     // 1. Quiesce: tell the process to stop accepting new work.
     if (quietCommand) await this.runHook(quietCommand, this.stopTimeoutMs, "quiet command")
 
-    // 2. Drain: let in-flight work finish. A drainCommand blocks until drained; otherwise
-    //    wait for the process to exit on its own. Skipped once the process has exited.
-    if (this.child && drainCommand) await this.runHook(drainCommand, drainTimeoutMs || this.stopTimeoutMs, "drain command")
-    else if (this.child && drainTimeoutMs > 0) await this.waitForExit(drainTimeoutMs)
+    // 2. Drain: let in-flight work finish, bounded by drainTimeoutMs (0 skips the step). A
+    //    drainCommand blocks until drained; otherwise wait for the process to exit on its own.
+    if (this.child && drainTimeoutMs > 0) {
+      if (drainCommand) await this.runHook(drainCommand, drainTimeoutMs, "drain command")
+      else await this.waitForExit(drainTimeoutMs)
+    }
 
     // 3. Stop whatever is still running, then SIGKILL if it outlasts the graceful window.
     if (this.child) {
@@ -422,8 +424,16 @@ export default class ManagedProcess extends EventEmitter {
         finish()
       }, timeoutMs)
 
-      hook.once("exit", () => {
+      hook.once("exit", (code, signal) => {
         clearTimeout(timer)
+
+        // A non-zero/signalled exit is surfaced (but still non-fatal); skip when the timeout
+        // already killed the hook, which logs separately.
+        if (!settled) {
+          if (typeof code === "number" && code !== 0) this.logger(`${label} exited non-zero`, {code, id: this.id})
+          else if (signal) this.logger(`${label} exited on signal`, {id: this.id, signal})
+        }
+
         finish()
       })
       hook.once("error", (error) => {
