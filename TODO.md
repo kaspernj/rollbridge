@@ -77,7 +77,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Add process output retention config instead of a fixed recent-log count.
 - [x] Add environment variable interpolation from the daemon environment.
 - [x] Add `--config` default lookup resolving to `rollbridge.js` when no path is given.
-- [ ] Add shell completion generation for common shells.
+- [x] Add shell completion generation for common shells (`rollbridge completion bash|zsh`).
 - [x] Add npm package metadata such as repository, license, bugs, and homepage.
 - [x] Add systemd service examples for the Rollbridge daemon.
 - [x] Add tests for malformed control socket JSON and unknown control commands.
