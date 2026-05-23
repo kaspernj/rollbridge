@@ -175,3 +175,18 @@ test("applies exponential backoff to restart delays, capped by maxDelayMs", () =
   assert.equal(uncapped.restartDelayFor(0), 10)
   assert.equal(uncapped.restartDelayFor(2), 90)
 })
+
+test("the unlimited constant-delay fast path still applies maxDelayMs", () => {
+  // restartDelayMs (10) above maxDelayMs (5), with no backoff and unlimited restarts.
+  const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 5, maxRestarts: undefined, windowMs: 0})
+
+  assert.equal(managed.restartDelayFor(0), 5)
+
+  /** @type {number | undefined} */
+  let queued
+
+  managed.queueRestart = (delayMs) => { queued = delayMs }
+  managed.scheduleRestart()
+
+  assert.equal(queued, 5)
+})

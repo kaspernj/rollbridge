@@ -161,9 +161,11 @@ export default class ManagedProcess extends EventEmitter {
   scheduleRestart() {
     const {backoffFactor, maxRestarts, windowMs} = this.restart
 
-    // Fast path for the default policy: unlimited restarts with a constant delay, no bookkeeping.
+    // Fast path: unlimited restarts with a constant delay needs no per-restart bookkeeping.
+    // The delay is constant across attempts here (backoffFactor is 1), so restartDelayFor(0)
+    // gives the right value while still applying any maxDelayMs cap.
     if (maxRestarts === undefined && backoffFactor === 1) {
-      this.queueRestart(this.restartDelayMs)
+      this.queueRestart(this.restartDelayFor(0))
 
       return
     }
