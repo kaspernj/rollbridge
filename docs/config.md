@@ -75,7 +75,8 @@ release records; the deploy tool still owns on-disk release directories.
 | `env` | object of string → string | `{}` | Extra environment variables (values templated). Merged over the injected `ROLLBRIDGE_*` vars. |
 | `port` | number or `{from, to}` | unset | Port (or range) allocated per release. **Required for the `proxied` process.** A plain number `n` means the fixed port `n` (`{from: n, to: n}`). |
 | `health` | object or `false` | enabled with defaults | Health check for the `proxied` process; set `false` to disable (see below). |
-| `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | `SIGTERM`→`SIGKILL` window for this process. |
+| `stopSignal` | signal name (e.g. `"SIGTERM"`, `"SIGINT"`, `"SIGQUIT"`) | `"SIGTERM"` | Signal sent to gracefully stop the process; after `gracefulStopMs` it is `SIGKILL`ed. Use a worker's quit signal so it finishes in-flight work before exiting. |
+| `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | Graceful-stop window: time between `stopSignal` and `SIGKILL` for this process. |
 | `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
 | `restart` | object | unlimited restarts, constant delay | Automatic-restart policy: cap, rolling window, and backoff (see below). |
 | `memory` | object | unset (no monitoring) | Memory supervision: restart the process when its RSS exceeds a limit (see below). |

@@ -192,6 +192,37 @@ function buildLongLived(shouldRestart) {
   })
 }
 
+test("sends the configured stopSignal as the graceful stop signal", async () => {
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGINT",
+    stopTimeoutMs: 500
+  })
+
+  /** @type {string[]} */
+  const signals = []
+  const killProcessGroup = managed.killProcessGroup.bind(managed)
+
+  managed.killProcessGroup = (signal) => {
+    signals.push(signal)
+    killProcessGroup(signal)
+  }
+
+  await managed.start()
+  await managed.stop()
+
+  // The graceful stop uses the configured signal (a SIGKILL fallback, if any, comes after).
+  assert.equal(signals[0], "SIGINT")
+  assert.equal(managed.status().state, "stopped")
+})
+
 test("a memory restart respawns and is counted when the supervisor still wants the process", async () => {
   const managed = buildLongLived(() => true)
 

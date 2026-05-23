@@ -118,6 +118,15 @@ See [`docs/config.md`](docs/config.md#processesmemory).
 memory: {limitBytes: 536870912, warnBytes: 402653184, checkIntervalMs: 5000}
 ```
 
+Set a process's `stopSignal` (default `"SIGTERM"`) to the signal it quiets on, so
+a worker finishes its in-flight work before exiting. Rollbridge sends `stopSignal`
+to gracefully stop the process and `SIGKILL`s it only if it hasn't exited within
+`gracefulStopMs`. For example, a job worker that drains on `SIGINT`:
+
+```js
+{id: "worker", policy: "companion", command: "…", stopSignal: "SIGINT", gracefulStopMs: 60000}
+```
+
 Set `releaseRetention` to bound how many stopped (drained) releases the daemon
 keeps in memory and reports in `status`. `keep` (default `10`) retains the most
 recent stopped releases; `maxAgeMs` (default `0`, disabled) also prunes stopped

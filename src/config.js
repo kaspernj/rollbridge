@@ -1,6 +1,7 @@
 // @ts-check
 
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 import {pathToFileURL} from "node:url"
 
@@ -11,7 +12,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, restart: RestartConfig, restartDelayMs: number, command: string}} ProcessConfig
+ * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
  * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
@@ -179,7 +180,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", memory: undefined, outputLines: 50, policy: "companion", port: undefined, restart: defaultRestartConfig(), restartDelayMs: 1000}
+    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", memory: undefined, outputLines: 50, policy: "companion", port: undefined, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
   }
 
   const source = value
@@ -196,7 +197,8 @@ function normalizeProcess(value, index, proxy, issues) {
     policy: normalizePolicy(source.policy, `processes[${index}].policy`, issues),
     port: normalizePortRange(source.port, `processes[${index}].port`, issues),
     restart: normalizeRestart(source.restart, `processes[${index}].restart`, issues),
-    restartDelayMs: normalizeNumber(source.restartDelayMs, `processes[${index}].restartDelayMs`, issues, {default: 1000})
+    restartDelayMs: normalizeNumber(source.restartDelayMs, `processes[${index}].restartDelayMs`, issues, {default: 1000}),
+    stopSignal: normalizeStopSignal(source.stopSignal, `processes[${index}].stopSignal`, issues)
   }
 }
 
@@ -301,6 +303,24 @@ function normalizeMemory(value, key, issues) {
   }
 
   return {checkIntervalMs, limitBytes, warnBytes}
+}
+
+/**
+ * @param {JsonValue} value - Raw stop signal.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {string} The graceful-stop signal name (default "SIGTERM").
+ */
+function normalizeStopSignal(value, key, issues) {
+  if (value === undefined || value === null) return "SIGTERM"
+
+  if (typeof value === "string" && Object.prototype.hasOwnProperty.call(os.constants.signals, value)) {
+    return value
+  }
+
+  issues.push({fix: `Set ${key} to a signal name such as "SIGTERM", "SIGINT", or "SIGQUIT".`, message: `${key} must be a valid signal name`})
+
+  return "SIGTERM"
 }
 
 /**

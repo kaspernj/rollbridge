@@ -32,7 +32,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Keep restart behavior safe for job workers by using lifecycle hooks before termination.
 - [ ] Graceful job-worker lifecycle.
   - [ ] Add generic lifecycle hooks such as `quietCommand`, `drainCommand`, `drainTimeoutMs`, and `stopCommand`.
-  - [ ] Support signal-only lifecycle steps for workers that can quiet on a Unix signal.
+  - [x] Support signal-only lifecycle steps for workers that can quiet on a Unix signal. (Per-process `stopSignal`; sent before the `SIGKILL`-after-`gracefulStopMs` fallback.)
   - [ ] Add a non-blocking drain mode so new workers can start while old workers finish running jobs.
   - [ ] Document a Velocious background-jobs-worker recipe once the lifecycle contract is implemented.
 - [ ] Replicas and stable worker indexes.

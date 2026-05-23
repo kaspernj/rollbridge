@@ -10,7 +10,7 @@ import {processGroupMembers} from "./process-memory.js"
  * @typedef {"deploy" | "crash" | "manual" | "memory"} ManagedProcessStartReason
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
- * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
+ * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopSignal: string, stopTimeoutMs: number}} ManagedProcessDefinition
  * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
@@ -27,9 +27,10 @@ export default class ManagedProcess extends EventEmitter {
    * @param {import("./config.js").RestartConfig} [args.restart] - Restart policy (defaults to unlimited restarts with a constant delay).
    * @param {number} args.restartDelayMs - Restart delay.
    * @param {() => boolean} args.shouldRestart - Restart policy callback.
+   * @param {string} [args.stopSignal] - Signal sent to gracefully stop the process (default "SIGTERM").
    * @param {number} args.stopTimeoutMs - Stop timeout.
    */
-  constructor({command, cwd, env, id, logger, memory, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopTimeoutMs}) {
+  constructor({command, cwd, env, id, logger, memory, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopSignal = "SIGTERM", stopTimeoutMs}) {
     super()
 
     this.command = command
@@ -42,6 +43,7 @@ export default class ManagedProcess extends EventEmitter {
     this.restart = restart
     this.restartDelayMs = restartDelayMs
     this.shouldRestart = shouldRestart
+    this.stopSignal = stopSignal
     this.stopTimeoutMs = stopTimeoutMs
     this.state = /** @type {ManagedProcessState} */ ("stopped")
     this.lastStartReason = /** @type {ManagedProcessStartReason | undefined} */ (undefined)
@@ -130,6 +132,7 @@ export default class ManagedProcess extends EventEmitter {
     this.restart = definition.restart
     this.restartDelayMs = definition.restartDelayMs
     this.shouldRestart = definition.shouldRestart
+    this.stopSignal = definition.stopSignal
     this.stopTimeoutMs = definition.stopTimeoutMs
   }
 
@@ -342,7 +345,7 @@ export default class ManagedProcess extends EventEmitter {
     }
 
     this.state = "stopping"
-    this.killProcessGroup("SIGTERM")
+    this.killProcessGroup(this.stopSignal)
     const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
     const stopped = await this.waitForExit(timeoutMs)
 
@@ -356,7 +359,7 @@ export default class ManagedProcess extends EventEmitter {
   }
 
   /**
-   * @param {"SIGTERM" | "SIGKILL"} signal - Signal to send.
+   * @param {string} signal - Signal name to send (the configured stop signal, or "SIGKILL").
    * @returns {void}
    */
   killProcessGroup(signal) {
