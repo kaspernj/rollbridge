@@ -126,6 +126,42 @@ test("validateConfig defaults the restart policy, accepts overrides, and rejects
   assert.ok(validateRestart({maxRestarts: 1.5}).issues.some((issue) => issue.message === "processes[0].restart.maxRestarts must be a non-negative integer"))
 })
 
+test("validateConfig defaults replicas, accepts companion replicas, and rejects bad placements", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} worker - Second (worker) process definition.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateWorker = (worker) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}, worker],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.equal(validateWorker({command: "run worker", id: "worker", policy: "companion"}).config.processes[1].replicas, 1)
+
+  const replicated = validateWorker({command: "run worker", id: "worker", policy: "companion", replicas: 4})
+
+  assert.deepEqual(replicated.issues, [])
+  assert.equal(replicated.config.processes[1].replicas, 4)
+
+  // replicas > 1 on a companion with a port is rejected.
+  assert.ok(validateWorker({command: "run worker", id: "worker", policy: "companion", port: {from: 19000, to: 19099}, replicas: 2}).issues
+    .some((issue) => /can only set replicas > 1 on a companion process without a port/.test(issue.message)))
+
+  // replicas > 1 on a non-companion policy is rejected.
+  assert.ok(validateWorker({command: "run broker", id: "broker", policy: "service", replicas: 2}).issues
+    .some((issue) => /can only set replicas > 1 on a companion/.test(issue.message)))
+
+  // Non-positive replicas is rejected.
+  assert.ok(validateWorker({command: "run worker", id: "worker", policy: "companion", replicas: 0}).issues
+    .some((issue) => issue.message === "processes[1].replicas must be a positive integer"))
+
+  // A "#" in a process id (reserved for replica instance ids) is rejected.
+  assert.ok(validateWorker({command: "run worker", id: "work#er", policy: "companion"}).issues
+    .some((issue) => /must not contain "#"/.test(issue.message)))
+})
+
 test("validateConfig defaults stopSignal, accepts valid signals, and rejects unknown ones", () => {
   /**
    * @param {import("../src/json.js").JsonValue} stopSignal - Stop signal under test, or undefined to omit it.

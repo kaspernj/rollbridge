@@ -12,7 +12,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
+ * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
  * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
@@ -180,7 +180,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", memory: undefined, outputLines: 50, policy: "companion", port: undefined, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
+    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", memory: undefined, outputLines: 50, policy: "companion", port: undefined, replicas: 1, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
   }
 
   const source = value
@@ -196,6 +196,7 @@ function normalizeProcess(value, index, proxy, issues) {
     outputLines: normalizeOutputLines(source.outputLines, `processes[${index}].outputLines`, issues),
     policy: normalizePolicy(source.policy, `processes[${index}].policy`, issues),
     port: normalizePortRange(source.port, `processes[${index}].port`, issues),
+    replicas: normalizeReplicas(source.replicas, `processes[${index}].replicas`, issues),
     restart: normalizeRestart(source.restart, `processes[${index}].restart`, issues),
     restartDelayMs: normalizeNumber(source.restartDelayMs, `processes[${index}].restartDelayMs`, issues, {default: 1000}),
     stopSignal: normalizeStopSignal(source.stopSignal, `processes[${index}].stopSignal`, issues)
@@ -342,6 +343,24 @@ function normalizeOutputLines(value, key, issues) {
 }
 
 /**
+ * @param {JsonValue} value - Raw replica count.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {number} Number of replicas to run (default 1).
+ */
+function normalizeReplicas(value, key, issues) {
+  const replicas = normalizeNumber(value, key, issues, {default: 1})
+
+  if (!Number.isInteger(replicas) || replicas < 1) {
+    issues.push({fix: `Set ${key} to a positive integer number of replicas, e.g. 1 or 4.`, message: `${key} must be a positive integer`})
+
+    return 1
+  }
+
+  return replicas
+}
+
+/**
  * @param {Record<string, JsonValue>} source - Raw release retention config.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @returns {ReleaseRetentionConfig} Normalized release retention policy.
@@ -434,6 +453,14 @@ function validateProcessSet(processes, issues) {
     }
 
     seenIds.add(processConfig.id)
+
+    if (processConfig.id.includes("#")) {
+      issues.push({fix: `Remove "#" from the process id "${processConfig.id}"; it is reserved for replica instance ids (e.g. "${processConfig.id.replace(/#/g, "")}#0").`, message: `Process id "${processConfig.id}" must not contain "#"`})
+    }
+
+    if (processConfig.replicas > 1 && (processConfig.policy !== "companion" || processConfig.port)) {
+      issues.push({fix: `Run replicas (${processConfig.replicas}) only on a companion process without a port; "${processConfig.id}" is ${processConfig.policy}${processConfig.port ? " with a port" : ""}.`, message: `Process "${processConfig.id}" can only set replicas > 1 on a companion process without a port`})
+    }
   }
 
   const proxiedProcesses = processes.filter((processConfig) => processConfig.policy === "proxied")

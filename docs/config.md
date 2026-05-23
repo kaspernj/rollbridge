@@ -80,7 +80,27 @@ release records; the deploy tool still owns on-disk release directories.
 | `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
 | `restart` | object | unlimited restarts, constant delay | Automatic-restart policy: cap, rolling window, and backoff (see below). |
 | `memory` | object | unset (no monitoring) | Memory supervision: restart the process when its RSS exceeds a limit (see below). |
+| `replicas` | positive integer | `1` | Run this many instances of the process (see below). |
 | `outputLines` | positive integer | `50` | Recent stdout/stderr lines retained per process and reported by `status`/`logs`. |
+
+### `processes[].replicas`
+
+Run a pool of identical instances of one process — for example several
+background-job workers. `replicas` greater than `1` is supported only on a
+**`companion`** process **without a `port`** (the worker-pool case);
+`proxied`, `singleton`, and ported processes must keep `replicas: 1`.
+
+```js
+{id: "worker", policy: "companion", command: "npx velocious background-jobs-worker", replicas: 4}
+```
+
+Each replica runs as its own managed process with id `<id>#<index>` (`worker#0`,
+`worker#1`, …) — that id is what appears in `status` and what
+[`rollbridge restart`](cli.md#restart) targets (use the base id `worker` to
+restart every replica, or `worker#0` for one). Replicas get `replicaIndex`/
+`replicaCount` template variables and `ROLLBRIDGE_REPLICA_INDEX`/`_COUNT` in their
+environment, so each instance can pick a distinct shard, queue, or lock. A single
+process (`replicas: 1`) keeps its plain id and is replica `0` of `1`.
 
 ### `processes[].restart`
 
@@ -148,6 +168,7 @@ start with a clear error.
 | `{{releasePath}}` | The deploy's `--release-path`. |
 | `{{revision}}` | The deploy's `--revision` (falls back to the release id). |
 | `{{processId}}` | This process's `id`. |
+| `{{replicaIndex}}`, `{{replicaCount}}` | This instance's zero-based replica index and the total replica count (`0` and `1` for a single process). |
 | `{{port}}` | The port allocated to this process. |
 | `{{ports.<id>}}` | The port allocated to another process. |
 | `{{proxy.host}}`, `{{proxy.port}}`, `{{proxy.upstreamHost}}` | The configured proxy bind host/port and upstream host. |
@@ -161,7 +182,8 @@ Rollbridge sets these in every managed process's environment (the process's own
 | Variable | Value |
 | --- | --- |
 | `ROLLBRIDGE_APPLICATION` | `application` |
-| `ROLLBRIDGE_PROCESS_ID` | This process's `id`. |
+| `ROLLBRIDGE_PROCESS_ID` | This process's `id` (the base id, not the `#index` instance id). |
+| `ROLLBRIDGE_REPLICA_INDEX`, `ROLLBRIDGE_REPLICA_COUNT` | This instance's zero-based replica index and total replica count (`0` and `1` for a single process). |
 | `ROLLBRIDGE_RELEASE_ID` | The release id. |
 | `ROLLBRIDGE_RELEASE_PATH` | The release path. |
 | `ROLLBRIDGE_REVISION` | The revision (or release id). |
@@ -181,3 +203,4 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `outputLines` and `releaseRetention.keep` must be positive/non-negative integers; `health.startDelayMs` and `releaseRetention.maxAgeMs` must be non-negative numbers.
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
+- `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
