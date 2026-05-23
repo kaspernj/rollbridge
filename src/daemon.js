@@ -344,7 +344,7 @@ export default class RollbridgeDaemon {
       }
 
       try {
-        await service.start()
+        await service.start("deploy")
         startedServices.push(processConfig.id)
       } catch (error) {
         this.services.delete(processConfig.id)
@@ -418,7 +418,7 @@ export default class RollbridgeDaemon {
       const singleton = release.buildProcess(processConfig)
 
       this.singletons.set(processConfig.id, singleton)
-      await singleton.start()
+      await singleton.start("deploy")
     }
   }
 
@@ -446,7 +446,7 @@ export default class RollbridgeDaemon {
     for (const target of targets) {
       this.logger("process restart requested", {processId: target.id})
       await target.process.stop()
-      await target.process.start()
+      await target.process.start("manual")
     }
 
     return {restarted: targets.map((target) => target.id)}

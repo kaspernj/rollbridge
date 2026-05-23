@@ -87,8 +87,8 @@ rollbridge status [--config <path>]
 
 Prints the daemon status JSON: the active release id, the proxy address, and —
 per release, service, and singleton process — its `state`, `pid`, automatic
-`restarts`, `startedAt`, `uptimeMs`, last `exitCode`/`exitSignal`, and recent
-`logs`.
+`restarts`, `startedAt`, `uptimeMs`, last `exitCode`/`exitSignal`,
+`lastStartReason` (`deploy`, `crash`, or `manual`), and recent `logs`.
 
 ## `stop`
 
@@ -174,10 +174,10 @@ rollbridge events [--config <path>] [--limit <count>] [--json]
 
 Prints the daemon's recent structured event history — deploys (`deploy
 starting`, `traffic switched`, `deploy failed`), release stops (`release
-stopped`, `release drained`), process lifecycle (`process started`, `process
-exited`, `restart limit reached`, `process restart requested`), and failed
-control commands (`command failed`). Each event has a timestamp, a message, and
-a structured data payload. The daemon keeps the most recent 1000 events in
+stopped`, `release drained`), process lifecycle (`process started` — with a
+`reason` of `deploy`, `crash`, or `manual` — `process exited`, `restart limit
+reached`, `process restart requested`), and failed control commands (`command
+failed`). Each event has a timestamp, a message, and a structured data payload. The daemon keeps the most recent 1000 events in
 memory (cleared on restart). `--limit <count>` shows only the most recent
 `count`. With `--json`, prints `[{"at", "message", "data"}]`.
 

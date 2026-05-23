@@ -27,7 +27,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [ ] Add tests with a fixture process that allocates memory above the configured limit.
 - [ ] Worker auto-restart and restart policy controls.
   - [x] Add config for max restarts, restart window, exponential backoff, and disabled restart behavior (per-process `restart` policy).
-  - [ ] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events.
+  - [x] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events. (Per-process `lastStartReason` + a `reason` on the `process started` event; the `memory` reason is wired and fires once memory supervision restarts a process.)
   - [x] Add a `restart` CLI command for a single process, a policy group, or all non-proxied workers.
   - [ ] Keep restart behavior safe for job workers by using lifecycle hooks before termination.
 - [ ] Graceful job-worker lifecycle.

@@ -336,6 +336,39 @@ test("the restart control command bounces a process over the socket", async () =
   }
 })
 
+test("status and events distinguish deploy starts from manual restarts", async () => {
+  const fixture = await createFixture({includeService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const afterDeploy = daemon.status().services.find((service) => service.id === "beacon")
+
+    assert.ok(afterDeploy)
+    assert.equal(afterDeploy.process.lastStartReason, "deploy")
+
+    await daemon.restartProcesses({processId: "beacon"})
+
+    const afterRestart = daemon.status().services.find((service) => service.id === "beacon")
+
+    assert.ok(afterRestart)
+    assert.equal(afterRestart.process.lastStartReason, "manual")
+
+    const events = /** @type {import("../src/event-log.js").DaemonEvent[]} */ ((await sendControlCommand({
+      command: {command: "events"},
+      path: fixture.config.control.path
+    })).events)
+    const startReasons = events.filter((event) => event.message === "process started").map((event) => event.data.reason)
+
+    assert.ok(startReasons.includes("deploy"), JSON.stringify(startReasons))
+    assert.ok(startReasons.includes("manual"), JSON.stringify(startReasons))
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("the daemon records a structured event history served by the events command", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)
