@@ -164,8 +164,8 @@ The worker is a `companion`, so each release runs its own workers:
 
 See [`docs/workers.md`](workers.md) for the full safe background-job deployment
 pattern (companion + `replicas` + `stopSignal`/`lifecycle` hooks +
-`gracefulStopMs`), the old/new worker overlap, and what's still on the roadmap (a
-non-blocking drain mode).
+`gracefulStopMs`), the old/new worker overlap, and `nonBlockingDrain` to start the
+old workers' drain immediately when a release is retired.
 
 ### Worker recipe
 

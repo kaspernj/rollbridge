@@ -95,9 +95,20 @@ bounded by a timeout, so a slow hook can't wedge a deploy.
 }
 ```
 
-See [`docs/config.md`](config.md#processeslifecycle) for the hook reference. A
-**non-blocking drain** mode (starting new workers while old ones finish) is still
-on the [roadmap](../TODO.md#major-features).
+See [`docs/config.md`](config.md#processeslifecycle) for the hook reference.
+
+## Non-blocking drain
+
+By default a retired release's workers are stopped only after the proxied
+process's connections have drained. Set `nonBlockingDrain: true` on a worker
+companion whose work is independent of the web process (a job worker on a shared
+queue) to start its graceful stop **immediately** when the release is retired —
+in parallel with the connection drain. The new release's workers handle new work
+while the old workers finish their in-flight jobs:
+
+```js
+{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, gracefulStopMs: 60000}
+```
 
 See [`docs/config.md`](config.md) for `stopSignal`, `replicas`, and
 `gracefulStopMs`, and [`docs/velocious.md`](velocious.md) for a full Velocious

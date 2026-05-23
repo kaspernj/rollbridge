@@ -30,10 +30,10 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events. (Per-process `lastStartReason` + a `reason` on the `process started` event; the `memory` reason is wired and fires once memory supervision restarts a process.)
   - [x] Add a `restart` CLI command for a single process, a policy group, or all non-proxied workers.
   - [x] Keep restart behavior safe for job workers by using lifecycle hooks before termination. (Manual restart, memory restart, and deploy-drain stops all run the `lifecycle` hooks via `stop()`.)
-- [ ] Graceful job-worker lifecycle.
+- [x] Graceful job-worker lifecycle.
   - [x] Add generic lifecycle hooks such as `quietCommand`, `drainCommand`, `drainTimeoutMs`, and `stopCommand` (per-process `lifecycle`).
   - [x] Support signal-only lifecycle steps for workers that can quiet on a Unix signal. (Per-process `stopSignal`; sent before the `SIGKILL`-after-`gracefulStopMs` fallback.)
-  - [ ] Add a non-blocking drain mode so new workers can start while old workers finish running jobs.
+  - [x] Add a non-blocking drain mode so new workers can start while old workers finish running jobs (per-process `nonBlockingDrain`; drains the worker in parallel with the connection drain).
   - [x] Document a Velocious background-jobs-worker recipe once the lifecycle contract is implemented (`docs/velocious.md` → Worker recipe).
 - [x] Replicas and stable worker indexes. (Supported on port-less `companion` processes; `proxied`/`singleton`/ported processes stay single.)
   - [x] Allow one process config to start multiple replicas (`replicas`, companion-only for now).

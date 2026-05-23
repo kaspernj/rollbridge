@@ -53,6 +53,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.connectionCount = 0
     this.connections = /** @type {ReleaseConnections} */ ({http: 0, websocket: 0})
     this.processes = /** @type {Map<string, ManagedProcess>} */ (new Map())
+    this.nonBlockingDrainIds = /** @type {Set<string>} */ (new Set())
     this.ports = /** @type {Record<string, number>} */ ({})
     this.servicePorts = servicePorts
     this.portsAllocated = false
@@ -74,6 +75,7 @@ export default class ReleaseGroup extends EventEmitter {
           const processInstance = this.buildProcess(processConfig, {count: processConfig.replicas, index, instanceId})
 
           this.processes.set(instanceId, processInstance)
+          if (processConfig.nonBlockingDrain) this.nonBlockingDrainIds.add(instanceId)
           await processInstance.start("deploy")
         }
 
@@ -330,6 +332,13 @@ export default class ReleaseGroup extends EventEmitter {
     this.state = "draining"
     this.drainStartedAt = new Date().toISOString()
 
+    // Stop nonBlockingDrain processes (e.g. job workers) immediately and in the background, so
+    // their lifecycle drain runs as soon as the release is retired — in parallel with the
+    // connection drain, not held until after it. The rest stop once connections have closed.
+    const entries = [...this.processes.entries()]
+    const nonBlockingStops = entries.filter(([id]) => this.nonBlockingDrainIds.has(id)).map(([, processInstance]) => processInstance.stop())
+    const connectionDependent = entries.filter(([id]) => !this.nonBlockingDrainIds.has(id)).map(([, processInstance]) => processInstance)
+
     if (this.connectionCount > 0) {
       await new Promise((resolve) => {
         const timer = setTimeout(resolve, timeoutMs)
@@ -340,7 +349,10 @@ export default class ReleaseGroup extends EventEmitter {
       })
     }
 
-    await this.stop()
+    await Promise.allSettled(connectionDependent.map((processInstance) => processInstance.stop()))
+    await Promise.allSettled(nonBlockingStops)
+    this.state = "stopped"
+    this.stoppedAt = new Date().toISOString()
   }
 
   /** @returns {Promise<void>} Stops all release-owned processes. */

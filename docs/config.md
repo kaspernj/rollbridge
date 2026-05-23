@@ -76,6 +76,7 @@ release records; the deploy tool still owns on-disk release directories.
 | `port` | number or `{from, to}` | unset | Port (or range) allocated per release. **Required for the `proxied` process.** A plain number `n` means the fixed port `n` (`{from: n, to: n}`). |
 | `health` | object or `false` | enabled with defaults | Health check for the `proxied` process; set `false` to disable (see below). |
 | `stopSignal` | signal name (e.g. `"SIGTERM"`, `"SIGINT"`, `"SIGQUIT"`) | `"SIGTERM"` | Signal sent to gracefully stop the process; after `gracefulStopMs` it is `SIGKILL`ed. Use a worker's quit signal so it finishes in-flight work before exiting. |
+| `nonBlockingDrain` | boolean | `false` | When a release is retired, drain this process **immediately** (in parallel with the proxied connection drain) instead of after it. Companion processes only — typically background workers (see below). |
 | `lifecycle` | object | no hooks | Command hooks run when gracefully stopping the process (see below). |
 | `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | Graceful-stop window: time between `stopSignal`/`stopCommand` and `SIGKILL` for this process. |
 | `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
@@ -128,6 +129,25 @@ fallback, so a slow or broken hook can't wedge a stop.
 
 ```js
 {id: "worker", policy: "companion", command: "…", lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}}
+```
+
+### `processes[].nonBlockingDrain`
+
+By default, when a release is retired its processes are stopped **after** the
+proxied process's connections have drained (or `proxy.drainTimeoutMs` elapses).
+That keeps a worker alive in case the draining web process still depends on it —
+but it also holds a background worker open for the whole connection drain.
+
+Set `nonBlockingDrain: true` on a `companion` whose work is independent of the
+proxied process (a job worker on a shared queue). Its graceful stop — `lifecycle`
+hooks, or `stopSignal` then `SIGKILL` after `gracefulStopMs` — then starts **as
+soon as the release is retired**, in parallel with the connection drain, rather
+than after it. The new release's workers (started before traffic switches) handle
+new work while the retired release's workers finish their in-flight jobs. The
+whole drain stays non-blocking — the deploy returns immediately.
+
+```js
+{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, stopSignal: "SIGINT", gracefulStopMs: 60000}
 ```
 
 ### `processes[].restart`
@@ -233,3 +253,4 @@ Rollbridge sets these in every managed process's environment (the process's own
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
 - `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`.
+- `nonBlockingDrain` must be a boolean, and is allowed only on a `companion` process.
