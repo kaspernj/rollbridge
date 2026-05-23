@@ -97,6 +97,6 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Add an Nginx guide with WebSocket headers, timeouts, and common failure modes (`docs/nginx.md`).
 - [x] Add deploy-tool recipes that call Rollbridge CLI commands directly (`docs/deploy-recipes.md`).
 - [x] Add a Capistrano recipe showing shell commands only; do not add a Capistrano plugin or Rollbridge-specific Capistrano tasks (`docs/deploy-recipes.md`).
-- [ ] Add a TensorBuzz-specific runbook for current production ports, external services, deploy ordering, and rollback constraints.
+- [x] Add a TensorBuzz-specific runbook for current production ports, external services, deploy ordering, and rollback constraints (`docs/tensorbuzz-runbook.md`).
 - [x] Add troubleshooting docs for health-check failures, port conflicts, stale sockets, crash loops, and stuck draining releases (`docs/troubleshooting.md`).
 - [ ] Add a release checklist for maintainers using `npm run release:patch`.

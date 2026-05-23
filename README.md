@@ -201,7 +201,10 @@ Referencing a placeholder with no value (including an unset `{{env.<NAME>}}`)
 fails the process start with a clear error, so typos surface immediately.
 
 Production-ready examples live in `examples/`, including
-`examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment.
+`examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment; see
+[`docs/tensorbuzz-runbook.md`](docs/tensorbuzz-runbook.md) for the matching
+production runbook (ports, deploy ordering, rollback constraints, and day-to-day
+operations).
 
 See [`docs/velocious.md`](docs/velocious.md) for a Velocious deployment guide —
 how Beacon, background-jobs-main, background-jobs-worker, and the web process map
