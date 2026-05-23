@@ -131,6 +131,8 @@ plugins (see [`docs/deploy-recipes.md`](deploy-recipes.md) for shell/CI/Capistra
 recipes). The minimal step after a release directory is prepared:
 
 ```bash
+release_path=/srv/tensorbuzz/releases/20260523120000  # prepared by your pipeline
+
 # Run backwards-compatible migrations BEFORE switching traffic: the old and new
 # web releases overlap during the drain.
 (cd "$release_path/backend" && npx velocious db:migrate)
@@ -139,7 +141,7 @@ rollbridge deploy \
   --ensure-daemon \
   --config /etc/rollbridge/rollbridge.js \
   --release-path "$release_path" \
-  --revision "$(git -C "$repo" rev-parse HEAD)"
+  --revision "$(git -C "$release_path/backend" rev-parse HEAD)"
 ```
 
 `rollbridge deploy` starts the new release's worker and web process,
