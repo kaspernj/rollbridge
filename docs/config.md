@@ -141,6 +141,10 @@ job worker quiesce and finish in-flight work before it is terminated. Omit
 | `lifecycle.drainTimeoutMs` | non-negative number | `0` | Bounds the drain step. `0` **skips the drain step entirely** (no `drainCommand`, no wait). |
 | `lifecycle.stopCommand` | string | unset | Run to stop the process instead of sending `stopSignal`, if it is still running after draining. |
 
+Because `stopCommand` runs **instead of** sending `stopSignal`, setting both a
+`stopCommand` and a custom `stopSignal` is rejected — the signal would be silently
+ignored. Use one or the other.
+
 The full stop sequence is: run `quietCommand` → drain (`drainCommand`, or wait
 `drainTimeoutMs` for the process to exit) → if still running, run `stopCommand`
 or send `stopSignal` → `SIGKILL` after `gracefulStopMs`. Each hook command is run
@@ -275,6 +279,6 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
-- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`.
+- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`. A `lifecycle.stopCommand` may not be combined with a custom `stopSignal` (the `stopCommand` runs instead of the signal, so the signal would be ignored).
 - `nonBlockingDrain` must be a boolean, and is allowed only on a `companion` process.
 - `statePath` must be a string when set.

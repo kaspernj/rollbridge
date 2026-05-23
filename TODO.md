@@ -64,7 +64,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Extend `doctor` with state-path checks: state-path directory writability and orphaned-process reporting from a prior state file.
   - [ ] Extend `doctor` with process-command and release-path checks once those are resolvable (they need per-release rendered templates, which only exist at deploy time).
   - [x] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and the single-proxied-process policy rule.
-  - [ ] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land.
+  - [x] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land. (`lifecycle.drainCommand` requires a positive `drainTimeoutMs`; `nonBlockingDrain` is companion-only; a `lifecycle.stopCommand` may not be combined with a custom `stopSignal`, since the command runs instead of the signal.)
   - [x] Include example fixes in validation output.
 
 ## Minor Features

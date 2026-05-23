@@ -515,6 +515,10 @@ function validateProcessSet(processes, issues) {
     if (processConfig.nonBlockingDrain && processConfig.policy !== "companion") {
       issues.push({fix: `Set nonBlockingDrain only on a companion process; "${processConfig.id}" is ${processConfig.policy}.`, message: `Process "${processConfig.id}" can only set nonBlockingDrain on a companion process`})
     }
+
+    if (processConfig.lifecycle.stopCommand && processConfig.stopSignal !== "SIGTERM") {
+      issues.push({fix: `Drop the custom stopSignal "${processConfig.stopSignal}" or lifecycle.stopCommand from "${processConfig.id}": with a stopCommand set, Rollbridge runs it to stop the process instead of sending stopSignal, so the signal is never used.`, message: `Process "${processConfig.id}" sets both lifecycle.stopCommand and a custom stopSignal, but stopCommand replaces stopSignal`})
+    }
   }
 
   const proxiedProcesses = processes.filter((processConfig) => processConfig.policy === "proxied")
