@@ -10,7 +10,8 @@ import {pathToFileURL} from "node:url"
  * @typedef {{path: string, startDelayMs: number, timeoutMs: number, intervalMs: number}} HealthConfig
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restart: RestartConfig, restartDelayMs: number, command: string}} ProcessConfig
+ * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
+ * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, restart: RestartConfig, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{mode?: number, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
@@ -176,7 +177,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", outputLines: 50, policy: "companion", port: undefined, restart: defaultRestartConfig(), restartDelayMs: 1000}
+    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", memory: undefined, outputLines: 50, policy: "companion", port: undefined, restart: defaultRestartConfig(), restartDelayMs: 1000}
   }
 
   const source = value
@@ -188,6 +189,7 @@ function normalizeProcess(value, index, proxy, issues) {
     gracefulStopMs: normalizeNumber(source.gracefulStopMs, `processes[${index}].gracefulStopMs`, issues, {default: proxy.forceStopTimeoutMs}),
     health: normalizeHealth(source.health, `processes[${index}].health`, proxy, issues),
     id: normalizeString(source.id, `processes[${index}].id`, issues),
+    memory: normalizeMemory(source.memory, `processes[${index}].memory`, issues),
     outputLines: normalizeOutputLines(source.outputLines, `processes[${index}].outputLines`, issues),
     policy: normalizePolicy(source.policy, `processes[${index}].policy`, issues),
     port: normalizePortRange(source.port, `processes[${index}].port`, issues),
@@ -263,6 +265,40 @@ function normalizeBackoffFactor(value, key, issues) {
   }
 
   return factor
+}
+
+/**
+ * @param {JsonValue} value - Raw memory supervision config.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {MemoryConfig | undefined} Normalized memory config, or undefined when monitoring is off.
+ */
+function normalizeMemory(value, key, issues) {
+  if (value === undefined || value === null) return undefined
+
+  if (!isPlainObject(value)) {
+    issues.push({fix: `Set ${key} to a mapping with limitBytes (and optionally warnBytes, checkIntervalMs), or omit it to disable memory supervision.`, message: `${key} must be an object`})
+
+    return undefined
+  }
+
+  const limitBytes = normalizeNumber(value.limitBytes, `${key}.limitBytes`, issues, {default: 0})
+  const warnBytes = normalizeNumber(value.warnBytes, `${key}.warnBytes`, issues, {default: 0})
+  const checkIntervalMs = normalizeNumber(value.checkIntervalMs, `${key}.checkIntervalMs`, issues, {default: 5000})
+
+  if (!Number.isInteger(limitBytes) || limitBytes <= 0) {
+    issues.push({fix: `Set ${key}.limitBytes to a positive integer number of bytes, e.g. 536870912 (512 MiB).`, message: `${key}.limitBytes must be a positive integer`})
+  }
+
+  if (!Number.isInteger(warnBytes) || warnBytes < 0) {
+    issues.push({fix: `Set ${key}.warnBytes to a non-negative integer number of bytes below limitBytes, e.g. 402653184 (384 MiB).`, message: `${key}.warnBytes must be a non-negative integer`})
+  }
+
+  if (checkIntervalMs <= 0) {
+    issues.push({fix: `Set ${key}.checkIntervalMs to a positive number of milliseconds, e.g. 5000.`, message: `${key}.checkIntervalMs must be a positive number`})
+  }
+
+  return {checkIntervalMs, limitBytes, warnBytes}
 }
 
 /**

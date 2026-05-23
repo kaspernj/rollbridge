@@ -2,6 +2,7 @@
 
 import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
+import {measureProcessGroupRssBytes} from "./process-memory.js"
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
@@ -9,8 +10,8 @@ import {spawn} from "node:child_process"
  * @typedef {"deploy" | "crash" | "manual" | "memory"} ManagedProcessStartReason
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
- * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
- * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], pid: number | undefined, restarts: number, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
+ * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
+ * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
 export default class ManagedProcess extends EventEmitter {
@@ -21,13 +22,14 @@ export default class ManagedProcess extends EventEmitter {
    * @param {Record<string, string | undefined>} args.env - Environment.
    * @param {string} args.id - Process id.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger callback.
+   * @param {import("./config.js").MemoryConfig} [args.memory] - Memory supervision config (off when omitted).
    * @param {number} args.outputLines - Recent stdout/stderr lines to retain and report.
    * @param {import("./config.js").RestartConfig} [args.restart] - Restart policy (defaults to unlimited restarts with a constant delay).
    * @param {number} args.restartDelayMs - Restart delay.
    * @param {() => boolean} args.shouldRestart - Restart policy callback.
    * @param {number} args.stopTimeoutMs - Stop timeout.
    */
-  constructor({command, cwd, env, id, logger, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopTimeoutMs}) {
+  constructor({command, cwd, env, id, logger, memory, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopTimeoutMs}) {
     super()
 
     this.command = command
@@ -35,6 +37,7 @@ export default class ManagedProcess extends EventEmitter {
     this.env = env
     this.id = id
     this.logger = logger
+    this.memory = memory
     this.outputLines = outputLines
     this.restart = restart
     this.restartDelayMs = restartDelayMs
@@ -45,6 +48,12 @@ export default class ManagedProcess extends EventEmitter {
     this.logs = /** @type {ManagedProcessLog[]} */ ([])
     this.restarts = 0
     this.recentRestarts = /** @type {number[]} */ ([])
+    this.rssBytes = /** @type {number | undefined} */ (undefined)
+    this.memoryRestarts = 0
+    this.lastMemoryRestartAtMs = /** @type {number | undefined} */ (undefined)
+    this.memoryTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
+    this.memoryRestarting = false
+    this.memoryWarned = false
     this.startedAtMs = /** @type {number | undefined} */ (undefined)
     this.intentionalStop = false
     this.restartTimer = undefined
@@ -90,6 +99,7 @@ export default class ManagedProcess extends EventEmitter {
         this.startedAtMs = Date.now()
         this.lastStartReason = reason
         this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null, reason})
+        this.startMemoryMonitor()
         this.emit("started")
         resolve(undefined)
       })
@@ -114,6 +124,7 @@ export default class ManagedProcess extends EventEmitter {
     this.cwd = definition.cwd
     this.env = definition.env
     this.logger = definition.logger
+    this.memory = definition.memory
     this.outputLines = definition.outputLines
     this.restart = definition.restart
     this.restartDelayMs = definition.restartDelayMs
@@ -151,6 +162,8 @@ export default class ManagedProcess extends EventEmitter {
     this.child = undefined
     this.pid = undefined
     this.exitPromise = undefined
+    this.rssBytes = undefined
+    this.clearMemoryMonitor()
     this.state = wasIntentional ? "stopped" : "failed"
     this.logger("process exited", {code, id: this.id, signal})
     this.emit("exit", {code, signal})
@@ -219,11 +232,92 @@ export default class ManagedProcess extends EventEmitter {
   }
 
   /**
+   * Starts the periodic RSS check for this process when memory supervision is configured.
+   * @returns {void}
+   */
+  startMemoryMonitor() {
+    this.clearMemoryMonitor()
+
+    if (!this.memory) return
+
+    this.memoryTimer = setInterval(() => this.checkMemory(), this.memory.checkIntervalMs)
+    this.memoryTimer.unref?.()
+  }
+
+  /** @returns {void} Stops the periodic RSS check. */
+  clearMemoryMonitor() {
+    if (this.memoryTimer) {
+      clearInterval(this.memoryTimer)
+      this.memoryTimer = undefined
+    }
+  }
+
+  /**
+   * Measures the process group's RSS and warns or restarts when it crosses the configured thresholds.
+   * @returns {void}
+   */
+  checkMemory() {
+    if (!this.memory || !this.pid || this.memoryRestarting) return
+
+    const rssBytes = measureProcessGroupRssBytes(this.pid)
+
+    if (rssBytes === undefined) return
+
+    this.rssBytes = rssBytes
+
+    if (rssBytes > this.memory.limitBytes) {
+      this.logger("memory limit exceeded", {id: this.id, limitBytes: this.memory.limitBytes, rssBytes})
+      void this.restartForMemory()
+
+      return
+    }
+
+    if (this.memory.warnBytes > 0 && rssBytes > this.memory.warnBytes) {
+      if (!this.memoryWarned) {
+        this.logger("memory warning", {id: this.id, rssBytes, warnBytes: this.memory.warnBytes})
+        this.memoryWarned = true
+      }
+    } else {
+      this.memoryWarned = false
+    }
+  }
+
+  /**
+   * Gracefully restarts the process after it exceeded its memory limit (SIGTERM, then
+   * SIGKILL after the stop timeout), recording the restart so status can report it.
+   * @returns {Promise<void>} Resolves once the process has been restarted.
+   */
+  async restartForMemory() {
+    if (this.memoryRestarting) return
+
+    this.memoryRestarting = true
+
+    try {
+      await this.stop()
+
+      // Don't respawn if the supervising context no longer wants this process running
+      // (daemon shutting down, or the release draining/retired) — otherwise a restart racing
+      // a shutdown could leave a child running after shutdown collected its stop promises.
+      if (!this.shouldRestart()) return
+
+      this.memoryRestarts += 1
+      this.lastMemoryRestartAtMs = Date.now()
+      this.memoryWarned = false
+      await this.start("memory")
+    } catch (error) {
+      this.logger("memory restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
+    } finally {
+      this.memoryRestarting = false
+    }
+  }
+
+  /**
    * @param {{timeoutMs?: number}} [options] - Stop options.
    * @returns {Promise<void>} Resolves when stopped.
    */
   async stop(options = {}) {
     this.intentionalStop = true
+    this.clearMemoryMonitor()
 
     if (this.restartTimer) {
       clearTimeout(this.restartTimer)
@@ -293,10 +387,13 @@ export default class ManagedProcess extends EventEmitter {
       exitCode: this.exitCode,
       exitSignal: this.exitSignal,
       id: this.id,
+      lastMemoryRestartAt: this.lastMemoryRestartAtMs === undefined ? undefined : new Date(this.lastMemoryRestartAtMs).toISOString(),
       lastStartReason: this.lastStartReason,
       logs: this.logs.slice(-this.outputLines),
+      memoryRestarts: this.memoryRestarts,
       pid: this.pid,
       restarts: this.restarts,
+      rssBytes: this.rssBytes,
       startedAt: this.startedAtMs === undefined ? undefined : new Date(this.startedAtMs).toISOString(),
       state: this.state,
       uptimeMs: this.state === "running" && this.startedAtMs !== undefined ? Date.now() - this.startedAtMs : undefined
