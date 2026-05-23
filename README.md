@@ -165,8 +165,10 @@ releaseRetention: {keep: 5, maxAgeMs: 86400000}
 Set `statePath` to have the daemon persist its state to a file (active/draining
 releases, process pids, counters, recent events). On the next startup it reads
 any leftover file and reports managed processes still alive from a daemon that
-didn't shut down cleanly — advisory orphan detection, so you can stop leftovers.
-A clean `shutdown` removes the file. See [`docs/config.md`](docs/config.md#statepath).
+didn't shut down cleanly — advisory orphan detection. After a crash, run
+`rollbridge recover` to list those leftovers and `rollbridge recover --force` to
+stop them before restarting the daemon. A clean `shutdown` removes the file. See
+[`docs/config.md`](docs/config.md#statepath).
 
 ```js
 statePath: "/var/lib/rollbridge/ticket-server.state.json"

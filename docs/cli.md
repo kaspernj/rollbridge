@@ -156,6 +156,29 @@ managed process (unknown, or a companion with no active release) is also an
 error. Restarting a `service` bounces a shared broker (for example Velocious
 Beacon), which briefly disrupts every process that depends on it.
 
+## `recover`
+
+```
+rollbridge recover [--config <path>] [--force]
+```
+
+Cleans up orphaned managed processes left by a **crashed** daemon. It reads the
+persisted state ([`statePath`](config.md#statepath)) and finds managed processes
+whose pids are still alive. Without `--force` it only **lists** them (a dry run);
+with `--force` it stops each one's process group (`SIGTERM`, then `SIGKILL` after
+`proxy.forceStopTimeoutMs`) and clears the stale state file.
+
+Run it **before** restarting the daemon after a crash. It refuses to run while a
+daemon (or another process) holds the control socket — those pids belong to a
+live daemon, not a crash. A recycled pid can be a false positive, so review the
+dry-run list before using `--force`.
+
+If `--force` cannot stop some orphan (for example one now owned by another user,
+so it can't be signaled), that process is reported as still running, the state
+file is **kept** so you can investigate and re-run `recover`, and the command
+exits non-zero. Requires `statePath`; also exits non-zero when it is unset or a
+daemon is running.
+
 ## `shutdown`
 
 ```
