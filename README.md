@@ -138,6 +138,10 @@ queue. See [`docs/config.md`](docs/config.md#processesreplicas).
 {id: "worker", policy: "companion", command: "npx velocious background-jobs-worker", replicas: 4}
 ```
 
+See [`docs/workers.md`](docs/workers.md) for the full safe background-job worker
+deployment pattern — companion policy, `replicas`, and finishing in-flight jobs
+on deploy with `stopSignal` + `gracefulStopMs`.
+
 Set `releaseRetention` to bound how many stopped (drained) releases the daemon
 keeps in memory and reports in `status`. `keep` (default `10`) retains the most
 recent stopped releases; `maxAgeMs` (default `0`, disabled) also prunes stopped

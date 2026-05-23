@@ -156,17 +156,16 @@ The worker is a `companion`, so each release runs its own workers:
 
 - On deploy, the **new** release's workers start (running the new code) before
   traffic switches; the **old** release's workers are stopped when that release
-  is drained and retired — `SIGTERM`, then `SIGKILL` after `gracefulStopMs`.
-- Set `gracefulStopMs` on the worker to at least your longest in-flight job so a
-  job gets time to finish on `SIGTERM` before the forced kill. The example uses
-  `60000` (60s).
+  is drained and retired — the worker's `stopSignal`, then `SIGKILL` after
+  `gracefulStopMs`.
+- Set `stopSignal` to the signal your worker drains on and `gracefulStopMs` to at
+  least your longest in-flight job, so a job gets time to finish before the
+  forced kill. Set `replicas` to run a pool of workers.
 
-> **Planned:** graceful job-worker draining via lifecycle hooks
-> (`quietCommand`/`drainCommand`/`stopCommand` and a non-blocking drain mode so
-> new workers start while old workers finish) is on the
-> [roadmap](../TODO.md#major-features) and not yet implemented. Until then, the
-> `gracefulStopMs` window above is the mechanism for letting in-flight jobs
-> finish.
+See [`docs/workers.md`](workers.md) for the full safe background-job deployment
+pattern (companion + `replicas` + `stopSignal` + `gracefulStopMs`), the old/new
+worker overlap, and what's still on the roadmap (command-based lifecycle hooks
+and a non-blocking drain mode).
 
 ### Choosing the jobs-main policy
 
