@@ -104,3 +104,74 @@ test("counts automatic restarts and reports startedAt and uptime while running",
     await managed.stop()
   }
 })
+
+/**
+ * Builds a managed crasher with a specific restart policy.
+ * @param {import("../src/config.js").RestartConfig} restart - Restart policy.
+ * @returns {ManagedProcess} Managed process.
+ */
+function buildCrasher(restart) {
+  return new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} ${JSON.stringify(crasherPath)}`,
+    cwd: undefined,
+    env: {},
+    id: "crasher",
+    logger: () => {},
+    outputLines: 50,
+    restart,
+    restartDelayMs: 10,
+    shouldRestart: () => true,
+    stopTimeoutMs: 500
+  })
+}
+
+test("does not auto-restart when the restart policy is disabled (maxRestarts: 0)", async () => {
+  const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: 0, windowMs: 0})
+
+  try {
+    await managed.start()
+
+    // The fixture exits ~40ms after start; with restarts disabled it should stay failed.
+    await waitFor(() => managed.status().state === "failed")
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    assert.equal(managed.status().restarts, 0)
+    assert.equal(managed.status().state, "failed")
+  } finally {
+    await managed.stop()
+  }
+})
+
+test("stops auto-restarting once maxRestarts within the window is reached", async () => {
+  const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: 2, windowMs: 60000})
+
+  try {
+    await managed.start()
+
+    // It restarts at most twice within the window, then gives up and stays failed.
+    await waitFor(() => managed.status().restarts === 2 && managed.status().state === "failed")
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    assert.equal(managed.status().restarts, 2)
+    assert.equal(managed.status().state, "failed")
+  } finally {
+    await managed.stop()
+  }
+})
+
+test("applies exponential backoff to restart delays, capped by maxDelayMs", () => {
+  const capped = buildCrasher({backoffFactor: 2, maxDelayMs: 500, maxRestarts: undefined, windowMs: 0})
+
+  // restartDelayMs (10) * 2 ** attempt, capped at 500.
+  assert.equal(capped.restartDelayFor(0), 10)
+  assert.equal(capped.restartDelayFor(1), 20)
+  assert.equal(capped.restartDelayFor(2), 40)
+  assert.equal(capped.restartDelayFor(6), 500) // 10 * 64 = 640, capped to 500
+  assert.equal(capped.restartDelayFor(7), 500)
+
+  // maxDelayMs: 0 means no cap.
+  const uncapped = buildCrasher({backoffFactor: 3, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0})
+
+  assert.equal(uncapped.restartDelayFor(0), 10)
+  assert.equal(uncapped.restartDelayFor(2), 90)
+})

@@ -68,8 +68,27 @@ release records; the deploy tool still owns on-disk release directories.
 | `port` | number or `{from, to}` | unset | Port (or range) allocated per release. **Required for the `proxied` process.** A plain number `n` means the fixed port `n` (`{from: n, to: n}`). |
 | `health` | object or `false` | enabled with defaults | Health check for the `proxied` process; set `false` to disable (see below). |
 | `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | `SIGTERM`→`SIGKILL` window for this process. |
-| `restartDelayMs` | number | `1000` | Delay before restarting this process after a crash. |
+| `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
+| `restart` | object | unlimited restarts, constant delay | Automatic-restart policy: cap, rolling window, and backoff (see below). |
 | `outputLines` | positive integer | `50` | Recent stdout/stderr lines retained per process and reported by `status`/`logs`. |
+
+### `processes[].restart`
+
+Controls automatic restarts of a crashed process (a release's active processes
+and daemon-wide `service`s). The base delay is the process's `restartDelayMs`;
+when the policy's limit is reached the process is left `failed` and not
+restarted again.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `restart.maxRestarts` | non-negative integer | unset (unlimited) | Maximum automatic restarts allowed within `windowMs` before Rollbridge stops restarting the process. `0` disables automatic restarts entirely. |
+| `restart.windowMs` | non-negative number | `0` (process lifetime) | Rolling window over which `maxRestarts` is counted and after which the backoff resets. `0` counts over the process's whole lifetime. |
+| `restart.backoffFactor` | number ≥ 1 | `1` (constant) | Multiplier applied to `restartDelayMs` on each successive restart in the window: `delay = restartDelayMs × backoffFactor ^ n`. `1` keeps a constant delay. |
+| `restart.maxDelayMs` | non-negative number | `0` (no cap) | Upper bound on the backed-off delay. `0` means no cap. |
+
+With the defaults a crashed process restarts indefinitely after `restartDelayMs`.
+Pair `backoffFactor`/`windowMs` to back off and self-heal after a clean run, or
+set `maxRestarts` to give up on a process stuck in a crash loop.
 
 ### `processes[].health`
 
@@ -126,3 +145,4 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `port` must be a positive port number or an ascending `{from, to}` range.
 - `control.mode` must be an octal mode between `0` and `0o777`.
 - `outputLines` and `releaseRetention.keep` must be positive/non-negative integers; `health.startDelayMs` and `releaseRetention.maxAgeMs` must be non-negative numbers.
+- `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
