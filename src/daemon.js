@@ -403,7 +403,9 @@ export default class RollbridgeDaemon {
   }
 
   /**
-   * Restarts running non-proxied processes selected by id or policy, or all of them.
+   * Restarts non-proxied processes selected by id or policy, or all of them: running
+   * processes are bounced (stop then start) and crashed or stopped ones are revived,
+   * matching the conventional meaning of "restart".
    *
    * The proxied process is never restarted in place (that would drop traffic); use a
    * deploy for a zero-downtime replacement.
@@ -418,7 +420,7 @@ export default class RollbridgeDaemon {
     const targets = this.collectRestartTargets({policy, processId})
 
     if (processId !== undefined && targets.length === 0) {
-      throw new Error(`No running process with id "${processId}" to restart.`)
+      throw new Error(`No managed process with id "${processId}" to restart.`)
     }
 
     for (const target of targets) {

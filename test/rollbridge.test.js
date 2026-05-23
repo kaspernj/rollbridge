@@ -283,7 +283,32 @@ test("restart refuses the proxied process and reports unknown ids", async () => 
 
     await assert.rejects(() => daemon.restartProcesses({processId: "web"}), /proxied process cannot be restarted/)
     await assert.rejects(() => daemon.restartProcesses({policy: "proxied"}), /proxied process cannot be restarted/)
-    await assert.rejects(() => daemon.restartProcesses({processId: "missing"}), /No running process with id "missing"/)
+    await assert.rejects(() => daemon.restartProcesses({processId: "missing"}), /No managed process with id "missing"/)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("restart revives a stopped process instead of erroring", async () => {
+  const fixture = await createFixture({includeCompanion: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // Simulate the worker having exited (e.g. crashed and exhausted its restart budget).
+    const worker = daemon.activeRelease?.getProcess("worker")
+
+    assert.ok(worker, "worker process should exist")
+    await worker.stop()
+    assert.equal(worker.status().state, "stopped")
+
+    const result = await daemon.restartProcesses({processId: "worker"})
+
+    assert.deepEqual(result.restarted, ["worker"])
+    assert.equal(worker.status().state, "running")
+    assert.ok(worker.status().pid)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
