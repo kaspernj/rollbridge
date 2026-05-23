@@ -34,7 +34,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Add generic lifecycle hooks such as `quietCommand`, `drainCommand`, `drainTimeoutMs`, and `stopCommand` (per-process `lifecycle`).
   - [x] Support signal-only lifecycle steps for workers that can quiet on a Unix signal. (Per-process `stopSignal`; sent before the `SIGKILL`-after-`gracefulStopMs` fallback.)
   - [ ] Add a non-blocking drain mode so new workers can start while old workers finish running jobs.
-  - [ ] Document a Velocious background-jobs-worker recipe once the lifecycle contract is implemented.
+  - [x] Document a Velocious background-jobs-worker recipe once the lifecycle contract is implemented (`docs/velocious.md` → Worker recipe).
 - [x] Replicas and stable worker indexes. (Supported on port-less `companion` processes; `proxied`/`singleton`/ported processes stay single.)
   - [x] Allow one process config to start multiple replicas (`replicas`, companion-only for now).
   - [x] Expose `ROLLBRIDGE_REPLICA_INDEX`, replica count, and per-replica template context (`{{replicaIndex}}`/`{{replicaCount}}`).
