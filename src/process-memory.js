@@ -3,41 +3,68 @@
 import fs from "node:fs"
 
 /**
- * Measures the resident memory (RSS) of an entire managed process group, not just
- * the shell wrapper. Rollbridge spawns each process detached, so the spawned pid is
- * the process-group leader; every process in the tree shares that group id.
- *
- * Reads `/proc` (Linux), summing each member's `VmRSS`. Returns `undefined` when the
- * measurement is unavailable (no `/proc`, e.g. non-Linux) or no group member is found.
- * @param {number} pgid - Process-group id (the detached spawn's pid).
- * @returns {number | undefined} Total resident memory in bytes, or undefined when unmeasurable.
+ * @typedef {{command: string, pid: number, rssBytes: number | undefined}} ProcessGroupMember
  */
-export function measureProcessGroupRssBytes(pgid) {
+
+/**
+ * Lists the members of a managed process group with each member's resident memory.
+ * Rollbridge spawns each process detached, so the spawned pid is the process-group
+ * leader and every process in the tree (the shell wrapper, the app, any children)
+ * shares that group id.
+ *
+ * Reads `/proc` (Linux); returns an empty array when unavailable (no `/proc`, e.g.
+ * non-Linux) or the group has no members.
+ * @param {number} pgid - Process-group id (the detached spawn's pid).
+ * @returns {ProcessGroupMember[]} Group members, ordered by pid.
+ */
+export function processGroupMembers(pgid) {
   /** @type {string[]} */
   let entries
 
   try {
     entries = fs.readdirSync("/proc")
   } catch {
-    return undefined
+    return []
   }
 
-  let total = 0
-  let matched = 0
+  /** @type {ProcessGroupMember[]} */
+  const members = []
 
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue
     if (processGroupId(entry) !== pgid) continue
 
-    const rss = residentBytes(entry)
-
-    if (rss !== undefined) {
-      total += rss
-      matched += 1
-    }
+    members.push({command: commandName(entry), pid: Number(entry), rssBytes: residentBytes(entry)})
   }
 
-  return matched > 0 ? total : undefined
+  members.sort((first, second) => first.pid - second.pid)
+
+  return members
+}
+
+/**
+ * Measures the total resident memory (RSS) of a managed process group.
+ * @param {number} pgid - Process-group id (the detached spawn's pid).
+ * @returns {number | undefined} Total resident memory in bytes, or undefined when unmeasurable.
+ */
+export function measureProcessGroupRssBytes(pgid) {
+  const measured = processGroupMembers(pgid).filter((member) => member.rssBytes !== undefined)
+
+  if (measured.length === 0) return undefined
+
+  return measured.reduce((total, member) => total + (member.rssBytes ?? 0), 0)
+}
+
+/**
+ * @param {string} pid - Process id.
+ * @returns {string} The process command name (`/proc/<pid>/comm`), or "" when unavailable.
+ */
+function commandName(pid) {
+  try {
+    return fs.readFileSync(`/proc/${pid}/comm`, "utf8").trim()
+  } catch {
+    return ""
+  }
 }
 
 /**

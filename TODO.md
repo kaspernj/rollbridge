@@ -53,7 +53,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Observability and diagnostics.
   - [x] Add structured event history for deploys, switches, stops, crashes, memory restarts, and failed commands. (In-memory `EventLog` tapping the daemon logger; memory-restart events populate once memory supervision logs them.)
   - [x] Add restart counters and uptime to status (exit reasons already reported via `exitCode`/`exitSignal`/`state`).
-  - [ ] Add memory stats and child-process-tree details to status (with memory supervision). (Done: process-group `rssBytes`/`memoryRestarts`/`lastMemoryRestartAt`. Remaining: a per-child-process tree breakdown.)
+  - [x] Add memory stats and child-process-tree details to status (with memory supervision). (`rssBytes`/`memoryRestarts`/`lastMemoryRestartAt` plus `children`: the sampled process tree with each member's pid, command, and RSS.)
   - [x] Add a `logs` CLI command (recent per-process output from status).
   - [x] Add an `events` CLI command (after structured event history lands).
   - [ ] Add optional file logging with rotation guidance.
