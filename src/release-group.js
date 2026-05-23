@@ -182,6 +182,7 @@ export default class ReleaseGroup extends EventEmitter {
       restart: processConfig.restart,
       restartDelayMs: processConfig.restartDelayMs,
       shouldRestart: options.shouldRestart || (() => this.state === "active" || this.state === "starting"),
+      stopSignal: processConfig.stopSignal,
       stopTimeoutMs: processConfig.gracefulStopMs
     })
   }

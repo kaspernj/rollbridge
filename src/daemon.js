@@ -471,6 +471,7 @@ export default class RollbridgeDaemon {
         restart: nextDefinition.restart,
         restartDelayMs: nextDefinition.restartDelayMs,
         shouldRestart: nextDefinition.shouldRestart,
+        stopSignal: nextDefinition.stopSignal,
         stopTimeoutMs: nextDefinition.stopTimeoutMs
       })
     }

@@ -6,7 +6,9 @@ import test from "node:test"
 import {fileURLToPath} from "node:url"
 import ManagedProcess from "../src/managed-process.js"
 
-const crasherPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "crasher.js")
+const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures")
+const crasherPath = path.join(fixturesDir, "crasher.js")
+const signalTrapPath = path.join(fixturesDir, "signal-trap.js")
 
 /**
  * Builds a managed process that is never spawned, for exercising output retention directly.
@@ -191,6 +193,33 @@ function buildLongLived(shouldRestart) {
     stopTimeoutMs: 500
   })
 }
+
+test("stops a process with its configured stopSignal", async () => {
+  // The fixture exits on SIGINT but ignores SIGTERM; with stopSignal "SIGINT" it stops
+  // promptly. A default SIGTERM stop would be ignored and fall through to SIGKILL after
+  // stopTimeoutMs, so a quick clean stop proves the configured signal was used.
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} ${JSON.stringify(signalTrapPath)}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGINT",
+    stopTimeoutMs: 2000
+  })
+
+  await managed.start()
+
+  const startedAt = Date.now()
+
+  await managed.stop()
+
+  assert.equal(managed.status().state, "stopped")
+  assert.ok(Date.now() - startedAt < 1500, "expected a prompt graceful stop via SIGINT, not the SIGKILL fallback")
+})
 
 test("a memory restart respawns and is counted when the supervisor still wants the process", async () => {
   const managed = buildLongLived(() => true)

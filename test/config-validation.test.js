@@ -126,6 +126,30 @@ test("validateConfig defaults the restart policy, accepts overrides, and rejects
   assert.ok(validateRestart({maxRestarts: 1.5}).issues.some((issue) => issue.message === "processes[0].restart.maxRestarts must be a non-negative integer"))
 })
 
+test("validateConfig defaults stopSignal, accepts valid signals, and rejects unknown ones", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} stopSignal - Stop signal under test, or undefined to omit it.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateStopSignal = (stopSignal) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}, stopSignal}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.equal(validateStopSignal(undefined).config.processes[0].stopSignal, "SIGTERM")
+
+  const custom = validateStopSignal("SIGINT")
+
+  assert.deepEqual(custom.issues, [])
+  assert.equal(custom.config.processes[0].stopSignal, "SIGINT")
+
+  const invalid = validateStopSignal("SIGBOGUS")
+
+  assert.ok(invalid.issues.some((issue) => issue.message === "processes[0].stopSignal must be a valid signal name"), JSON.stringify(invalid.issues.map((issue) => issue.message)))
+})
+
 test("validateConfig normalizes memory supervision and rejects bad values", () => {
   /**
    * @param {import("../src/json.js").JsonValue} memory - Memory config under test, or undefined to omit it.
