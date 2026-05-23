@@ -345,6 +345,13 @@ export default class RollbridgeDaemon {
       throw new Error(`Release "${target.releaseId}" is already active.`)
     }
 
+    // The target may still be draining a prior deploy (live processes). Stop it before the
+    // deploy below re-uses its id in this.releases, otherwise the still-running instance
+    // would be dropped from status/pruning/shutdown and could be orphaned.
+    if (target.state !== "stopped" && target.state !== "failed") {
+      await target.stop()
+    }
+
     this.logger("rollback starting", {releaseId: target.releaseId, releasePath: target.releasePath})
 
     return await this.deploy({releaseId: target.releaseId, releasePath: target.releasePath, revision: target.revision})

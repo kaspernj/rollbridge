@@ -487,6 +487,39 @@ test("rollback rejects no-previous, unknown, and already-active targets", async 
   }
 })
 
+test("rollback to a still-draining release stops the old instance instead of orphaning it", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+  /** @type {WebSocket | undefined} */
+  let socket
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // An open WebSocket keeps v1's connection count > 0, so it stays draining after v2.
+    socket = await openWebSocket(daemon)
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    const draining = statusRelease(daemon, "v1")
+
+    assert.equal(draining.state, "draining")
+
+    const oldWebPid = draining.processes.find((processStatus) => processStatus.id === "web")?.pid
+
+    assert.ok(oldWebPid, "the draining release should have a running web process")
+
+    await daemon.rollback({releaseId: "v1"})
+
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    // The old draining instance was stopped before its id was reused, so its process is gone.
+    assert.throws(() => process.kill(/** @type {number} */ (oldWebPid), 0), /ESRCH/)
+  } finally {
+    if (socket) socket.close()
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("the rollback control command switches traffic over the socket", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)
