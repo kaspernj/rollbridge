@@ -26,6 +26,7 @@ export default {
 | `proxy` | object | **required** | Proxy listener and shared defaults (see below). |
 | `processes` | array | **required** | Managed processes (see below). Exactly one must be `proxied`. |
 | `releaseRetention` | object | — | How many stopped releases the daemon retains (see below). |
+| `statePath` | string | unset (no persistence) | File the daemon persists its state to, enabling orphaned-process detection on the next startup (see [`statePath`](#statepath)). |
 
 ## `control`
 
@@ -63,6 +64,26 @@ to let a deploy group talk to the daemon.
 
 Active and draining releases are never pruned. This governs Rollbridge's own
 release records; the deploy tool still owns on-disk release directories.
+
+## `statePath`
+
+When set, the daemon persists a state snapshot — the active and draining
+releases, each managed process's metadata (including pid), restart counters, and
+recent events — to this file (atomically, on changes and every few seconds). On a
+clean `shutdown` the file is removed.
+
+On the **next startup**, the daemon reads any leftover file and reports managed
+processes whose pids are still alive — likely orphans from a daemon that crashed
+without shutting down cleanly — in its log and event history. This is
+**advisory**: Rollbridge cannot re-adopt detached children, so it does not stop
+them; the operator verifies and stops the leftovers. A recycled pid can be a
+false positive, so treat a report as a prompt to investigate.
+
+```js
+statePath: "/var/lib/rollbridge/ticket-server.state.json"
+```
+
+Leave `statePath` unset to disable persistence (the default).
 
 ## `processes[]`
 
@@ -254,3 +275,4 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
 - `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`.
 - `nonBlockingDrain` must be a boolean, and is allowed only on a `companion` process.
+- `statePath` must be a string when set.

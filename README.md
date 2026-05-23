@@ -162,6 +162,16 @@ owns cleaning up on-disk release directories.
 releaseRetention: {keep: 5, maxAgeMs: 86400000}
 ```
 
+Set `statePath` to have the daemon persist its state to a file (active/draining
+releases, process pids, counters, recent events). On the next startup it reads
+any leftover file and reports managed processes still alive from a daemon that
+didn't shut down cleanly — advisory orphan detection, so you can stop leftovers.
+A clean `shutdown` removes the file. See [`docs/config.md`](docs/config.md#statepath).
+
+```js
+statePath: "/var/lib/rollbridge/ticket-server.state.json"
+```
+
 A function export receives no arguments and lets you build the config at load
 time:
 

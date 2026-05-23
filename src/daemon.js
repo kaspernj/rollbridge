@@ -6,9 +6,11 @@ import net from "node:net"
 import httpProxy from "http-proxy"
 import EventLog from "./event-log.js"
 import ReleaseGroup from "./release-group.js"
+import {clearState, readState, writeState} from "./state-store.js"
 import {resolveGroupId, resolveUserId} from "./system-ids.js"
 
 const EVENT_HISTORY_LIMIT = 1000
+const STATE_PERSIST_INTERVAL_MS = 5000
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
@@ -47,14 +49,18 @@ export default class RollbridgeDaemon {
     this.controlServer = /** @type {net.Server | undefined} */ (undefined)
     this.proxyPort = /** @type {number | undefined} */ (undefined)
     this.stopping = false
+    this.statePath = config.statePath
+    this.persistTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
 
     this.proxy.on("error", (error, req, res) => this.onProxyError(error, req, res))
   }
 
   /** @returns {Promise<void>} Starts proxy and control listeners. */
   async start() {
+    await this.reportOrphans()
     await this.startProxy()
     await this.startControlServer()
+    this.startStatePersistence()
   }
 
   /** @returns {Promise<void>} Starts the stable local proxy. */
@@ -345,6 +351,8 @@ export default class RollbridgeDaemon {
       void this.drainAndPrune(previousRelease)
     }
 
+    this.persistState()
+
     return {
       activeReleaseId: release.releaseId,
       previousReleaseId: previousRelease ? previousRelease.releaseId : null
@@ -593,6 +601,7 @@ export default class RollbridgeDaemon {
     await release.stop()
     this.logger("release stopped", {releaseId: release.releaseId})
     this.pruneStoppedReleases()
+    this.persistState()
   }
 
   /**
@@ -608,6 +617,7 @@ export default class RollbridgeDaemon {
       this.logger("release drain failed", {error: error instanceof Error ? error.message : String(error), releaseId: release.releaseId})
     } finally {
       this.pruneStoppedReleases()
+      this.persistState()
     }
   }
 
@@ -620,11 +630,96 @@ export default class RollbridgeDaemon {
     }
   }
 
+  /** @returns {void} Starts periodic state persistence when statePath is configured. */
+  startStatePersistence() {
+    if (!this.statePath) return
+
+    this.persistState()
+    this.persistTimer = setInterval(() => this.persistState(), STATE_PERSIST_INTERVAL_MS)
+    this.persistTimer.unref?.()
+  }
+
+  /**
+   * Persists a state snapshot (status plus recent events) to statePath, atomically and
+   * fire-and-forget. A failed write is logged but never blocks daemon operation.
+   * @returns {void}
+   */
+  persistState() {
+    if (!this.statePath || this.stopping) return
+
+    const snapshot = {...this.status(), events: this.eventLog.recent(), persistedAt: new Date().toISOString()}
+
+    writeState(this.statePath, snapshot).catch((error) => {
+      this.logger("state persist failed", {error: error instanceof Error ? error.message : String(error)})
+    })
+  }
+
+  /**
+   * On startup, reads any state left by a previous daemon and reports managed processes whose
+   * pids are still alive — likely orphans from a daemon that did not shut down cleanly. This is
+   * advisory (Rollbridge cannot re-adopt detached children); the operator stops the leftovers.
+   * A recycled pid could be a false positive, so reports are a prompt to investigate.
+   * @returns {Promise<void>} Resolves once orphans are reported.
+   */
+  async reportOrphans() {
+    if (!this.statePath) return
+
+    const prior = await readState(this.statePath)
+
+    if (!prior) return
+
+    try {
+      const snapshot = /** @type {DaemonStatus} */ (prior)
+      const orphans = /** @type {{id: string, pid: number, releaseId: string | null}[]} */ ([])
+
+      for (const release of snapshot.releases) {
+        for (const process of release.processes) {
+          if (process.pid !== undefined && this.isProcessAlive(process.pid)) orphans.push({id: process.id, pid: process.pid, releaseId: release.releaseId})
+        }
+      }
+
+      for (const {id, process} of [...snapshot.services, ...snapshot.singletons]) {
+        if (process.pid !== undefined && this.isProcessAlive(process.pid)) orphans.push({id, pid: process.pid, releaseId: null})
+      }
+
+      for (const orphan of orphans) {
+        this.logger("orphaned managed process detected", {pid: orphan.pid, processId: orphan.id, releaseId: orphan.releaseId})
+      }
+
+      if (orphans.length > 0) {
+        this.logger("orphaned processes from a previous daemon", {count: orphans.length, hint: "a previous daemon did not shut down cleanly; verify these pids and stop any leftovers"})
+      }
+    } catch (error) {
+      this.logger("orphan detection failed", {error: error instanceof Error ? error.message : String(error)})
+    }
+  }
+
+  /**
+   * @param {number} pid - Process id to probe.
+   * @returns {boolean} True when a process with this pid exists (alive).
+   */
+  isProcessAlive(pid) {
+    try {
+      process.kill(pid, 0)
+
+      return true
+    } catch (error) {
+      // EPERM means the process exists but is owned by another user — still alive.
+      return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM")
+    }
+  }
+
   /** @returns {Promise<void>} Stops proxy, control socket, and child processes. */
   async shutdown() {
     if (this.stopping) return
 
     this.stopping = true
+
+    if (this.persistTimer) {
+      clearInterval(this.persistTimer)
+      this.persistTimer = undefined
+    }
+
     this.proxy.close()
     await Promise.allSettled([...this.services.values()].map((processInstance) => processInstance.stop()))
     await Promise.allSettled([...this.singletons.values()].map((processInstance) => processInstance.stop()))
@@ -632,6 +727,9 @@ export default class RollbridgeDaemon {
     await this.closeServer(this.proxyServer)
     await this.closeServer(this.controlServer)
     await fs.rm(this.config.control.path, {force: true})
+
+    // A clean shutdown leaves no orphans, so remove the state file rather than leaving stale pids.
+    if (this.statePath) await clearState(this.statePath)
   }
 
   /**

@@ -17,7 +17,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
- * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig}} RollbridgeConfig
+ * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig, statePath?: string}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
  */
 
@@ -135,10 +135,11 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
   }
   const processes = processesSource.map((processSource, index) => normalizeProcess(processSource, index, proxy, issues))
   const releaseRetention = normalizeReleaseRetention(objectAt(source.releaseRetention, "releaseRetention", issues, {}), issues)
+  const statePath = source.statePath === undefined || source.statePath === null ? undefined : normalizeString(source.statePath, "statePath", issues)
 
   validateProcessSet(processes, issues)
 
-  return {config: {application, control, processes, proxy, releaseRetention}, issues}
+  return {config: {application, control, processes, proxy, releaseRetention, statePath}, issues}
 }
 
 /**
