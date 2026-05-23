@@ -402,6 +402,29 @@ test("validateConfig defaults releaseRetention, accepts overrides, and rejects b
   assert.ok(invalid.issues.some((issue) => issue.message === "releaseRetention.maxAgeMs must be a non-negative number"))
 })
 
+test("validateConfig leaves statePath unset by default, accepts a string, and rejects non-strings", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} statePath - statePath under test, or undefined.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateStatePath = (statePath) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182},
+    statePath
+  })
+
+  assert.equal(validateStatePath(undefined).config.statePath, undefined)
+
+  const set = validateStatePath("/var/lib/rollbridge/demo.state.json")
+
+  assert.deepEqual(set.issues, [])
+  assert.equal(set.config.statePath, "/var/lib/rollbridge/demo.state.json")
+
+  assert.ok(validateStatePath(123).issues.some((issue) => issue.message === "statePath must be a string"))
+})
+
 test("normalizeConfig throws an aggregated error listing every issue", () => {
   assert.throws(
     () => normalizeConfig({
