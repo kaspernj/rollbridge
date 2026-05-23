@@ -84,7 +84,10 @@ more or fewer lines for chatty or quiet processes.
 Set `control.mode` to an octal permission string (for example `"660"`) to
 chmod the control socket after it binds. This restricts which users can send
 control commands — useful when several deploy users share a group. When unset,
-the socket keeps the default permissions from the daemon's umask.
+the socket keeps the default permissions from the daemon's umask. Pair it with
+`control.owner` and `control.group` (a numeric id or a user/group name) to
+`chown` the socket to a shared deploy group; names resolve via
+`/etc/passwd`/`/etc/group`, and the daemon must run as a user allowed to chown it.
 
 Set the proxied process's `health.startDelayMs` (default `0`) to wait that long
 after the process starts before the first health probe — like a readiness

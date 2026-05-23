@@ -12,7 +12,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, restart: RestartConfig, restartDelayMs: number, command: string}} ProcessConfig
- * @typedef {{mode?: number, path: string}} ControlConfig
+ * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
  * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig}} RollbridgeConfig
@@ -126,7 +126,9 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
   const processesSource = arrayAt(source.processes, "processes", issues)
   const proxy = normalizeProxy(proxySource, issues)
   const control = {
+    group: normalizeControlPrincipal(controlSource.group, "control.group", issues),
     mode: normalizeSocketMode(controlSource.mode, "control.mode", issues),
+    owner: normalizeControlPrincipal(controlSource.owner, "control.owner", issues),
     path: normalizeString(controlSource.path, "control.path", issues, {default: `/tmp/rollbridge-${application}.sock`})
   }
   const processes = processesSource.map((processSource, index) => normalizeProcess(processSource, index, proxy, issues))
@@ -371,6 +373,26 @@ function normalizeSocketMode(value, key, issues) {
   }
 
   issues.push({fix: `Set ${key} to an octal permission string like "660" (or an octal number such as 0o660).`, message: `${key} must be an octal file mode between 0 and 0o777`})
+
+  return undefined
+}
+
+/**
+ * @param {JsonValue} value - Raw owner/group value.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {number | string | undefined} A numeric id, a name (resolved at bind time), or undefined when unset.
+ */
+function normalizeControlPrincipal(value, key, issues) {
+  if (value === undefined || value === null) return undefined
+
+  if (typeof value === "number") {
+    if (Number.isInteger(value) && value >= 0) return value
+  } else if (typeof value === "string" && value.length > 0) {
+    return value
+  }
+
+  issues.push({fix: `Set ${key} to a non-negative integer id or a user/group name, e.g. "deploy".`, message: `${key} must be a non-negative integer id or a name`})
 
   return undefined
 }
