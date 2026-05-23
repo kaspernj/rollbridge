@@ -76,7 +76,8 @@ release records; the deploy tool still owns on-disk release directories.
 | `port` | number or `{from, to}` | unset | Port (or range) allocated per release. **Required for the `proxied` process.** A plain number `n` means the fixed port `n` (`{from: n, to: n}`). |
 | `health` | object or `false` | enabled with defaults | Health check for the `proxied` process; set `false` to disable (see below). |
 | `stopSignal` | signal name (e.g. `"SIGTERM"`, `"SIGINT"`, `"SIGQUIT"`) | `"SIGTERM"` | Signal sent to gracefully stop the process; after `gracefulStopMs` it is `SIGKILL`ed. Use a worker's quit signal so it finishes in-flight work before exiting. |
-| `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | Graceful-stop window: time between `stopSignal` and `SIGKILL` for this process. |
+| `lifecycle` | object | no hooks | Command hooks run when gracefully stopping the process (see below). |
+| `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | Graceful-stop window: time between `stopSignal`/`stopCommand` and `SIGKILL` for this process. |
 | `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
 | `restart` | object | unlimited restarts, constant delay | Automatic-restart policy: cap, rolling window, and backoff (see below). |
 | `memory` | object | unset (no monitoring) | Memory supervision: restart the process when its RSS exceeds a limit (see below). |
@@ -101,6 +102,33 @@ restart every replica, or `worker#0` for one). Replicas get `replicaIndex`/
 `replicaCount` template variables and `ROLLBRIDGE_REPLICA_INDEX`/`_COUNT` in their
 environment, so each instance can pick a distinct shard, queue, or lock. A single
 process (`replicas: 1`) keeps its plain id and is replica `0` of `1`.
+
+### `processes[].lifecycle`
+
+Command hooks run when Rollbridge **gracefully stops** the process — during a
+deploy's drain, a `rollbridge restart`, a memory restart, or shutdown. They let a
+job worker quiesce and finish in-flight work before it is terminated. Omit
+`lifecycle` for the default behavior (just `stopSignal` then `SIGKILL`).
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `lifecycle.quietCommand` | string | unset | Run first to tell the process to stop accepting new work. |
+| `lifecycle.drainCommand` | string | unset | Run after quieting to wait until the process has drained (it blocks until done). When unset, Rollbridge instead waits up to `drainTimeoutMs` for the process to exit on its own. |
+| `lifecycle.drainTimeoutMs` | non-negative number | `0` | Maximum time to wait for the drain step (`0` skips waiting). |
+| `lifecycle.stopCommand` | string | unset | Run to stop the process instead of sending `stopSignal`, if it is still running after draining. |
+
+The full stop sequence is: run `quietCommand` → drain (`drainCommand`, or wait
+`drainTimeoutMs` for the process to exit) → if still running, run `stopCommand`
+or send `stopSignal` → `SIGKILL` after `gracefulStopMs`. Each hook command is run
+through a shell with the process's environment plus `ROLLBRIDGE_PID` (the
+process-group leader's pid, so a hook can `kill -TSTP -$ROLLBRIDGE_PID`). Every
+hook is **bounded by a timeout** (its drain timeout, or `gracefulStopMs`) and its
+failure is non-fatal — the sequence proceeds and `SIGKILL` is always the final
+fallback, so a slow or broken hook can't wedge a stop.
+
+```js
+{id: "worker", policy: "companion", command: "…", lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}}
+```
 
 ### `processes[].restart`
 
@@ -204,3 +232,4 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
+- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number.

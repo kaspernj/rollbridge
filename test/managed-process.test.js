@@ -1,6 +1,8 @@
 // @ts-check
 
 import assert from "node:assert/strict"
+import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
@@ -191,6 +193,108 @@ function buildLongLived(shouldRestart) {
     stopTimeoutMs: 500
   })
 }
+
+test("runs quiet and drain lifecycle hooks before stopping", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-hooks-"))
+  const logPath = path.join(dir, "hooks.log")
+  const append = (/** @type {string} */ word) => `${JSON.stringify("/bin/sh")} -c ${JSON.stringify(`echo ${word} >> ${logPath}`)}`
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    lifecycle: {drainCommand: append("drain"), drainTimeoutMs: 500, quietCommand: append("quiet")},
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: 2000
+  })
+
+  try {
+    await managed.start()
+    await managed.stop()
+
+    assert.equal(managed.status().state, "stopped")
+    // quietCommand ran, then drainCommand, then the worker was stopped via stopSignal.
+    assert.deepEqual(fs.readFileSync(logPath, "utf8").trim().split("\n"), ["quiet", "drain"])
+  } finally {
+    await managed.stop()
+    fs.rmSync(dir, {force: true, recursive: true})
+  }
+})
+
+test("a configured stopCommand is used instead of the stop signal", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-hooks-"))
+  const logPath = path.join(dir, "stop.log")
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    // The stop command logs and kills the worker's process group, so no SIGKILL fallback is needed.
+    lifecycle: {drainTimeoutMs: 0, stopCommand: `${JSON.stringify("/bin/sh")} -c ${JSON.stringify(`echo stop >> ${logPath}; kill -KILL -$ROLLBRIDGE_PID`)}`},
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: 2000
+  })
+
+  /** @type {string[]} */
+  const signals = []
+  const killProcessGroup = managed.killProcessGroup.bind(managed)
+
+  managed.killProcessGroup = (signal) => {
+    signals.push(signal)
+    killProcessGroup(signal)
+  }
+
+  try {
+    await managed.start()
+    await managed.stop()
+
+    assert.equal(managed.status().state, "stopped")
+    assert.deepEqual(fs.readFileSync(logPath, "utf8").trim().split("\n"), ["stop"])
+    // The stop signal is replaced by the stop command (only a SIGKILL fallback may be sent).
+    assert.ok(!signals.includes("SIGTERM"), `expected no stopSignal, got ${signals.join(",")}`)
+  } finally {
+    await managed.stop()
+    fs.rmSync(dir, {force: true, recursive: true})
+  }
+})
+
+test("a hanging lifecycle hook is bounded so stop still completes", async () => {
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    lifecycle: {drainTimeoutMs: 0, quietCommand: "sleep 30"},
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: 300
+  })
+
+  try {
+    await managed.start()
+
+    const startedAt = Date.now()
+
+    await managed.stop()
+
+    assert.equal(managed.status().state, "stopped")
+    // The hung quietCommand is killed at stopTimeoutMs rather than blocking stop indefinitely.
+    assert.ok(Date.now() - startedAt < 5000, "stop should not wait for the hung hook")
+  } finally {
+    await managed.stop()
+  }
+})
 
 test("sends the configured stopSignal as the graceful stop signal", async () => {
   const managed = new ManagedProcess({

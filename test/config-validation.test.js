@@ -126,6 +126,35 @@ test("validateConfig defaults the restart policy, accepts overrides, and rejects
   assert.ok(validateRestart({maxRestarts: 1.5}).issues.some((issue) => issue.message === "processes[0].restart.maxRestarts must be a non-negative integer"))
 })
 
+test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} lifecycle - Lifecycle config under test, or undefined.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateLifecycle = (lifecycle) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", lifecycle, policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  // Omitted → no commands, zero drain.
+  assert.deepEqual(validateLifecycle(undefined).config.processes[0].lifecycle, {drainTimeoutMs: 0})
+
+  const custom = validateLifecycle({drainTimeoutMs: 30000, quietCommand: "kill -TSTP $ROLLBRIDGE_PID", stopCommand: "kill -TERM $ROLLBRIDGE_PID"})
+
+  assert.deepEqual(custom.issues, [])
+  assert.equal(custom.config.processes[0].lifecycle.quietCommand, "kill -TSTP $ROLLBRIDGE_PID")
+  assert.equal(custom.config.processes[0].lifecycle.stopCommand, "kill -TERM $ROLLBRIDGE_PID")
+  assert.equal(custom.config.processes[0].lifecycle.drainTimeoutMs, 30000)
+
+  const invalid = validateLifecycle({drainTimeoutMs: -1, quietCommand: 5})
+  const messages = invalid.issues.map((issue) => issue.message)
+
+  assert.ok(messages.includes("processes[0].lifecycle.drainTimeoutMs must be a non-negative number"), JSON.stringify(messages))
+  assert.ok(messages.includes("processes[0].lifecycle.quietCommand must be a string"), JSON.stringify(messages))
+})
+
 test("validateConfig defaults replicas, accepts companion replicas, and rejects bad placements", () => {
   /**
    * @param {import("../src/json.js").JsonValue} worker - Second (worker) process definition.

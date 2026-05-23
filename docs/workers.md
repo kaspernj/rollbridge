@@ -76,14 +76,28 @@ their own job queue draining), a job still running when the release is retired
 gets only the `gracefulStopMs` window to finish. Keep jobs **idempotent and
 safe to retry** so a job interrupted at the `SIGKILL` fallback can run again.
 
-## Roadmap: command-based lifecycle hooks
+## Command-based lifecycle hooks
 
-Today the safe-stop mechanism is signal-based (`stopSignal` + `gracefulStopMs`).
-Command-based lifecycle hooks (a `quietCommand` to stop accepting work, a
-`drainCommand` / `drainTimeoutMs` to wait for the queue to drain, and a
-`stopCommand`), plus a **non-blocking drain** mode that starts new workers while
-old ones finish, are on the [roadmap](../TODO.md#major-features) and not yet
-implemented.
+For workers that quiesce or drain via a command rather than a single signal, set
+a `lifecycle` block. When Rollbridge gracefully stops the worker it runs
+`quietCommand` (stop accepting new work), then drains (`drainCommand`, or waits up
+to `drainTimeoutMs` for the worker to exit), then `stopCommand` or `stopSignal`,
+then `SIGKILL` after `gracefulStopMs`. Each hook gets `ROLLBRIDGE_PID` and is
+bounded by a timeout, so a slow hook can't wedge a deploy.
+
+```js
+{
+  id: "worker",
+  policy: "companion",
+  command: "npx velocious background-jobs-worker",
+  replicas: 4,
+  lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}
+}
+```
+
+See [`docs/config.md`](config.md#processeslifecycle) for the hook reference. A
+**non-blocking drain** mode (starting new workers while old ones finish) is still
+on the [roadmap](../TODO.md#major-features).
 
 See [`docs/config.md`](config.md) for `stopSignal`, `replicas`, and
 `gracefulStopMs`, and [`docs/velocious.md`](velocious.md) for a full Velocious

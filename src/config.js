@@ -12,7 +12,8 @@ import {pathToFileURL} from "node:url"
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
+ * @typedef {{drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, stopCommand?: string}} LifecycleConfig
+ * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
  * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
@@ -180,7 +181,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", memory: undefined, outputLines: 50, policy: "companion", port: undefined, replicas: 1, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
+    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", lifecycle: {drainTimeoutMs: 0}, memory: undefined, outputLines: 50, policy: "companion", port: undefined, replicas: 1, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
   }
 
   const source = value
@@ -192,6 +193,7 @@ function normalizeProcess(value, index, proxy, issues) {
     gracefulStopMs: normalizeNumber(source.gracefulStopMs, `processes[${index}].gracefulStopMs`, issues, {default: proxy.forceStopTimeoutMs}),
     health: normalizeHealth(source.health, `processes[${index}].health`, proxy, issues),
     id: normalizeString(source.id, `processes[${index}].id`, issues),
+    lifecycle: normalizeLifecycle(source.lifecycle, `processes[${index}].lifecycle`, issues),
     memory: normalizeMemory(source.memory, `processes[${index}].memory`, issues),
     outputLines: normalizeOutputLines(source.outputLines, `processes[${index}].outputLines`, issues),
     policy: normalizePolicy(source.policy, `processes[${index}].policy`, issues),
@@ -304,6 +306,32 @@ function normalizeMemory(value, key, issues) {
   }
 
   return {checkIntervalMs, limitBytes, warnBytes}
+}
+
+/**
+ * @param {JsonValue} value - Raw lifecycle config.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {LifecycleConfig} Normalized lifecycle hooks (no commands and a 0 drain by default).
+ */
+function normalizeLifecycle(value, key, issues) {
+  if (value === undefined || value === null) return {drainTimeoutMs: 0}
+
+  if (!isPlainObject(value)) {
+    issues.push({fix: `Set ${key} to a mapping with optional quietCommand, drainCommand, stopCommand, and drainTimeoutMs.`, message: `${key} must be an object`})
+
+    return {drainTimeoutMs: 0}
+  }
+
+  const drainTimeoutMs = normalizeNumber(value.drainTimeoutMs, `${key}.drainTimeoutMs`, issues, {default: 0})
+  /** @type {LifecycleConfig} */
+  const lifecycle = {drainTimeoutMs: nonNegativeOrDefault(drainTimeoutMs, `${key}.drainTimeoutMs`, issues, 0, false)}
+
+  if (value.quietCommand !== undefined) lifecycle.quietCommand = normalizeString(value.quietCommand, `${key}.quietCommand`, issues)
+  if (value.drainCommand !== undefined) lifecycle.drainCommand = normalizeString(value.drainCommand, `${key}.drainCommand`, issues)
+  if (value.stopCommand !== undefined) lifecycle.stopCommand = normalizeString(value.stopCommand, `${key}.stopCommand`, issues)
+
+  return lifecycle
 }
 
 /**
