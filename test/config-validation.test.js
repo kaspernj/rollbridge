@@ -86,6 +86,46 @@ test("validateConfig defaults outputLines and accepts a positive override", () =
   assert.equal(config.processes[1].outputLines, 5)
 })
 
+test("validateConfig defaults the restart policy, accepts overrides, and rejects bad values", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} restart - Restart policy under test, or undefined to omit it.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateRestart = (restart) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}, restart}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  const defaulted = validateRestart(undefined)
+
+  assert.deepEqual(defaulted.issues, [])
+  assert.deepEqual(defaulted.config.processes[0].restart, {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0})
+
+  const custom = validateRestart({backoffFactor: 2, maxDelayMs: 30000, maxRestarts: 5, windowMs: 60000})
+
+  assert.deepEqual(custom.issues, [])
+  assert.deepEqual(custom.config.processes[0].restart, {backoffFactor: 2, maxDelayMs: 30000, maxRestarts: 5, windowMs: 60000})
+
+  // maxRestarts: 0 disables automatic restarts.
+  const disabled = validateRestart({maxRestarts: 0})
+
+  assert.deepEqual(disabled.issues, [])
+  assert.equal(disabled.config.processes[0].restart.maxRestarts, 0)
+
+  const invalid = validateRestart({backoffFactor: 0.5, maxDelayMs: -1, maxRestarts: -2, windowMs: -3})
+  const messages = invalid.issues.map((issue) => issue.message)
+
+  assert.ok(messages.includes("processes[0].restart.backoffFactor must be a number greater than or equal to 1"), JSON.stringify(messages))
+  assert.ok(messages.includes("processes[0].restart.maxRestarts must be a non-negative integer"), JSON.stringify(messages))
+  assert.ok(messages.includes("processes[0].restart.maxDelayMs must be a non-negative number"), JSON.stringify(messages))
+  assert.ok(messages.includes("processes[0].restart.windowMs must be a non-negative number"), JSON.stringify(messages))
+
+  // A fractional maxRestarts is rejected (it must be a whole number of restarts).
+  assert.ok(validateRestart({maxRestarts: 1.5}).issues.some((issue) => issue.message === "processes[0].restart.maxRestarts must be a non-negative integer"))
+})
+
 test("validateConfig rejects a non-positive-integer outputLines with a fix", () => {
   const {issues} = validateConfig({
     application: "demo",

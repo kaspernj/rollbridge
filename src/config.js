@@ -9,7 +9,8 @@ import {pathToFileURL} from "node:url"
  * @typedef {{from: number, to: number}} PortRange
  * @typedef {{path: string, startDelayMs: number, timeoutMs: number, intervalMs: number}} HealthConfig
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restartDelayMs: number, command: string}} ProcessConfig
+ * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
+ * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, outputLines: number, policy: ProcessPolicy, port?: PortRange, restart: RestartConfig, restartDelayMs: number, command: string}} ProcessConfig
  * @typedef {{mode?: number, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
@@ -175,7 +176,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", outputLines: 50, policy: "companion", port: undefined, restartDelayMs: 1000}
+    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", outputLines: 50, policy: "companion", port: undefined, restart: defaultRestartConfig(), restartDelayMs: 1000}
   }
 
   const source = value
@@ -190,8 +191,78 @@ function normalizeProcess(value, index, proxy, issues) {
     outputLines: normalizeOutputLines(source.outputLines, `processes[${index}].outputLines`, issues),
     policy: normalizePolicy(source.policy, `processes[${index}].policy`, issues),
     port: normalizePortRange(source.port, `processes[${index}].port`, issues),
+    restart: normalizeRestart(source.restart, `processes[${index}].restart`, issues),
     restartDelayMs: normalizeNumber(source.restartDelayMs, `processes[${index}].restartDelayMs`, issues, {default: 1000})
   }
+}
+
+/**
+ * @returns {RestartConfig} Default restart policy: unlimited restarts with a constant delay.
+ */
+function defaultRestartConfig() {
+  return {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}
+}
+
+/**
+ * @param {JsonValue} value - Raw restart policy.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {RestartConfig} Normalized restart policy.
+ */
+function normalizeRestart(value, key, issues) {
+  if (value === undefined || value === null) return defaultRestartConfig()
+
+  if (!isPlainObject(value)) {
+    issues.push({fix: `Set ${key} to a mapping with maxRestarts, windowMs, backoffFactor, and maxDelayMs.`, message: `${key} must be an object`})
+
+    return defaultRestartConfig()
+  }
+
+  const windowMs = normalizeNumber(value.windowMs, `${key}.windowMs`, issues, {default: 0})
+  const maxDelayMs = normalizeNumber(value.maxDelayMs, `${key}.maxDelayMs`, issues, {default: 0})
+
+  return {
+    backoffFactor: normalizeBackoffFactor(value.backoffFactor, `${key}.backoffFactor`, issues),
+    maxDelayMs: nonNegativeOrDefault(maxDelayMs, `${key}.maxDelayMs`, issues, 0, false),
+    maxRestarts: normalizeMaxRestarts(value.maxRestarts, `${key}.maxRestarts`, issues),
+    windowMs: nonNegativeOrDefault(windowMs, `${key}.windowMs`, issues, 0, false)
+  }
+}
+
+/**
+ * @param {JsonValue} value - Raw maximum restart count.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {number | undefined} Restart cap, or undefined for unlimited restarts.
+ */
+function normalizeMaxRestarts(value, key, issues) {
+  if (value === undefined || value === null) return undefined
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    issues.push({fix: `Set ${key} to a non-negative integer (0 disables automatic restarts), or omit it for unlimited restarts.`, message: `${key} must be a non-negative integer`})
+
+    return undefined
+  }
+
+  return value
+}
+
+/**
+ * @param {JsonValue} value - Raw backoff factor.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {number} Backoff multiplier (>= 1; 1 keeps a constant delay).
+ */
+function normalizeBackoffFactor(value, key, issues) {
+  const factor = normalizeNumber(value, key, issues, {default: 1})
+
+  if (factor < 1) {
+    issues.push({fix: `Set ${key} to a number >= 1 (1 keeps a constant delay; 2 doubles the delay each restart).`, message: `${key} must be a number greater than or equal to 1`})
+
+    return 1
+  }
+
+  return factor
 }
 
 /**

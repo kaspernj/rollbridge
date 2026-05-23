@@ -91,6 +91,18 @@ after the process starts before the first health probe — like a readiness
 probe's initial delay, useful for apps with a known boot time. The delay runs
 before the `health.timeoutMs` window begins.
 
+Set a process's `restart` policy to control automatic restarts after a crash.
+`restart.maxRestarts` caps how many restarts are allowed within `restart.windowMs`
+before Rollbridge gives up and leaves the process `failed` (`maxRestarts: 0`
+disables restarts entirely), while `restart.backoffFactor` — with an optional
+`restart.maxDelayMs` cap — backs off the `restartDelayMs` delay on each successive
+restart. With no `restart` block, a crashed process keeps restarting after
+`restartDelayMs`, as before. See [`docs/config.md`](docs/config.md#processesrestart).
+
+```js
+restart: {maxRestarts: 5, windowMs: 60000, backoffFactor: 2, maxDelayMs: 30000}
+```
+
 Set `releaseRetention` to bound how many stopped (drained) releases the daemon
 keeps in memory and reports in `status`. `keep` (default `10`) retains the most
 recent stopped releases; `maxAgeMs` (default `0`, disabled) also prunes stopped

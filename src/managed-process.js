@@ -8,7 +8,7 @@ import {spawn} from "node:child_process"
  * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
- * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, outputLines: number, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
+ * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
  * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, logs: ManagedProcessLog[], pid: number | undefined, restarts: number, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
@@ -21,11 +21,12 @@ export default class ManagedProcess extends EventEmitter {
    * @param {string} args.id - Process id.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger callback.
    * @param {number} args.outputLines - Recent stdout/stderr lines to retain and report.
+   * @param {import("./config.js").RestartConfig} [args.restart] - Restart policy (defaults to unlimited restarts with a constant delay).
    * @param {number} args.restartDelayMs - Restart delay.
    * @param {() => boolean} args.shouldRestart - Restart policy callback.
    * @param {number} args.stopTimeoutMs - Stop timeout.
    */
-  constructor({command, cwd, env, id, logger, outputLines, restartDelayMs, shouldRestart, stopTimeoutMs}) {
+  constructor({command, cwd, env, id, logger, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopTimeoutMs}) {
     super()
 
     this.command = command
@@ -34,12 +35,14 @@ export default class ManagedProcess extends EventEmitter {
     this.id = id
     this.logger = logger
     this.outputLines = outputLines
+    this.restart = restart
     this.restartDelayMs = restartDelayMs
     this.shouldRestart = shouldRestart
     this.stopTimeoutMs = stopTimeoutMs
     this.state = /** @type {ManagedProcessState} */ ("stopped")
     this.logs = /** @type {ManagedProcessLog[]} */ ([])
     this.restarts = 0
+    this.recentRestarts = /** @type {number[]} */ ([])
     this.startedAtMs = /** @type {number | undefined} */ (undefined)
     this.intentionalStop = false
     this.restartTimer = undefined
@@ -106,6 +109,7 @@ export default class ManagedProcess extends EventEmitter {
     this.env = definition.env
     this.logger = definition.logger
     this.outputLines = definition.outputLines
+    this.restart = definition.restart
     this.restartDelayMs = definition.restartDelayMs
     this.shouldRestart = definition.shouldRestart
     this.stopTimeoutMs = definition.stopTimeoutMs
@@ -146,14 +150,66 @@ export default class ManagedProcess extends EventEmitter {
     this.emit("exit", {code, signal})
 
     if (!wasIntentional && this.shouldRestart()) {
-      this.restartTimer = setTimeout(() => {
-        this.restartTimer = undefined
-        this.restarts += 1
-        this.start().catch((error) => {
-          this.logger("process restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
-        })
-      }, this.restartDelayMs)
+      this.scheduleRestart()
     }
+  }
+
+  /**
+   * Schedules an automatic restart per the restart policy, or gives up once the policy's limit is reached.
+   * @returns {void}
+   */
+  scheduleRestart() {
+    const {backoffFactor, maxRestarts, windowMs} = this.restart
+
+    // Fast path: unlimited restarts with a constant delay needs no per-restart bookkeeping.
+    // The delay is constant across attempts here (backoffFactor is 1), so restartDelayFor(0)
+    // gives the right value while still applying any maxDelayMs cap.
+    if (maxRestarts === undefined && backoffFactor === 1) {
+      this.queueRestart(this.restartDelayFor(0))
+
+      return
+    }
+
+    const now = Date.now()
+
+    if (windowMs > 0) {
+      this.recentRestarts = this.recentRestarts.filter((time) => time > now - windowMs)
+    }
+
+    if (maxRestarts !== undefined && this.recentRestarts.length >= maxRestarts) {
+      this.logger("restart limit reached", {id: this.id, maxRestarts, windowMs})
+
+      return
+    }
+
+    const delay = this.restartDelayFor(this.recentRestarts.length)
+
+    this.recentRestarts.push(now)
+    this.queueRestart(delay)
+  }
+
+  /**
+   * @param {number} attempt - Number of restarts already counted in the current window.
+   * @returns {number} Backed-off restart delay in milliseconds, capped by maxDelayMs when set.
+   */
+  restartDelayFor(attempt) {
+    const backedOff = this.restartDelayMs * this.restart.backoffFactor ** attempt
+
+    return this.restart.maxDelayMs > 0 ? Math.min(backedOff, this.restart.maxDelayMs) : backedOff
+  }
+
+  /**
+   * @param {number} delayMs - Delay before the restart attempt.
+   * @returns {void}
+   */
+  queueRestart(delayMs) {
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined
+      this.restarts += 1
+      this.start().catch((error) => {
+        this.logger("process restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
+      })
+    }, delayMs)
   }
 
   /**
