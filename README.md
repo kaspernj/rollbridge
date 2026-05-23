@@ -417,6 +417,10 @@ Maintainers can publish a patch release from the latest default branch:
 npm run release:patch
 ```
 
+The release script owns the package version bump, lockfile update, default-branch
+commit, push, and npm publish. Do not run `npm version` manually before running
+it.
+
 ## License
 
 Rollbridge is released under the [MIT License](LICENSE).
