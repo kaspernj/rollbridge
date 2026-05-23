@@ -4,7 +4,10 @@ import fs from "node:fs/promises"
 import http from "node:http"
 import net from "node:net"
 import httpProxy from "http-proxy"
+import EventLog from "./event-log.js"
 import ReleaseGroup from "./release-group.js"
+
+const EVENT_HISTORY_LIMIT = 1000
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
@@ -21,7 +24,18 @@ export default class RollbridgeDaemon {
    */
   constructor({config, logger}) {
     this.config = config
-    this.logger = logger || ((message, data = {}) => console.log(JSON.stringify({at: new Date().toISOString(), data, message})))
+    this.eventLog = new EventLog(EVENT_HISTORY_LIMIT)
+
+    const baseLogger = logger || ((message, data = {}) => console.log(JSON.stringify({at: new Date().toISOString(), data, message})))
+
+    // Every operational milestone is logged through this.logger, so recording here
+    // gives a structured event history for free (deploys, switches, stops, crashes,
+    // restarts, and failed commands).
+    this.logger = /** @type {(message: string, data?: Record<string, JsonValue>) => void} */ ((message, data = {}) => {
+      this.eventLog.record(message, data)
+      baseLogger(message, data)
+    })
+
     this.releases = /** @type {Map<string, ReleaseGroup>} */ (new Map())
     this.services = /** @type {Map<string, import("./managed-process.js").default>} */ (new Map())
     this.servicePorts = /** @type {Record<string, number>} */ ({})
@@ -195,6 +209,7 @@ export default class RollbridgeDaemon {
     this.executeControlLine(line)
       .then((response) => socket.write(`${JSON.stringify({status: "success", ...response})}\n`))
       .catch((error) => {
+        this.logger("command failed", {error: error instanceof Error ? error.message : String(error)})
         socket.write(`${JSON.stringify({
           error: error instanceof Error ? error.message : String(error),
           status: "error"
@@ -226,6 +241,10 @@ export default class RollbridgeDaemon {
 
     if (commandName === "status") {
       return this.status()
+    }
+
+    if (commandName === "events") {
+      return {events: this.eventLog.recent(typeof data.limit === "number" ? data.limit : undefined)}
     }
 
     if (commandName === "stop") {
@@ -278,6 +297,7 @@ export default class RollbridgeDaemon {
       await this.ensureServices(release, startedServices)
       await release.start()
     } catch (error) {
+      this.logger("deploy failed", {error: error instanceof Error ? error.message : String(error), releaseId: newReleaseId})
       await this.stopStartedServices(startedServices)
       throw error
     }
@@ -482,6 +502,7 @@ export default class RollbridgeDaemon {
     if (release === this.activeRelease) this.activeRelease = undefined
 
     await release.stop()
+    this.logger("release stopped", {releaseId: release.releaseId})
     this.pruneStoppedReleases()
   }
 
@@ -493,6 +514,7 @@ export default class RollbridgeDaemon {
   async drainAndPrune(release) {
     try {
       await release.drainAndStop(this.config.proxy.drainTimeoutMs)
+      this.logger("release drained", {releaseId: release.releaseId})
     } catch (error) {
       this.logger("release drain failed", {error: error instanceof Error ? error.message : String(error), releaseId: release.releaseId})
     } finally {

@@ -359,6 +359,15 @@ rollbridge logs --config rollbridge.js
 rollbridge logs --config rollbridge.js --process web
 ```
 
+Print the daemon's recent structured event history — deploys, traffic switches,
+release stops, process crashes/restarts, and failed commands (the most recent
+1000 events, in memory):
+
+```bash
+rollbridge events --config rollbridge.js
+rollbridge events --config rollbridge.js --limit 20
+```
+
 Stop the active release:
 
 ```bash

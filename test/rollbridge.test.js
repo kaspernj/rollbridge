@@ -336,6 +336,67 @@ test("the restart control command bounces a process over the socket", async () =
   }
 })
 
+test("the daemon records a structured event history served by the events command", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const response = await sendControlCommand({
+      command: {command: "events"},
+      path: fixture.config.control.path
+    })
+    const events = /** @type {import("../src/event-log.js").DaemonEvent[]} */ (response.events)
+    const messages = events.map((event) => event.message)
+
+    assert.ok(messages.includes("deploy starting"), JSON.stringify(messages))
+    assert.ok(messages.includes("traffic switched"), JSON.stringify(messages))
+
+    const switched = events.find((event) => event.message === "traffic switched")
+
+    assert.ok(switched)
+    assert.equal(switched.data.releaseId, "v1")
+    assert.match(switched.at, /^\d{4}-\d{2}-\d{2}T.*Z$/)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("the events command honors --limit and records failed commands", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // An unknown command is rejected and recorded as a "command failed" event.
+    await assert.rejects(() => sendControlCommand({
+      command: {command: "bogus"},
+      path: fixture.config.control.path
+    }))
+
+    const all = /** @type {import("../src/event-log.js").DaemonEvent[]} */ ((await sendControlCommand({
+      command: {command: "events"},
+      path: fixture.config.control.path
+    })).events)
+
+    assert.ok(all.some((event) => event.message === "command failed"))
+
+    const limited = /** @type {import("../src/event-log.js").DaemonEvent[]} */ ((await sendControlCommand({
+      command: {command: "events", limit: 1},
+      path: fixture.config.control.path
+    })).events)
+
+    assert.equal(limited.length, 1)
+    assert.deepEqual(limited[0], all[all.length - 1])
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("control socket accepts deploy and status commands", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)
