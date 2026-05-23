@@ -90,7 +90,8 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Write a CLI reference for `daemon`, `ensure-daemon`, `deploy`, `status`, `stop`, `shutdown`, and future commands (`docs/cli.md`).
 - [x] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
 - [x] Document memory checks and auto-restart behavior after the feature lands (`docs/config.md` → `processes[].memory`).
-- [ ] Document worker lifecycle hooks and safe background-job deployment patterns after the feature lands.
+- [x] Document safe background-job deployment patterns (`docs/workers.md`: companion + `replicas` + `stopSignal` + `gracefulStopMs`, old/new worker overlap).
+- [ ] Document worker lifecycle hooks once the command-based hooks (`quietCommand`/`drainCommand`/`stopCommand`) land.
 - [x] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples (`docs/velocious.md`).
 - [x] Add an Nginx guide with WebSocket headers, timeouts, and common failure modes (`docs/nginx.md`).
 - [x] Add deploy-tool recipes that call Rollbridge CLI commands directly (`docs/deploy-recipes.md`).
