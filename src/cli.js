@@ -330,7 +330,137 @@ export async function runCli(argv) {
       console.log(formatEvents(events))
     })
 
+  program
+    .command("completion")
+    .description("Print a shell completion script. Enable with: source <(rollbridge completion <shell>)")
+    .argument("<shell>", "Shell to generate completion for (bash or zsh)")
+    .action((shell) => {
+      if (shell !== "bash" && shell !== "zsh") {
+        console.error(`Unsupported shell "${shell}". Supported shells: bash, zsh.`)
+        process.exitCode = 1
+        return
+      }
+
+      console.log(generateCompletionScript(program, shell))
+    })
+
   await program.parseAsync(argv)
+}
+
+/**
+ * @typedef {{name: string, options: string[], valueOptions: string[]}} CompletionCommand
+ */
+
+/**
+ * Builds a shell completion script by introspecting the CLI's commands and options,
+ * so completions never drift from the actual command surface.
+ * @param {import("commander").Command} program - Configured CLI program.
+ * @param {"bash" | "zsh"} shell - Target shell.
+ * @returns {string} A sourceable completion script.
+ */
+export function generateCompletionScript(program, shell) {
+  const commands = describeCommands(program)
+
+  return shell === "zsh" ? zshCompletionScript(commands) : bashCompletionScript(commands)
+}
+
+/**
+ * @param {import("commander").Command} program - Configured CLI program.
+ * @returns {CompletionCommand[]} Each command's name, long option flags, and value-taking option flags.
+ */
+function describeCommands(program) {
+  return program.commands.map((command) => {
+    /** @type {string[]} */
+    const options = []
+    /** @type {string[]} */
+    const valueOptions = []
+
+    for (const option of command.options) {
+      if (!option.long) continue
+
+      options.push(option.long)
+      if (option.required || option.optional) valueOptions.push(option.long)
+    }
+
+    return {name: command.name(), options, valueOptions}
+  })
+}
+
+/**
+ * @param {CompletionCommand[]} commands - Command descriptors.
+ * @returns {string} A bash completion script.
+ */
+function bashCompletionScript(commands) {
+  const names = commands.map((command) => command.name).join(" ")
+  const branches = commands
+    .map((command) => `    ${command.name})\n      opts="${command.options.join(" ")}"\n      values="${command.valueOptions.join(" ")}"\n      ;;`)
+    .join("\n")
+
+  return `# rollbridge bash completion
+# Enable with: source <(rollbridge completion bash)
+_rollbridge() {
+  local cur prev cmd opts values i
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+
+  cmd=""
+  for ((i = 1; i < COMP_CWORD; i++)); do
+    case "\${COMP_WORDS[i]}" in
+      -*) ;;
+      *) cmd="\${COMP_WORDS[i]}"; break ;;
+    esac
+  done
+
+  if [[ -z "$cmd" ]]; then
+    COMPREPLY=( $(compgen -W "${names}" -- "$cur") )
+    return
+  fi
+
+  opts=""
+  values=""
+  case "$cmd" in
+${branches}
+  esac
+
+  if [[ -n "$values" && " $values " == *" $prev "* ]]; then
+    COMPREPLY=( $(compgen -f -- "$cur") )
+    return
+  fi
+
+  COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+}
+complete -F _rollbridge rollbridge
+`
+}
+
+/**
+ * @param {CompletionCommand[]} commands - Command descriptors.
+ * @returns {string} A zsh completion script.
+ */
+function zshCompletionScript(commands) {
+  const names = commands.map((command) => command.name).join(" ")
+  const branches = commands
+    .map((command) => `    ${command.name}) compadd -- ${command.options.join(" ")} ;;`)
+    .join("\n")
+
+  return `#compdef rollbridge
+# rollbridge zsh completion
+# Enable with: source <(rollbridge completion zsh)
+_rollbridge() {
+  local -a commands
+  commands=(${names})
+
+  if (( CURRENT == 2 )); then
+    compadd -- $commands
+    return
+  fi
+
+  case "\${words[2]}" in
+${branches}
+  esac
+}
+compdef _rollbridge rollbridge
+`
 }
 
 /**

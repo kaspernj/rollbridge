@@ -389,6 +389,13 @@ Shut down the daemon and managed processes:
 rollbridge shutdown --config rollbridge.js
 ```
 
+Enable shell completion (bash or zsh) for command names and option flags:
+
+```bash
+source <(rollbridge completion bash)   # add to ~/.bashrc
+source <(rollbridge completion zsh)    # add to ~/.zshrc
+```
+
 ## Nginx
 
 Nginx should proxy to Rollbridge, not directly to Velocious:
