@@ -528,6 +528,9 @@ The release script owns the package version bump, lockfile update, default-branc
 commit, push, and npm publish. Do not run `npm version` manually before running
 it.
 
+See [`docs/releasing.md`](docs/releasing.md) for the maintainer release checklist
+— the pre-flight checks before `npm run release:patch` and what to verify after.
+
 ## License
 
 Rollbridge is released under the [MIT License](LICENSE).
