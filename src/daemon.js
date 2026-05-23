@@ -6,6 +6,7 @@ import net from "node:net"
 import httpProxy from "http-proxy"
 import EventLog from "./event-log.js"
 import ReleaseGroup from "./release-group.js"
+import {resolveGroupId, resolveUserId} from "./system-ids.js"
 
 const EVENT_HISTORY_LIMIT = 1000
 
@@ -91,6 +92,30 @@ export default class RollbridgeDaemon {
 
     if (this.config.control.mode !== undefined) {
       await fs.chmod(this.config.control.path, this.config.control.mode)
+    }
+
+    await this.applyControlSocketOwnership()
+  }
+
+  /**
+   * Applies control.owner/control.group to the bound socket via chown, resolving names to ids.
+   * @returns {Promise<void>} Resolves once ownership is applied (no-op when neither is set).
+   */
+  async applyControlSocketOwnership() {
+    const {group, owner, path: socketPath} = this.config.control
+
+    if (owner === undefined && group === undefined) return
+
+    // -1 leaves the uid/gid unchanged (POSIX chown semantics).
+    const uid = owner === undefined ? -1 : resolveUserId(owner)
+    const gid = group === undefined ? -1 : resolveGroupId(group)
+
+    try {
+      await fs.chown(socketPath, uid, gid)
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+
+      throw new Error(`Could not set control socket owner/group on ${socketPath}: ${reason}. Run the daemon as a user allowed to chown it (for example root, or a member of the target group).`, {cause: error})
     }
   }
 

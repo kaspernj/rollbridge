@@ -33,6 +33,14 @@ export default {
 | --- | --- | --- | --- |
 | `control.path` | string | `/tmp/rollbridge-<application>.sock` | Unix domain socket the CLI uses to talk to the daemon. |
 | `control.mode` | octal string (e.g. `"660"`) or octal number (`0o660`) | unset | `chmod` applied to the socket after it binds, to share it with a deploy group. When unset, the daemon umask applies. |
+| `control.owner` | non-negative integer uid or user name | unset | `chown` owner applied to the socket after it binds. |
+| `control.group` | non-negative integer gid or group name | unset | `chown` group applied to the socket after it binds, so a shared deploy group can use it. |
+
+Names are resolved via `/etc/passwd`/`/etc/group` (local users and groups); use
+numeric ids for NSS-only principals. The daemon must run as a user permitted to
+`chown` the socket (root, or a member of the target group) — otherwise it fails
+to start with a clear error. Combine `control.group` with `control.mode: "660"`
+to let a deploy group talk to the daemon.
 
 ## `proxy`
 
@@ -167,6 +175,7 @@ Rollbridge sets these in every managed process's environment (the process's own
 - Process `id`s must be unique.
 - `port` must be a positive port number or an ascending `{from, to}` range.
 - `control.mode` must be an octal mode between `0` and `0o777`.
+- `control.owner` and `control.group` must each be a non-negative integer id or a non-empty name (resolved at daemon start).
 - `outputLines` and `releaseRetention.keep` must be positive/non-negative integers; `health.startDelayMs` and `releaseRetention.maxAgeMs` must be non-negative numbers.
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.

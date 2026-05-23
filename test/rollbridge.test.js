@@ -630,6 +630,34 @@ test("starting a second daemon on a live control socket reports the running daem
   }
 })
 
+test("the daemon applies control.owner and control.group to the bound socket", {skip: process.platform !== "linux" && "requires POSIX chown"}, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const {uid, username} = os.userInfo()
+  const gid = process.getgid?.() ?? 0
+  const config = normalizeConfig({
+    application: "rollbridge-test",
+    // owner by name (resolved to the current uid); group by numeric id. Both are the current
+    // user's, so a non-root daemon can chown the socket to itself.
+    control: {group: gid, owner: username, path: socketPath},
+    processes: [{command: "true", id: "web", policy: "proxied", port: {from: 0, to: 0}}],
+    proxy: {host: "127.0.0.1", port: 0}
+  })
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+
+  try {
+    await daemon.start()
+
+    const stats = await fs.stat(socketPath)
+
+    assert.equal(stats.uid, uid)
+    assert.equal(stats.gid, gid)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("a control socket held by a non-Rollbridge process reports a generic conflict", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const socketPath = path.join(root, "busy.sock")

@@ -206,6 +206,41 @@ test("validateConfig parses control.mode, defaults it to unset, and rejects inva
   assert.ok(invalid.issues.some((issue) => issue.message === "control.mode must be an octal file mode between 0 and 0o777"))
 })
 
+test("validateConfig accepts control owner/group as ids or names and rejects bad values", () => {
+  /**
+   * @param {import("../src/json.js").JsonValue} control - Control config under test.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateControl = (control) => validateConfig({
+    application: "demo",
+    control,
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  const numeric = validateControl({group: 1000, owner: 1000, path: "/tmp/demo.sock"})
+
+  assert.deepEqual(numeric.issues, [])
+  assert.equal(numeric.config.control.owner, 1000)
+  assert.equal(numeric.config.control.group, 1000)
+
+  const named = validateControl({group: "deploy", owner: "deploy", path: "/tmp/demo.sock"})
+
+  assert.deepEqual(named.issues, [])
+  assert.equal(named.config.control.owner, "deploy")
+  assert.equal(named.config.control.group, "deploy")
+
+  // Unset by default.
+  assert.equal(validateControl({path: "/tmp/demo.sock"}).config.control.owner, undefined)
+  assert.equal(validateControl({path: "/tmp/demo.sock"}).config.control.group, undefined)
+
+  const invalid = validateControl({group: -1, owner: true, path: "/tmp/demo.sock"})
+  const messages = invalid.issues.map((issue) => issue.message)
+
+  assert.ok(messages.includes("control.owner must be a non-negative integer id or a name"), JSON.stringify(messages))
+  assert.ok(messages.includes("control.group must be a non-negative integer id or a name"), JSON.stringify(messages))
+})
+
 test("validateConfig defaults health.startDelayMs to 0, accepts an override, and rejects negatives", () => {
   /**
    * @param {import("../src/json.js").JsonValue} health - Health config under test, or undefined to omit it.
