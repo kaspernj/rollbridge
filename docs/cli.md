@@ -118,8 +118,9 @@ Prints the daemon status JSON: the active release id, the proxy address, and —
 per release, service, and singleton process — its `state`, `pid`, automatic
 `restarts`, `startedAt`, `uptimeMs`, last `exitCode`/`exitSignal`,
 `lastStartReason` (`deploy`, `crash`, `manual`, or `memory`), and recent `logs`.
-Memory-supervised processes also report `rssBytes`, `memoryRestarts`, and
-`lastMemoryRestartAt`.
+Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
+`lastMemoryRestartAt`, and `children` (the process tree: each group member's
+`pid`, `command`, and `rssBytes`).
 
 ## `stop`
 

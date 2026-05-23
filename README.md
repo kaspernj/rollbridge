@@ -367,7 +367,8 @@ rollbridge status --config rollbridge.js
 and why it last started (`lastStartReason`: `deploy`, `crash`, `manual`, or
 `memory`). The same reason appears on each `process started` entry in
 `rollbridge events`. For memory-supervised processes it also reports current
-`rssBytes`, `memoryRestarts`, and `lastMemoryRestartAt`.
+`rssBytes`, `memoryRestarts`, `lastMemoryRestartAt`, and `children` (the sampled
+process tree — each group member's `pid`, `command`, and `rssBytes`).
 
 Print the recent captured stdout/stderr per process (a one-shot snapshot of the
 retained `outputLines`, not a live stream):

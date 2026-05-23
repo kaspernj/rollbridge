@@ -119,7 +119,8 @@ measurement uses `/proc` and is a no-op on platforms without it.
 
 A memory restart is reported in `status` (`memoryRestarts`, `lastMemoryRestartAt`,
 current `rssBytes`) and recorded in the event history (a `process started` event
-with `reason: "memory"`).
+with `reason: "memory"`). `status` also reports `children` — the sampled process
+tree, with each group member's `pid`, `command`, and `rssBytes`.
 
 ### `processes[].health`
 

@@ -455,6 +455,13 @@ test("a process over its memory limit is restarted with reason memory", {skip: p
 
       return typeof rssBytes === "number" && rssBytes > 0
     }, 5000)
+
+    // The same monitor sample reports the process tree.
+    const monitored = activeProcessStatus(daemon, "hog")
+
+    assert.ok(monitored)
+    assert.ok(monitored.children.length >= 1, "status should include the process tree")
+    assert.ok(monitored.children.some((child) => typeof child.rssBytes === "number" && child.rssBytes > 0))
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})

@@ -2,7 +2,7 @@
 
 import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
-import {measureProcessGroupRssBytes} from "./process-memory.js"
+import {processGroupMembers} from "./process-memory.js"
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
@@ -11,7 +11,7 @@ import {measureProcessGroupRssBytes} from "./process-memory.js"
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
  * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopTimeoutMs: number}} ManagedProcessDefinition
- * @typedef {{command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
+ * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
 export default class ManagedProcess extends EventEmitter {
@@ -49,6 +49,7 @@ export default class ManagedProcess extends EventEmitter {
     this.restarts = 0
     this.recentRestarts = /** @type {number[]} */ ([])
     this.rssBytes = /** @type {number | undefined} */ (undefined)
+    this.children = /** @type {import("./process-memory.js").ProcessGroupMember[]} */ ([])
     this.memoryRestarts = 0
     this.lastMemoryRestartAtMs = /** @type {number | undefined} */ (undefined)
     this.memoryTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
@@ -163,6 +164,7 @@ export default class ManagedProcess extends EventEmitter {
     this.pid = undefined
     this.exitPromise = undefined
     this.rssBytes = undefined
+    this.children = []
     this.clearMemoryMonitor()
     this.state = wasIntentional ? "stopped" : "failed"
     this.logger("process exited", {code, id: this.id, signal})
@@ -259,9 +261,17 @@ export default class ManagedProcess extends EventEmitter {
   checkMemory() {
     if (!this.memory || !this.pid || this.memoryRestarting) return
 
-    const rssBytes = measureProcessGroupRssBytes(this.pid)
+    const members = processGroupMembers(this.pid)
 
-    if (rssBytes === undefined) return
+    if (members.length === 0) return
+
+    this.children = members
+
+    const measured = members.filter((member) => member.rssBytes !== undefined)
+
+    if (measured.length === 0) return
+
+    const rssBytes = measured.reduce((total, member) => total + (member.rssBytes ?? 0), 0)
 
     this.rssBytes = rssBytes
 
@@ -382,6 +392,7 @@ export default class ManagedProcess extends EventEmitter {
   /** @returns {ManagedProcessStatus} Status payload. */
   status() {
     return {
+      children: this.children,
       command: this.command,
       cwd: this.cwd,
       exitCode: this.exitCode,
