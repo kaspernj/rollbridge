@@ -51,6 +51,7 @@ export default class RollbridgeDaemon {
     this.stopping = false
     this.statePath = config.statePath
     this.persistTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
+    this.pendingWrite = /** @type {Promise<void> | undefined} */ (undefined)
 
     this.proxy.on("error", (error, req, res) => this.onProxyError(error, req, res))
   }
@@ -647,11 +648,17 @@ export default class RollbridgeDaemon {
   persistState() {
     if (!this.statePath || this.stopping) return
 
+    const statePath = this.statePath
     const snapshot = {...this.status(), events: this.eventLog.recent(), persistedAt: new Date().toISOString()}
 
-    writeState(this.statePath, snapshot).catch((error) => {
-      this.logger("state persist failed", {error: error instanceof Error ? error.message : String(error)})
-    })
+    // Serialize writes (and track the tail) so shutdown can wait for an in-flight write before
+    // clearing the file — otherwise a write started before shutdown could recreate it afterward.
+    this.pendingWrite = Promise.resolve(this.pendingWrite)
+      .catch(() => {})
+      .then(() => writeState(statePath, snapshot))
+      .catch((error) => {
+        this.logger("state persist failed", {error: error instanceof Error ? error.message : String(error)})
+      })
   }
 
   /**
@@ -728,8 +735,13 @@ export default class RollbridgeDaemon {
     await this.closeServer(this.controlServer)
     await fs.rm(this.config.control.path, {force: true})
 
-    // A clean shutdown leaves no orphans, so remove the state file rather than leaving stale pids.
-    if (this.statePath) await clearState(this.statePath)
+    // A clean shutdown leaves no orphans, so remove the state file rather than leaving stale
+    // pids. Wait for any in-flight write first so it can't recreate the file afterward (no new
+    // writes start: stopping is set and the persist timer is cleared above).
+    if (this.statePath) {
+      if (this.pendingWrite) await this.pendingWrite
+      await clearState(this.statePath)
+    }
   }
 
   /**

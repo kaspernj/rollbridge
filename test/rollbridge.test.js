@@ -462,6 +462,23 @@ test("persists daemon state to statePath and removes it on a clean shutdown", as
   assert.equal(stateAfterShutdown, undefined, "state file removed on clean shutdown")
 })
 
+test("a clean shutdown clears the state file even when a persist write is in flight", async () => {
+  const fixture = await createFixture({persistState: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // Shut down immediately — the deploy's fire-and-forget persist may still be in flight.
+    await daemon.shutdown()
+
+    assert.equal(await readState(fixture.statePath), undefined, "state file must not be recreated by an in-flight write")
+  } finally {
+    if (!daemon.stopping) await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("reports orphaned managed processes from a previous daemon's state", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const statePath = path.join(dir, "state.json")

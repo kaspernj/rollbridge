@@ -37,6 +37,22 @@ test("readState returns undefined for a missing or unparseable file", async () =
   }
 })
 
+test("concurrent writes leave a complete, uncorrupted snapshot", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-state-"))
+  const statePath = path.join(dir, "state.json")
+
+  try {
+    await Promise.all([writeState(statePath, {n: 1}), writeState(statePath, {n: 2}), writeState(statePath, {n: 3})])
+
+    const state = /** @type {{n: number}} */ (await readState(statePath))
+
+    // A complete snapshot from one of the writers — never a partial/corrupt file or a temp race.
+    assert.ok(state && typeof state.n === "number")
+  } finally {
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
 test("clearState removes the file and ignores a missing one", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-state-"))
   const statePath = path.join(dir, "state.json")
