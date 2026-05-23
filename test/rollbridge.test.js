@@ -430,6 +430,117 @@ test("the events command honors --limit and records failed commands", async () =
   }
 })
 
+test("rollback re-activates the previous release and switches traffic back", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    assert.equal(await fetchText(daemon, "/release"), "v2")
+
+    const result = await daemon.rollback()
+
+    assert.equal(result.activeReleaseId, "v1")
+    assert.equal(result.previousReleaseId, "v2")
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("rollback --release-id targets a specific retained release", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
+
+    const result = await daemon.rollback({releaseId: "v1"})
+
+    assert.equal(result.activeReleaseId, "v1")
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("rollback rejects no-previous, unknown, and already-active targets", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    await assert.rejects(() => daemon.rollback(), /No previous release/)
+    await assert.rejects(() => daemon.rollback({releaseId: "v1"}), /already active/)
+    await assert.rejects(() => daemon.rollback({releaseId: "nope"}), /No retained release "nope"/)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("rollback to a still-draining release stops the old instance instead of orphaning it", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+  /** @type {WebSocket | undefined} */
+  let socket
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // An open WebSocket keeps v1's connection count > 0, so it stays draining after v2.
+    socket = await openWebSocket(daemon)
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    const draining = statusRelease(daemon, "v1")
+
+    assert.equal(draining.state, "draining")
+
+    const oldWebPid = draining.processes.find((processStatus) => processStatus.id === "web")?.pid
+
+    assert.ok(oldWebPid, "the draining release should have a running web process")
+
+    await daemon.rollback({releaseId: "v1"})
+
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    // The old draining instance was stopped before its id was reused, so its process is gone.
+    assert.throws(() => process.kill(/** @type {number} */ (oldWebPid), 0), /ESRCH/)
+  } finally {
+    if (socket) socket.close()
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("the rollback control command switches traffic over the socket", async () => {
+  const fixture = await createFixture()
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    const response = await sendControlCommand({
+      command: {command: "rollback"},
+      path: fixture.config.control.path
+    })
+
+    assert.equal(response.activeReleaseId, "v1")
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("control socket accepts deploy and status commands", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)

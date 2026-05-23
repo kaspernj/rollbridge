@@ -375,6 +375,16 @@ Stop the active release:
 rollbridge stop --config rollbridge.js
 ```
 
+Roll back to a previous release — re-starts it, health-checks it, and switches
+traffic back (defaults to the most recently retired release; a failed rollback
+leaves the current release active). Rollback manages processes only, not
+database migrations:
+
+```bash
+rollbridge rollback --config rollbridge.js                  # the previous release
+rollbridge rollback --config rollbridge.js --release-id v3
+```
+
 Restart non-proxied processes in place — all of them, one by id, or a policy
 group (the proxied process is never restarted; use `deploy` for that):
 
