@@ -366,6 +366,12 @@ export async function runCli(argv) {
         return
       }
 
+      if (result.remaining.length > 0) {
+        console.error(formatRecoverResult(result))
+        process.exitCode = 1
+        return
+      }
+
       console.log(formatRecoverResult(result))
     })
 
@@ -387,26 +393,58 @@ export async function runCli(argv) {
 }
 
 /**
- * Formats the result of a recover run.
- * @param {{orphans: {id: string, pid: number, releaseId: string | null}[], stopped: boolean}} result - Recover result.
+ * @typedef {import("./recover.js").OrphanProcess} OrphanProcess
+ */
+
+/**
+ * Formats the result of a recover run (the report case, not the error case).
+ * @param {{cleared: boolean, forced: boolean, orphans: OrphanProcess[], remaining: OrphanProcess[]}} result - Recover report.
  * @returns {string} Human-readable summary.
  */
 export function formatRecoverResult(result) {
   if (result.orphans.length === 0) {
-    return result.stopped ? "No orphaned processes found; cleared the state file." : "No orphaned processes found."
+    return result.forced ? "No orphaned processes found; cleared the state file." : "No orphaned processes found."
   }
 
-  const lines = result.orphans.map((orphan) => `  ${orphan.id} (pid ${orphan.pid}${orphan.releaseId ? `, release ${orphan.releaseId}` : ""})`)
-
-  if (result.stopped) {
-    return [`Stopped ${result.orphans.length} orphaned process${result.orphans.length === 1 ? "" : "es"}:`, ...lines].join("\n")
+  if (!result.forced) {
+    return [
+      `Found ${orphanCountLabel(result.orphans.length)} (run with --force to stop):`,
+      ...listOrphans(result.orphans),
+      "Review the list first — a recycled pid could be an unrelated process."
+    ].join("\n")
   }
 
-  return [
-    `Found ${result.orphans.length} orphaned process${result.orphans.length === 1 ? "" : "es"} (run with --force to stop):`,
-    ...lines,
-    "Review the list first — a recycled pid could be an unrelated process."
-  ].join("\n")
+  const remainingPids = new Set(result.remaining.map((orphan) => orphan.pid))
+  const stopped = result.orphans.filter((orphan) => !remainingPids.has(orphan.pid))
+  const lines = []
+
+  if (stopped.length > 0) lines.push(`Stopped ${orphanCountLabel(stopped.length)}:`, ...listOrphans(stopped))
+
+  if (result.remaining.length > 0) {
+    lines.push(
+      `Could not stop ${orphanCountLabel(result.remaining.length)} — still running (check permissions/ownership):`,
+      ...listOrphans(result.remaining),
+      "Left the state file in place so you can investigate and re-run recover."
+    )
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * @param {number} count - Number of orphaned processes.
+ * @returns {string} A pluralized label such as "1 orphaned process" or "3 orphaned processes".
+ */
+function orphanCountLabel(count) {
+  return `${count} orphaned process${count === 1 ? "" : "es"}`
+}
+
+/**
+ * @param {OrphanProcess[]} orphans - Orphans to render.
+ * @returns {string[]} One indented line per orphan.
+ */
+function listOrphans(orphans) {
+  return orphans.map((orphan) => `  ${orphan.id} (pid ${orphan.pid}${orphan.releaseId ? `, release ${orphan.releaseId}` : ""})`)
 }
 
 /**

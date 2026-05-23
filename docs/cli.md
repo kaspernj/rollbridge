@@ -171,8 +171,13 @@ with `--force` it stops each one's process group (`SIGTERM`, then `SIGKILL` afte
 Run it **before** restarting the daemon after a crash. It refuses to run while a
 daemon (or another process) holds the control socket — those pids belong to a
 live daemon, not a crash. A recycled pid can be a false positive, so review the
-dry-run list before using `--force`. Requires `statePath`; exits non-zero when it
-is unset or a daemon is running.
+dry-run list before using `--force`.
+
+If `--force` cannot stop some orphan (for example one now owned by another user,
+so it can't be signaled), that process is reported as still running, the state
+file is **kept** so you can investigate and re-run `recover`, and the command
+exits non-zero. Requires `statePath`; also exits non-zero when it is unset or a
+daemon is running.
 
 ## `shutdown`
 

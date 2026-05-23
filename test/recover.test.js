@@ -85,7 +85,9 @@ test("recover lists orphans without stopping them unless forced", async () => {
     const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: false})
 
     assert.ok(!("error" in result))
-    assert.equal(result.stopped, false)
+    assert.equal(result.forced, false)
+    assert.equal(result.cleared, false)
+    assert.deepEqual(result.remaining, [])
     assert.equal(result.orphans.length, 1)
     assert.equal(result.orphans[0].pid, orphan.pid)
     assert.ok(orphan.pid !== undefined && isProcessAlive(orphan.pid), "the orphan must not be stopped by a dry run")
@@ -106,9 +108,36 @@ test("recover --force stops orphan process groups and clears the state file", as
 
     const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: true})
 
-    assert.ok(!("error" in result) && result.stopped === true)
+    assert.ok(!("error" in result))
+    assert.equal(result.forced, true)
+    assert.equal(result.cleared, true)
+    assert.deepEqual(result.remaining, [])
     await waitFor(() => orphan.pid === undefined || !isProcessAlive(orphan.pid))
     assert.equal(await readState(statePath), undefined, "the state file is cleared after a forced recovery")
+  } finally {
+    orphan.kill("SIGKILL")
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
+test("recover --force keeps the state file when an orphan cannot be stopped", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-recover-"))
+  const statePath = path.join(dir, "state.json")
+  const orphan = await spawnOrphan()
+
+  try {
+    await writeOrphanState(statePath, orphan.pid)
+
+    // Simulate an orphan that can't be signaled (for example owned by another user): stopGroup
+    // reports it is still alive.
+    const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: true, stopGroup: async () => false})
+
+    assert.ok(!("error" in result))
+    assert.equal(result.forced, true)
+    assert.equal(result.cleared, false, "the state file is kept when an orphan survives")
+    assert.equal(result.remaining.length, 1)
+    assert.equal(result.remaining[0].pid, orphan.pid)
+    assert.ok(await readState(statePath), "the state file must remain so the operator can retry")
   } finally {
     orphan.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
