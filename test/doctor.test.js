@@ -133,6 +133,27 @@ test("runEnvironmentChecks omits state checks when no statePath is configured", 
   }
 })
 
+test("runEnvironmentChecks does not flag orphans while a daemon is running", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const statePath = path.join(root, "state.json")
+  const config = buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort(), statePath})
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+
+  await daemon.start()
+
+  try {
+    const checks = await runEnvironmentChecks(config)
+    const orphanCheck = checkNamed(checks, "orphaned processes")
+
+    // A running daemon's persisted pids are its own managed processes, not orphans.
+    assert.equal(orphanCheck.ok, true)
+    assert.match(orphanCheck.detail, /a daemon is running/)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("runEnvironmentChecks reports orphaned processes left in the state file", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
   const statePath = path.join(root, "state.json")

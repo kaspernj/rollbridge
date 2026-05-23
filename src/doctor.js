@@ -27,8 +27,11 @@ export async function runEnvironmentChecks(config) {
   checks.push(await proxyPortCheck(config))
 
   if (config.statePath !== undefined) {
+    // A live daemon persists its own (live) pids into the state file, so they are not orphans.
+    const daemonRunning = !("error" in socketInspection) && socketInspection.alive
+
     checks.push(await statePathDirectoryCheck(config.statePath))
-    checks.push(await orphanCheck(config.statePath))
+    checks.push(await orphanCheck(config.statePath, daemonRunning))
   }
 
   return checks
@@ -52,9 +55,15 @@ async function statePathDirectoryCheck(statePath) {
 
 /**
  * @param {string} statePath - Configured state file path.
+ * @param {boolean} daemonRunning - Whether a Rollbridge daemon is currently live on the control socket.
  * @returns {Promise<DoctorCheck>} Whether any orphaned managed processes from a prior daemon are still alive.
  */
-async function orphanCheck(statePath) {
+async function orphanCheck(statePath, daemonRunning) {
+  if (daemonRunning) {
+    // The running daemon owns the pids in the state file; they are managed, not orphaned.
+    return {detail: "a daemon is running; its managed processes are not orphans", name: "orphaned processes", ok: true}
+  }
+
   const orphans = liveProcesses(await readState(statePath))
 
   if (orphans.length === 0) {
