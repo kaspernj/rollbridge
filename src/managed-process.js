@@ -294,6 +294,12 @@ export default class ManagedProcess extends EventEmitter {
 
     try {
       await this.stop()
+
+      // Don't respawn if the supervising context no longer wants this process running
+      // (daemon shutting down, or the release draining/retired) — otherwise a restart racing
+      // a shutdown could leave a child running after shutdown collected its stop promises.
+      if (!this.shouldRestart()) return
+
       this.memoryRestarts += 1
       this.lastMemoryRestartAtMs = Date.now()
       this.memoryWarned = false

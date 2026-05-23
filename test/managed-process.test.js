@@ -173,6 +173,59 @@ test("does not record a start reason when the spawn fails", async () => {
   assert.equal(managed.status().lastStartReason, undefined)
 })
 
+/**
+ * Builds a long-lived managed process (stays running until stopped) with a restart gate.
+ * @param {() => boolean} shouldRestart - Restart policy callback.
+ * @returns {ManagedProcess} Managed process.
+ */
+function buildLongLived(shouldRestart) {
+  return new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart,
+    stopTimeoutMs: 500
+  })
+}
+
+test("a memory restart respawns and is counted when the supervisor still wants the process", async () => {
+  const managed = buildLongLived(() => true)
+
+  try {
+    await managed.start()
+    await managed.restartForMemory()
+
+    assert.equal(managed.status().state, "running")
+    assert.equal(managed.memoryRestarts, 1)
+    assert.equal(managed.status().lastStartReason, "memory")
+  } finally {
+    await managed.stop()
+  }
+})
+
+test("a memory restart does not respawn when shouldRestart is false", async () => {
+  let allowRestart = true
+  const managed = buildLongLived(() => allowRestart)
+
+  try {
+    await managed.start()
+    assert.equal(managed.status().state, "running")
+
+    // The supervisor (e.g. daemon shutdown or a draining release) no longer wants it running.
+    allowRestart = false
+    await managed.restartForMemory()
+
+    assert.equal(managed.status().state, "stopped")
+    assert.equal(managed.memoryRestarts, 0)
+  } finally {
+    await managed.stop()
+  }
+})
+
 test("does not auto-restart when the restart policy is disabled (maxRestarts: 0)", async () => {
   const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: 0, windowMs: 0})
 
