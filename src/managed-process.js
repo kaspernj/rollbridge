@@ -10,7 +10,7 @@ import {processGroupMembers} from "./process-memory.js"
  * @typedef {"deploy" | "crash" | "manual" | "memory"} ManagedProcessStartReason
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
- * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopSignal: string, stopTimeoutMs: number}} ManagedProcessDefinition
+ * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, lifecycle: import("./config.js").LifecycleConfig, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopSignal: string, stopTimeoutMs: number}} ManagedProcessDefinition
  * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
@@ -22,6 +22,7 @@ export default class ManagedProcess extends EventEmitter {
    * @param {Record<string, string | undefined>} args.env - Environment.
    * @param {string} args.id - Process id.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger callback.
+   * @param {import("./config.js").LifecycleConfig} [args.lifecycle] - Graceful-stop lifecycle hooks (none by default).
    * @param {import("./config.js").MemoryConfig} [args.memory] - Memory supervision config (off when omitted).
    * @param {number} args.outputLines - Recent stdout/stderr lines to retain and report.
    * @param {import("./config.js").RestartConfig} [args.restart] - Restart policy (defaults to unlimited restarts with a constant delay).
@@ -30,13 +31,14 @@ export default class ManagedProcess extends EventEmitter {
    * @param {string} [args.stopSignal] - Signal sent to gracefully stop the process (default "SIGTERM").
    * @param {number} args.stopTimeoutMs - Stop timeout.
    */
-  constructor({command, cwd, env, id, logger, memory, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopSignal = "SIGTERM", stopTimeoutMs}) {
+  constructor({command, cwd, env, id, lifecycle = {drainTimeoutMs: 0}, logger, memory, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopSignal = "SIGTERM", stopTimeoutMs}) {
     super()
 
     this.command = command
     this.cwd = cwd
     this.env = env
     this.id = id
+    this.lifecycle = lifecycle
     this.logger = logger
     this.memory = memory
     this.outputLines = outputLines
@@ -126,6 +128,7 @@ export default class ManagedProcess extends EventEmitter {
     this.command = definition.command
     this.cwd = definition.cwd
     this.env = definition.env
+    this.lifecycle = definition.lifecycle
     this.logger = definition.logger
     this.memory = definition.memory
     this.outputLines = definition.outputLines
@@ -345,17 +348,100 @@ export default class ManagedProcess extends EventEmitter {
     }
 
     this.state = "stopping"
-    this.killProcessGroup(this.stopSignal)
-    const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
-    const stopped = await this.waitForExit(timeoutMs)
 
-    if (!stopped) {
-      this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: child.pid})
-      this.killProcessGroup("SIGKILL")
-      await this.waitForExit(5000)
+    const {drainCommand, drainTimeoutMs, quietCommand, stopCommand} = this.lifecycle
+
+    // 1. Quiesce: tell the process to stop accepting new work.
+    if (quietCommand) await this.runHook(quietCommand, this.stopTimeoutMs, "quiet command")
+
+    // 2. Drain: let in-flight work finish, bounded by drainTimeoutMs (0 skips the step). A
+    //    drainCommand blocks until drained; otherwise wait for the process to exit on its own.
+    if (this.child && drainTimeoutMs > 0) {
+      if (drainCommand) await this.runHook(drainCommand, drainTimeoutMs, "drain command")
+      else await this.waitForExit(drainTimeoutMs)
+    }
+
+    // 3. Stop whatever is still running, then SIGKILL if it outlasts the graceful window.
+    if (this.child) {
+      if (stopCommand) await this.runHook(stopCommand, this.stopTimeoutMs, "stop command")
+      else this.killProcessGroup(this.stopSignal)
+
+      const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
+
+      if (this.child && !(await this.waitForExit(timeoutMs))) {
+        this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: this.pid})
+        this.killProcessGroup("SIGKILL")
+        await this.waitForExit(5000)
+      }
     }
 
     this.state = "stopped"
+  }
+
+  /**
+   * Runs a lifecycle hook command, bounded by a timeout so a hung hook can never block stop().
+   * Failures are logged and swallowed — the graceful-stop sequence proceeds (and SIGKILL is the
+   * ultimate fallback) regardless of the hook's outcome.
+   * @param {string} command - Shell command to run.
+   * @param {number} timeoutMs - Maximum time to wait for the hook before killing it.
+   * @param {string} label - Hook name, for log messages.
+   * @returns {Promise<void>} Resolves when the hook exits, errors, or times out.
+   */
+  async runHook(command, timeoutMs, label) {
+    await new Promise((resolve) => {
+      let settled = false
+      const finish = () => { if (!settled) { settled = true; resolve(undefined) } }
+
+      /** @type {import("node:child_process").ChildProcess} */
+      let hook
+
+      try {
+        hook = spawn(command, {
+          cwd: this.cwd,
+          detached: true,
+          env: {...process.env, ...this.env, ROLLBRIDGE_PID: this.pid ? String(this.pid) : ""},
+          shell: true,
+          stdio: "ignore"
+        })
+      } catch (error) {
+        this.logger(`${label} failed`, {error: error instanceof Error ? error.message : String(error), id: this.id})
+        finish()
+
+        return
+      }
+
+      const timer = setTimeout(() => {
+        this.logger(`${label} timed out`, {id: this.id, timeoutMs})
+
+        if (hook.pid) {
+          try {
+            process.kill(-hook.pid, "SIGKILL")
+          } catch {
+            // The hook already exited.
+          }
+        }
+
+        finish()
+      }, timeoutMs)
+
+      hook.once("exit", (code, signal) => {
+        clearTimeout(timer)
+
+        // A non-zero/signalled exit is surfaced (but still non-fatal); skip when the timeout
+        // already killed the hook, which logs separately.
+        if (!settled) {
+          if (typeof code === "number" && code !== 0) this.logger(`${label} exited non-zero`, {code, id: this.id})
+          else if (signal) this.logger(`${label} exited on signal`, {id: this.id, signal})
+        }
+
+        finish()
+      })
+      hook.once("error", (error) => {
+        clearTimeout(timer)
+        this.logger(`${label} failed`, {error: error instanceof Error ? error.message : String(error), id: this.id})
+        finish()
+      })
+    })
   }
 
   /**

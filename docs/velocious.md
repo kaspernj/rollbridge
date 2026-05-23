@@ -163,9 +163,9 @@ The worker is a `companion`, so each release runs its own workers:
   forced kill. Set `replicas` to run a pool of workers.
 
 See [`docs/workers.md`](workers.md) for the full safe background-job deployment
-pattern (companion + `replicas` + `stopSignal` + `gracefulStopMs`), the old/new
-worker overlap, and what's still on the roadmap (command-based lifecycle hooks
-and a non-blocking drain mode).
+pattern (companion + `replicas` + `stopSignal`/`lifecycle` hooks +
+`gracefulStopMs`), the old/new worker overlap, and what's still on the roadmap (a
+non-blocking drain mode).
 
 ### Choosing the jobs-main policy
 

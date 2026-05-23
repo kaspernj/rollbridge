@@ -138,9 +138,14 @@ queue. See [`docs/config.md`](docs/config.md#processesreplicas).
 {id: "worker", policy: "companion", command: "npx velocious background-jobs-worker", replicas: 4}
 ```
 
+For workers that quiesce or drain via a command, set a `lifecycle` block —
+Rollbridge runs `quietCommand`, then drains (`drainCommand`/`drainTimeoutMs`),
+then `stopCommand`/`stopSignal`, then `SIGKILL` after `gracefulStopMs` when
+gracefully stopping the process. Each hook is bounded so it can't wedge a stop.
+
 See [`docs/workers.md`](docs/workers.md) for the full safe background-job worker
 deployment pattern — companion policy, `replicas`, and finishing in-flight jobs
-on deploy with `stopSignal` + `gracefulStopMs`.
+on deploy with `stopSignal`/`lifecycle` + `gracefulStopMs`.
 
 Set `releaseRetention` to bound how many stopped (drained) releases the daemon
 keeps in memory and reports in `status`. `keep` (default `10`) retains the most

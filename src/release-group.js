@@ -211,6 +211,7 @@ export default class ReleaseGroup extends EventEmitter {
       cwd: processConfig.cwd ? renderTemplate(processConfig.cwd, context) : this.releasePath,
       env: processEnv,
       id: instanceId,
+      lifecycle: processConfig.lifecycle,
       logger: (message, data = {}) => this.logger(message, {processId: instanceId, releaseId: this.releaseId, ...data}),
       memory: processConfig.memory,
       outputLines: processConfig.outputLines,
