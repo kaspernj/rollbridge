@@ -76,8 +76,10 @@ On the **next startup**, the daemon reads any leftover file and reports managed
 processes whose pids are still alive — likely orphans from a daemon that crashed
 without shutting down cleanly — in its log and event history. This is
 **advisory**: Rollbridge cannot re-adopt detached children, so it does not stop
-them; the operator verifies and stops the leftovers. A recycled pid can be a
-false positive, so treat a report as a prompt to investigate.
+them automatically; the operator verifies and stops the leftovers. A recycled pid
+can be a false positive, so treat a report as a prompt to investigate. Use
+[`rollbridge recover`](cli.md#recover) to list and (with `--force`) stop those
+orphans after a crash.
 
 ```js
 statePath: "/var/lib/rollbridge/ticket-server.state.json"

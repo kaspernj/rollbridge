@@ -44,7 +44,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Persist active release, draining releases, process metadata, counters, and recent events (opt-in `statePath`; atomic snapshot on change + periodic).
   - [ ] Reconnect status to still-running child processes after daemon restart where possible. (Largely infeasible — a new daemon cannot re-attach exit/stdout to processes it did not spawn; orphans are reported instead, see below.)
   - [x] Detect and report orphaned Rollbridge-managed processes. (On startup, reports persisted process pids that are still alive; advisory, see `statePath`.)
-  - [ ] Add a recovery mode for safe startup after daemon crash or machine reboot. (Builds on the persisted state + orphan reporting above.)
+  - [x] Add a recovery mode for safe startup after daemon crash or machine reboot. (`rollbridge recover` lists orphaned processes from the persisted state and, with `--force`, stops them and clears the state; refuses while a daemon is running.)
 - [x] Rollback support.
   - [x] Keep enough release metadata to switch traffic back to a previous healthy release.
   - [x] Add a `rollback` CLI command that health-checks the target before switching.

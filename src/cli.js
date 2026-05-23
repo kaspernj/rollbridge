@@ -8,6 +8,7 @@ import {Command} from "commander"
 import RollbridgeDaemon from "./daemon.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
 import {runEnvironmentChecks} from "./doctor.js"
+import {recoverOrphans} from "./recover.js"
 import {sendControlCommand} from "./control-client.js"
 
 const DEFAULT_DAEMON_START_TIMEOUT_MS = 10000
@@ -350,6 +351,25 @@ export async function runCli(argv) {
     })
 
   program
+    .command("recover")
+    .description("Stop orphaned processes left by a crashed daemon (reads statePath; lists them unless --force).")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--force", "Stop the orphaned processes; without it, recover only lists them")
+    .action(async (options) => {
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const result = await recoverOrphans({config, force: Boolean(options.force)})
+
+      if ("error" in result) {
+        console.error(result.error)
+        process.exitCode = 1
+        return
+      }
+
+      console.log(formatRecoverResult(result))
+    })
+
+  program
     .command("completion")
     .description("Print a shell completion script. Enable with: source <(rollbridge completion <shell>)")
     .argument("<shell>", "Shell to generate completion for (bash or zsh)")
@@ -364,6 +384,29 @@ export async function runCli(argv) {
     })
 
   await program.parseAsync(argv)
+}
+
+/**
+ * Formats the result of a recover run.
+ * @param {{orphans: {id: string, pid: number, releaseId: string | null}[], stopped: boolean}} result - Recover result.
+ * @returns {string} Human-readable summary.
+ */
+export function formatRecoverResult(result) {
+  if (result.orphans.length === 0) {
+    return result.stopped ? "No orphaned processes found; cleared the state file." : "No orphaned processes found."
+  }
+
+  const lines = result.orphans.map((orphan) => `  ${orphan.id} (pid ${orphan.pid}${orphan.releaseId ? `, release ${orphan.releaseId}` : ""})`)
+
+  if (result.stopped) {
+    return [`Stopped ${result.orphans.length} orphaned process${result.orphans.length === 1 ? "" : "es"}:`, ...lines].join("\n")
+  }
+
+  return [
+    `Found ${result.orphans.length} orphaned process${result.orphans.length === 1 ? "" : "es"} (run with --force to stop):`,
+    ...lines,
+    "Review the list first — a recycled pid could be an unrelated process."
+  ].join("\n")
 }
 
 /**

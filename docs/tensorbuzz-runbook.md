@@ -115,6 +115,15 @@ releases.
 ## Crash recovery
 
 Set [`statePath`](config.md#statepath) in the config to have the daemon persist
-its state. After a daemon crash or reboot, `rollbridge doctor` then reports any
-**orphaned** processes still alive from the previous daemon so you can stop them
-before redeploying.
+its state. After a daemon crash or reboot, `rollbridge doctor` reports any
+**orphaned** processes still alive from the previous daemon. To clean them up
+before restarting the daemon, run `rollbridge recover` (a dry run that lists
+them), then `rollbridge recover --force` to stop them:
+
+```bash
+rollbridge recover --config /etc/rollbridge/tensorbuzz.com.js          # list leftovers
+rollbridge recover --config /etc/rollbridge/tensorbuzz.com.js --force  # stop them
+```
+
+A machine reboot kills every process, so there are usually no orphans afterward —
+the daemon just starts fresh.
