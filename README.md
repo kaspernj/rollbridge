@@ -143,6 +143,10 @@ Rollbridge runs `quietCommand`, then drains (`drainCommand`/`drainTimeoutMs`),
 then `stopCommand`/`stopSignal`, then `SIGKILL` after `gracefulStopMs` when
 gracefully stopping the process. Each hook is bounded so it can't wedge a stop.
 
+Set `nonBlockingDrain: true` on a worker companion to start its graceful stop the
+moment its release is retired — in parallel with the proxied connection drain,
+not after it — so new workers handle new work while the old workers finish theirs.
+
 See [`docs/workers.md`](docs/workers.md) for the full safe background-job worker
 deployment pattern — companion policy, `replicas`, and finishing in-flight jobs
 on deploy with `stopSignal`/`lifecycle` + `gracefulStopMs`.
@@ -156,6 +160,18 @@ owns cleaning up on-disk release directories.
 
 ```js
 releaseRetention: {keep: 5, maxAgeMs: 86400000}
+```
+
+Set `statePath` to have the daemon persist its state to a file (active/draining
+releases, process pids, counters, recent events). On the next startup it reads
+any leftover file and reports managed processes still alive from a daemon that
+didn't shut down cleanly — advisory orphan detection. After a crash, run
+`rollbridge recover` to list those leftovers and `rollbridge recover --force` to
+stop them before restarting the daemon. A clean `shutdown` removes the file. See
+[`docs/config.md`](docs/config.md#statepath).
+
+```js
+statePath: "/var/lib/rollbridge/ticket-server.state.json"
 ```
 
 A function export receives no arguments and lets you build the config at load
@@ -187,7 +203,10 @@ Referencing a placeholder with no value (including an unset `{{env.<NAME>}}`)
 fails the process start with a clear error, so typos surface immediately.
 
 Production-ready examples live in `examples/`, including
-`examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment.
+`examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment; see
+[`docs/tensorbuzz-runbook.md`](docs/tensorbuzz-runbook.md) for the matching
+production runbook (ports, deploy ordering, rollback constraints, and day-to-day
+operations).
 
 See [`docs/velocious.md`](docs/velocious.md) for a Velocious deployment guide —
 how Beacon, background-jobs-main, background-jobs-worker, and the web process map

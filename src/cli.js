@@ -7,7 +7,8 @@ import {spawn} from "node:child_process"
 import {Command} from "commander"
 import RollbridgeDaemon from "./daemon.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
-import {runEnvironmentChecks} from "./doctor.js"
+import {runEnvironmentChecks, runReleaseChecks} from "./doctor.js"
+import {recoverOrphans} from "./recover.js"
 import {sendControlCommand} from "./control-client.js"
 
 const DEFAULT_DAEMON_START_TIMEOUT_MS = 10000
@@ -247,6 +248,9 @@ export async function runCli(argv) {
     .command("doctor")
     .description("Check the environment before starting the daemon: config, control socket, and proxy port.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--release-path <path>", "Also pre-flight a prepared release: render its templates and check the release and working directories")
+    .option("--release-id <id>", "Release id used when rendering templates (defaults to --revision or the release path basename)")
+    .option("--revision <sha>", "Revision used when rendering templates (defaults to --release-id)")
     .option("--json", "Output machine-readable JSON")
     .action(async (options) => {
       let configPath
@@ -271,6 +275,10 @@ export async function runCli(argv) {
       } else {
         checks.push({detail: `valid: ${config.processes.length} ${config.processes.length === 1 ? "process" : "processes"}, proxy on ${config.proxy.host}:${config.proxy.port}`, name: "config", ok: true})
         checks.push(...await runEnvironmentChecks(config))
+
+        if (options.releasePath) {
+          checks.push(...await runReleaseChecks(config, {releaseId: options.releaseId, releasePath: options.releasePath, revision: options.revision}))
+        }
       }
 
       const failed = checks.filter((check) => !check.ok).length
@@ -350,6 +358,31 @@ export async function runCli(argv) {
     })
 
   program
+    .command("recover")
+    .description("Stop orphaned processes left by a crashed daemon (reads statePath; lists them unless --force).")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--force", "Stop the orphaned processes; without it, recover only lists them")
+    .action(async (options) => {
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const result = await recoverOrphans({config, force: Boolean(options.force)})
+
+      if ("error" in result) {
+        console.error(result.error)
+        process.exitCode = 1
+        return
+      }
+
+      if (result.remaining.length > 0) {
+        console.error(formatRecoverResult(result))
+        process.exitCode = 1
+        return
+      }
+
+      console.log(formatRecoverResult(result))
+    })
+
+  program
     .command("completion")
     .description("Print a shell completion script. Enable with: source <(rollbridge completion <shell>)")
     .argument("<shell>", "Shell to generate completion for (bash or zsh)")
@@ -364,6 +397,61 @@ export async function runCli(argv) {
     })
 
   await program.parseAsync(argv)
+}
+
+/**
+ * @typedef {import("./recover.js").OrphanProcess} OrphanProcess
+ */
+
+/**
+ * Formats the result of a recover run (the report case, not the error case).
+ * @param {{cleared: boolean, forced: boolean, orphans: OrphanProcess[], remaining: OrphanProcess[]}} result - Recover report.
+ * @returns {string} Human-readable summary.
+ */
+export function formatRecoverResult(result) {
+  if (result.orphans.length === 0) {
+    return result.forced ? "No orphaned processes found; cleared the state file." : "No orphaned processes found."
+  }
+
+  if (!result.forced) {
+    return [
+      `Found ${orphanCountLabel(result.orphans.length)} (run with --force to stop):`,
+      ...listOrphans(result.orphans),
+      "Review the list first — a recycled pid could be an unrelated process."
+    ].join("\n")
+  }
+
+  const remainingPids = new Set(result.remaining.map((orphan) => orphan.pid))
+  const stopped = result.orphans.filter((orphan) => !remainingPids.has(orphan.pid))
+  const lines = []
+
+  if (stopped.length > 0) lines.push(`Stopped ${orphanCountLabel(stopped.length)}:`, ...listOrphans(stopped))
+
+  if (result.remaining.length > 0) {
+    lines.push(
+      `Could not stop ${orphanCountLabel(result.remaining.length)} — still running (check permissions/ownership):`,
+      ...listOrphans(result.remaining),
+      "Left the state file in place so you can investigate and re-run recover."
+    )
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * @param {number} count - Number of orphaned processes.
+ * @returns {string} A pluralized label such as "1 orphaned process" or "3 orphaned processes".
+ */
+function orphanCountLabel(count) {
+  return `${count} orphaned process${count === 1 ? "" : "es"}`
+}
+
+/**
+ * @param {OrphanProcess[]} orphans - Orphans to render.
+ * @returns {string[]} One indented line per orphan.
+ */
+function listOrphans(orphans) {
+  return orphans.map((orphan) => `  ${orphan.id} (pid ${orphan.pid}${orphan.releaseId ? `, release ${orphan.releaseId}` : ""})`)
 }
 
 /**

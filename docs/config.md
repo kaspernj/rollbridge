@@ -26,6 +26,7 @@ export default {
 | `proxy` | object | **required** | Proxy listener and shared defaults (see below). |
 | `processes` | array | **required** | Managed processes (see below). Exactly one must be `proxied`. |
 | `releaseRetention` | object | — | How many stopped releases the daemon retains (see below). |
+| `statePath` | string | unset (no persistence) | File the daemon persists its state to, enabling orphaned-process detection on the next startup (see [`statePath`](#statepath)). |
 
 ## `control`
 
@@ -64,6 +65,28 @@ to let a deploy group talk to the daemon.
 Active and draining releases are never pruned. This governs Rollbridge's own
 release records; the deploy tool still owns on-disk release directories.
 
+## `statePath`
+
+When set, the daemon persists a state snapshot — the active and draining
+releases, each managed process's metadata (including pid), restart counters, and
+recent events — to this file (atomically, on changes and every few seconds). On a
+clean `shutdown` the file is removed.
+
+On the **next startup**, the daemon reads any leftover file and reports managed
+processes whose pids are still alive — likely orphans from a daemon that crashed
+without shutting down cleanly — in its log and event history. This is
+**advisory**: Rollbridge cannot re-adopt detached children, so it does not stop
+them automatically; the operator verifies and stops the leftovers. A recycled pid
+can be a false positive, so treat a report as a prompt to investigate. Use
+[`rollbridge recover`](cli.md#recover) to list and (with `--force`) stop those
+orphans after a crash.
+
+```js
+statePath: "/var/lib/rollbridge/ticket-server.state.json"
+```
+
+Leave `statePath` unset to disable persistence (the default).
+
 ## `processes[]`
 
 | Field | Type | Default | Description |
@@ -76,6 +99,7 @@ release records; the deploy tool still owns on-disk release directories.
 | `port` | number or `{from, to}` | unset | Port (or range) allocated per release. **Required for the `proxied` process.** A plain number `n` means the fixed port `n` (`{from: n, to: n}`). |
 | `health` | object or `false` | enabled with defaults | Health check for the `proxied` process; set `false` to disable (see below). |
 | `stopSignal` | signal name (e.g. `"SIGTERM"`, `"SIGINT"`, `"SIGQUIT"`) | `"SIGTERM"` | Signal sent to gracefully stop the process; after `gracefulStopMs` it is `SIGKILL`ed. Use a worker's quit signal so it finishes in-flight work before exiting. |
+| `nonBlockingDrain` | boolean | `false` | When a release is retired, drain this process **immediately** (in parallel with the proxied connection drain) instead of after it. Companion processes only — typically background workers (see below). |
 | `lifecycle` | object | no hooks | Command hooks run when gracefully stopping the process (see below). |
 | `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | Graceful-stop window: time between `stopSignal`/`stopCommand` and `SIGKILL` for this process. |
 | `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
@@ -117,6 +141,10 @@ job worker quiesce and finish in-flight work before it is terminated. Omit
 | `lifecycle.drainTimeoutMs` | non-negative number | `0` | Bounds the drain step. `0` **skips the drain step entirely** (no `drainCommand`, no wait). |
 | `lifecycle.stopCommand` | string | unset | Run to stop the process instead of sending `stopSignal`, if it is still running after draining. |
 
+Because `stopCommand` runs **instead of** sending `stopSignal`, setting both a
+`stopCommand` and a custom `stopSignal` is rejected — the signal would be silently
+ignored. Use one or the other.
+
 The full stop sequence is: run `quietCommand` → drain (`drainCommand`, or wait
 `drainTimeoutMs` for the process to exit) → if still running, run `stopCommand`
 or send `stopSignal` → `SIGKILL` after `gracefulStopMs`. Each hook command is run
@@ -128,6 +156,25 @@ fallback, so a slow or broken hook can't wedge a stop.
 
 ```js
 {id: "worker", policy: "companion", command: "…", lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}}
+```
+
+### `processes[].nonBlockingDrain`
+
+By default, when a release is retired its processes are stopped **after** the
+proxied process's connections have drained (or `proxy.drainTimeoutMs` elapses).
+That keeps a worker alive in case the draining web process still depends on it —
+but it also holds a background worker open for the whole connection drain.
+
+Set `nonBlockingDrain: true` on a `companion` whose work is independent of the
+proxied process (a job worker on a shared queue). Its graceful stop — `lifecycle`
+hooks, or `stopSignal` then `SIGKILL` after `gracefulStopMs` — then starts **as
+soon as the release is retired**, in parallel with the connection drain, rather
+than after it. The new release's workers (started before traffic switches) handle
+new work while the retired release's workers finish their in-flight jobs. The
+whole drain stays non-blocking — the deploy returns immediately.
+
+```js
+{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, stopSignal: "SIGINT", gracefulStopMs: 60000}
 ```
 
 ### `processes[].restart`
@@ -232,4 +279,6 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
-- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`.
+- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`. A `lifecycle.stopCommand` may not be combined with a custom `stopSignal` (the `stopCommand` runs instead of the signal, so the signal would be ignored).
+- `nonBlockingDrain` must be a boolean, and is allowed only on a `companion` process.
+- `statePath` must be a string when set.

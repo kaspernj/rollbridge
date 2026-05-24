@@ -13,11 +13,11 @@ import {pathToFileURL} from "node:url"
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
  * @typedef {{drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, stopCommand?: string}} LifecycleConfig
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
+ * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, nonBlockingDrain: boolean, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
  * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
- * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig}} RollbridgeConfig
+ * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig, statePath?: string}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
  */
 
@@ -135,10 +135,11 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
   }
   const processes = processesSource.map((processSource, index) => normalizeProcess(processSource, index, proxy, issues))
   const releaseRetention = normalizeReleaseRetention(objectAt(source.releaseRetention, "releaseRetention", issues, {}), issues)
+  const statePath = source.statePath === undefined || source.statePath === null ? undefined : normalizeString(source.statePath, "statePath", issues)
 
   validateProcessSet(processes, issues)
 
-  return {config: {application, control, processes, proxy, releaseRetention}, issues}
+  return {config: {application, control, processes, proxy, releaseRetention, statePath}, issues}
 }
 
 /**
@@ -181,7 +182,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", lifecycle: {drainTimeoutMs: 0}, memory: undefined, outputLines: 50, policy: "companion", port: undefined, replicas: 1, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
+    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", lifecycle: {drainTimeoutMs: 0}, memory: undefined, nonBlockingDrain: false, outputLines: 50, policy: "companion", port: undefined, replicas: 1, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
   }
 
   const source = value
@@ -195,6 +196,7 @@ function normalizeProcess(value, index, proxy, issues) {
     id: normalizeString(source.id, `processes[${index}].id`, issues),
     lifecycle: normalizeLifecycle(source.lifecycle, `processes[${index}].lifecycle`, issues),
     memory: normalizeMemory(source.memory, `processes[${index}].memory`, issues),
+    nonBlockingDrain: normalizeBoolean(source.nonBlockingDrain, `processes[${index}].nonBlockingDrain`, issues, false),
     outputLines: normalizeOutputLines(source.outputLines, `processes[${index}].outputLines`, issues),
     policy: normalizePolicy(source.policy, `processes[${index}].policy`, issues),
     port: normalizePortRange(source.port, `processes[${index}].port`, issues),
@@ -393,6 +395,22 @@ function normalizeReplicas(value, key, issues) {
 }
 
 /**
+ * @param {JsonValue} value - Raw boolean value.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @param {boolean} fallback - Default when unset.
+ * @returns {boolean} The boolean value, or the fallback when unset/invalid.
+ */
+function normalizeBoolean(value, key, issues, fallback) {
+  if (value === undefined || value === null) return fallback
+  if (typeof value === "boolean") return value
+
+  issues.push({fix: `Set ${key} to true or false.`, message: `${key} must be a boolean`})
+
+  return fallback
+}
+
+/**
  * @param {Record<string, JsonValue>} source - Raw release retention config.
  * @param {ConfigIssue[]} issues - Issue collector.
  * @returns {ReleaseRetentionConfig} Normalized release retention policy.
@@ -492,6 +510,14 @@ function validateProcessSet(processes, issues) {
 
     if (processConfig.replicas > 1 && (processConfig.policy !== "companion" || processConfig.port)) {
       issues.push({fix: `Run replicas (${processConfig.replicas}) only on a companion process without a port; "${processConfig.id}" is ${processConfig.policy}${processConfig.port ? " with a port" : ""}.`, message: `Process "${processConfig.id}" can only set replicas > 1 on a companion process without a port`})
+    }
+
+    if (processConfig.nonBlockingDrain && processConfig.policy !== "companion") {
+      issues.push({fix: `Set nonBlockingDrain only on a companion process; "${processConfig.id}" is ${processConfig.policy}.`, message: `Process "${processConfig.id}" can only set nonBlockingDrain on a companion process`})
+    }
+
+    if (processConfig.lifecycle.stopCommand && processConfig.stopSignal !== "SIGTERM") {
+      issues.push({fix: `Drop the custom stopSignal "${processConfig.stopSignal}" or lifecycle.stopCommand from "${processConfig.id}": with a stopCommand set, Rollbridge runs it to stop the process instead of sending stopSignal, so the signal is never used.`, message: `Process "${processConfig.id}" sets both lifecycle.stopCommand and a custom stopSignal, but stopCommand replaces stopSignal`})
     }
   }
 

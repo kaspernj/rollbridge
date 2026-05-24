@@ -1,6 +1,8 @@
 // @ts-check
 
 import assert from "node:assert/strict"
+import {spawn} from "node:child_process"
+import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
@@ -10,6 +12,7 @@ import {fileURLToPath} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
+import {readState, writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
@@ -19,6 +22,40 @@ const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
 const memoryHogPath = path.join(currentDir, "fixtures", "memory-hog.js")
 const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 const singletonAppPath = path.join(currentDir, "fixtures", "singleton-app.js")
+
+test("a nonBlockingDrain worker stops immediately while its release is still draining", async () => {
+  const fixture = await createFixture({nonBlockingDrainWorker: true})
+  const daemon = await startDaemon(fixture.config)
+  /** @type {WebSocket | undefined} */
+  let socket
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // An open WebSocket keeps v1's connection drain pending after v2 takes over.
+    socket = await openWebSocket(daemon)
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    // The nonBlockingDrain worker is stopped right away, in parallel with the connection drain.
+    await waitFor(() => {
+      const draining = daemon.status().releases.find((release) => release.releaseId === "v1")
+
+      return draining?.processes.find((processStatus) => processStatus.id === "worker")?.state === "stopped"
+    })
+
+    const v1 = statusRelease(daemon, "v1")
+
+    // The release is still draining (the WebSocket is held) and its proxied process is still
+    // serving, but the worker has already drained.
+    assert.equal(v1.state, "draining")
+    assert.equal(v1.processes.find((processStatus) => processStatus.id === "web")?.state, "running")
+    assert.equal(v1.processes.find((processStatus) => processStatus.id === "worker")?.state, "stopped")
+  } finally {
+    if (socket) socket.close()
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
 
 test("deploy switches new HTTP traffic while old WebSockets drain", async () => {
   const fixture = await createFixture()
@@ -397,6 +434,97 @@ test("status and events distinguish deploy starts from manual restarts", async (
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("persists daemon state to statePath and removes it on a clean shutdown", async () => {
+  const fixture = await createFixture({persistState: true})
+  const daemon = await startDaemon(fixture.config)
+  let stateAfterShutdown
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // The state write is fire-and-forget (deploy doesn't block on it), so wait for it to land.
+    await waitFor(async () => {
+      const persisted = /** @type {{activeReleaseId: string} | undefined} */ (await readState(fixture.statePath))
+
+      return persisted?.activeReleaseId === "v1"
+    })
+
+    await daemon.shutdown()
+    stateAfterShutdown = await readState(fixture.statePath)
+  } finally {
+    if (!daemon.stopping) await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+
+  assert.equal(stateAfterShutdown, undefined, "state file removed on clean shutdown")
+})
+
+test("a clean shutdown clears the state file even when a persist write is in flight", async () => {
+  const fixture = await createFixture({persistState: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    // Shut down immediately — the deploy's fire-and-forget persist may still be in flight.
+    await daemon.shutdown()
+
+    assert.equal(await readState(fixture.statePath), undefined, "state file must not be recreated by an in-flight write")
+  } finally {
+    if (!daemon.stopping) await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("reports orphaned managed processes from a previous daemon's state", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
+  const statePath = path.join(dir, "state.json")
+  // A live process standing in for a leftover managed child from a crashed daemon.
+  const leftover = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio: "ignore"})
+
+  await once(leftover, "spawn")
+
+  /** @type {{data: Record<string, import("../src/json.js").JsonValue>, message: string}[]} */
+  const logs = []
+  const config = normalizeConfig({
+    application: "rollbridge-test",
+    control: {path: path.join(dir, "rollbridge.sock")},
+    processes: [{command: "true", id: "web", policy: "proxied", port: {from: 0, to: 0}}],
+    proxy: {host: "127.0.0.1", port: 0},
+    statePath
+  })
+  const daemon = new RollbridgeDaemon({config, logger: (message, data = {}) => { logs.push({data, message}) }})
+
+  try {
+    // A prior daemon left a worker with this (still-alive) pid.
+    await writeState(statePath, {
+      activeReleaseId: "v1",
+      releases: [{processes: [{id: "worker", pid: leftover.pid}], releaseId: "v1"}],
+      services: [],
+      singletons: []
+    })
+
+    await daemon.reportOrphans()
+
+    assert.ok(logs.some((entry) => entry.message === "orphaned managed process detected" && entry.data.pid === leftover.pid), JSON.stringify(logs))
+
+    // A dead pid is not reported.
+    logs.length = 0
+    await writeState(statePath, {
+      activeReleaseId: "v1",
+      releases: [{processes: [{id: "worker", pid: 2147483646}], releaseId: "v1"}],
+      services: [],
+      singletons: []
+    })
+    await daemon.reportOrphans()
+
+    assert.ok(!logs.some((entry) => entry.message === "orphaned managed process detected"))
+  } finally {
+    leftover.kill("SIGKILL")
+    await fs.rm(dir, {force: true, recursive: true})
   }
 })
 
@@ -800,13 +928,14 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{companionReplicas?: number, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
- * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string}>} Fixture data.
+ * @param {{companionReplicas?: number, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
+ * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string, statePath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const serviceLogPath = path.join(root, "service.log")
   const singletonLogPath = path.join(root, "singleton.log")
+  const statePath = path.join(root, "rollbridge.state.json")
   /** @type {Array<Record<string, import("../src/json.js").JsonValue>>} */
   const processes = []
 
@@ -837,6 +966,15 @@ async function createFixture(options = {}) {
       id: "worker",
       policy: "companion",
       replicas: options.companionReplicas
+    })
+  }
+
+  if (options.nonBlockingDrainWorker) {
+    processes.push({
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+      id: "worker",
+      nonBlockingDrain: true,
+      policy: "companion"
     })
   }
 
@@ -891,10 +1029,11 @@ async function createFixture(options = {}) {
       healthTimeoutMs: 3000,
       host: options.proxyHost || "127.0.0.1",
       port: 0
-    }
+    },
+    ...(options.persistState ? {statePath} : {})
   })
 
-  return {config, root, serviceLogPath, singletonLogPath}
+  return {config, root, serviceLogPath, singletonLogPath, statePath}
 }
 
 /**

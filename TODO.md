@@ -30,10 +30,10 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events. (Per-process `lastStartReason` + a `reason` on the `process started` event; the `memory` reason is wired and fires once memory supervision restarts a process.)
   - [x] Add a `restart` CLI command for a single process, a policy group, or all non-proxied workers.
   - [x] Keep restart behavior safe for job workers by using lifecycle hooks before termination. (Manual restart, memory restart, and deploy-drain stops all run the `lifecycle` hooks via `stop()`.)
-- [ ] Graceful job-worker lifecycle.
+- [x] Graceful job-worker lifecycle.
   - [x] Add generic lifecycle hooks such as `quietCommand`, `drainCommand`, `drainTimeoutMs`, and `stopCommand` (per-process `lifecycle`).
   - [x] Support signal-only lifecycle steps for workers that can quiet on a Unix signal. (Per-process `stopSignal`; sent before the `SIGKILL`-after-`gracefulStopMs` fallback.)
-  - [ ] Add a non-blocking drain mode so new workers can start while old workers finish running jobs.
+  - [x] Add a non-blocking drain mode so new workers can start while old workers finish running jobs (per-process `nonBlockingDrain`; drains the worker in parallel with the connection drain).
   - [x] Document a Velocious background-jobs-worker recipe once the lifecycle contract is implemented (`docs/velocious.md` → Worker recipe).
 - [x] Replicas and stable worker indexes. (Supported on port-less `companion` processes; `proxied`/`singleton`/ported processes stay single.)
   - [x] Allow one process config to start multiple replicas (`replicas`, companion-only for now).
@@ -41,10 +41,10 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Restart or stop one replica without affecting the rest (`rollbridge restart --process worker#0`).
   - [x] Preserve readable status output for replica groups (each instance shown as `<id>#<index>`).
 - [ ] Persistent daemon state and recovery.
-  - [ ] Persist active release, draining releases, process metadata, counters, and recent events.
-  - [ ] Reconnect status to still-running child processes after daemon restart where possible.
-  - [ ] Detect and report orphaned Rollbridge-managed processes.
-  - [ ] Add a recovery mode for safe startup after daemon crash or machine reboot.
+  - [x] Persist active release, draining releases, process metadata, counters, and recent events (opt-in `statePath`; atomic snapshot on change + periodic).
+  - [ ] Reconnect status to still-running child processes after daemon restart where possible. (Largely infeasible — a new daemon cannot re-attach exit/stdout to processes it did not spawn; orphans are reported instead, see below.)
+  - [x] Detect and report orphaned Rollbridge-managed processes. (On startup, reports persisted process pids that are still alive; advisory, see `statePath`.)
+  - [x] Add a recovery mode for safe startup after daemon crash or machine reboot. (`rollbridge recover` lists orphaned processes from the persisted state and, with `--force`, stops them and clears the state; refuses while a daemon is running.)
 - [x] Rollback support.
   - [x] Keep enough release metadata to switch traffic back to a previous healthy release.
   - [x] Add a `rollback` CLI command that health-checks the target before switching.
@@ -61,9 +61,10 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [ ] Config validation and doctoring.
   - [x] Add `validate` to parse config and report all config errors without starting the daemon.
   - [x] Add `doctor` to check config validity, control socket reachability, proxy port availability, and control-socket directory writability.
-  - [ ] Extend `doctor` with process-command, release-path, and log/state-path checks once those are resolvable (rendered templates, persisted state).
+  - [x] Extend `doctor` with state-path checks: state-path directory writability and orphaned-process reporting from a prior state file.
+  - [x] Extend `doctor` with process-command and release-path checks once those are resolvable (they need per-release rendered templates, which only exist at deploy time). (`rollbridge doctor --release-path <path>` renders each process's command/cwd/env against that release and checks the release directory, template resolvability, and rendered working directories; uses representative ports and replica index 0.)
   - [x] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and the single-proxied-process policy rule.
-  - [ ] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land.
+  - [x] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land. (`lifecycle.drainCommand` requires a positive `drainTimeoutMs`; `nonBlockingDrain` is companion-only; a `lifecycle.stopCommand` may not be combined with a custom `stopSignal`, since the command runs instead of the signal.)
   - [x] Include example fixes in validation output.
 
 ## Minor Features
@@ -96,6 +97,6 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Add an Nginx guide with WebSocket headers, timeouts, and common failure modes (`docs/nginx.md`).
 - [x] Add deploy-tool recipes that call Rollbridge CLI commands directly (`docs/deploy-recipes.md`).
 - [x] Add a Capistrano recipe showing shell commands only; do not add a Capistrano plugin or Rollbridge-specific Capistrano tasks (`docs/deploy-recipes.md`).
-- [ ] Add a TensorBuzz-specific runbook for current production ports, external services, deploy ordering, and rollback constraints.
+- [x] Add a TensorBuzz-specific runbook for current production ports, external services, deploy ordering, and rollback constraints (`docs/tensorbuzz-runbook.md`).
 - [x] Add troubleshooting docs for health-check failures, port conflicts, stale sockets, crash loops, and stuck draining releases (`docs/troubleshooting.md`).
 - [x] Add a release checklist for maintainers using `npm run release:patch` (`docs/releasing.md`).

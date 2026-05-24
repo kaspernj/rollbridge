@@ -156,6 +156,29 @@ managed process (unknown, or a companion with no active release) is also an
 error. Restarting a `service` bounces a shared broker (for example Velocious
 Beacon), which briefly disrupts every process that depends on it.
 
+## `recover`
+
+```
+rollbridge recover [--config <path>] [--force]
+```
+
+Cleans up orphaned managed processes left by a **crashed** daemon. It reads the
+persisted state ([`statePath`](config.md#statepath)) and finds managed processes
+whose pids are still alive. Without `--force` it only **lists** them (a dry run);
+with `--force` it stops each one's process group (`SIGTERM`, then `SIGKILL` after
+`proxy.forceStopTimeoutMs`) and clears the stale state file.
+
+Run it **before** restarting the daemon after a crash. It refuses to run while a
+daemon (or another process) holds the control socket — those pids belong to a
+live daemon, not a crash. A recycled pid can be a false positive, so review the
+dry-run list before using `--force`.
+
+If `--force` cannot stop some orphan (for example one now owned by another user,
+so it can't be signaled), that process is reported as still running, the state
+file is **kept** so you can investigate and re-run `recover`, and the command
+exits non-zero. Requires `statePath`; also exits non-zero when it is unset or a
+daemon is running.
+
 ## `shutdown`
 
 ```
@@ -179,14 +202,52 @@ issue with an example fix. Exits `1` when issues are found. With `--json`, print
 ## `doctor`
 
 ```
-rollbridge doctor [--config <path>] [--json]
+rollbridge doctor [--config <path>]
+                  [--release-path <path>]
+                  [--release-id <id>]
+                  [--revision <sha>]
+                  [--json]
 ```
 
 Validates the config, then probes the environment: whether a daemon already
 holds the control socket, whether the control socket's directory is writable,
-and whether the proxy port can be bound. Exits `1` when any check fails (so a
-green `doctor` means a fresh daemon can start). With `--json`, prints
+and whether the proxy port can be bound. When [`statePath`](config.md#statepath)
+is configured, it also checks that the state file's directory is writable and
+reports any **orphaned processes** — managed processes still alive in a prior
+state file, left by a daemon that didn't shut down cleanly (advisory; a recycled
+pid can be a false positive, so verify before stopping). Exits `1` when any check
+fails (so a green `doctor` means a fresh daemon can start). With `--json`, prints
 `{"checks": [{"name", "ok", "detail"}], "ok"}`.
+
+### Pre-flighting a release with `--release-path`
+
+Process commands, working directories, and env values are
+[templates](config.md#template-variables) (`{{releasePath}}`, `{{port}}`, …) that
+are only rendered at deploy time, against a specific release. Pass
+`--release-path <path>` to a **prepared release directory** to add deploy-time
+checks against it:
+
+- **release path** — the release directory exists.
+- **process templates** — every process's `command`, `cwd`, and `env` templates
+  resolve (no `{{…}}` references an undefined variable). Ports are rendered with
+  the low end of each process's configured range.
+- **process working directories** — each process's rendered `cwd` (defaulting to
+  the release path) exists.
+
+`--release-id` and `--revision` set `{{releaseId}}`/`{{revision}}` for rendering
+(defaulting the way `deploy` does: `--release-id` falls back to `--revision` or
+the release path's basename, and `--revision` falls back to `--release-id`). Run
+it as part of a deploy pipeline, after preparing the release and before
+`rollbridge deploy`, to catch a template typo or a missing directory before
+traffic is involved:
+
+```bash
+rollbridge doctor --config /etc/rollbridge/app.js --release-path /srv/app/releases/20260524
+```
+
+These checks render replica index `0` and use representative ports, so they
+catch template and path problems but not values that only exist once the daemon
+allocates real ports and spawns processes.
 
 ## `logs`
 
