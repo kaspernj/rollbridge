@@ -175,8 +175,9 @@ statePath: "/var/lib/rollbridge/ticket-server.state.json"
 ```
 
 During the first migration from an old supervisor, set `legacyTakeover` and run
-`rollbridge predeploy-cleanup` before `rollbridge deploy`. Rollbridge will only
-stop configured legacy processes when no active Rollbridge release is running.
+`rollbridge predeploy-cleanup --release-path <path>` before `rollbridge deploy`.
+Rollbridge will only stop configured legacy processes when no reusable active
+Rollbridge release is running.
 
 ```js
 legacyTakeover: {
@@ -483,7 +484,7 @@ Prepare a first Rollbridge deploy by recovering Rollbridge-managed orphans and
 stopping configured legacy processes:
 
 ```bash
-rollbridge predeploy-cleanup --config rollbridge.js
+rollbridge predeploy-cleanup --config rollbridge.js --release-path /srv/app/current
 ```
 
 Enable shell completion (bash or zsh) for command names and option flags:

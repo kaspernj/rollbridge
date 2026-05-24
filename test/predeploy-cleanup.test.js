@@ -60,6 +60,17 @@ test("predeploy cleanup leaves legacy processes alone when daemon already has an
         activeReleaseId: "v1",
         alive: true,
         application: "predeploy-cleanup-test"
+      }),
+      sendCommand: async () => ({
+        activeReleaseId: "v1",
+        application: "predeploy-cleanup-test",
+        control: {path: path.join(dir, "rollbridge.sock")},
+        orphans: [],
+        proxy: {host: "127.0.0.1", port: 0, upstreamHost: "127.0.0.1"},
+        releases: [],
+        services: [],
+        singletons: [],
+        status: "success"
       })
     })
 
@@ -68,6 +79,52 @@ test("predeploy cleanup leaves legacy processes alone when daemon already has an
       legacyProcesses: [],
       recoveredOrphans: 0
     })
+  } finally {
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
+test("predeploy cleanup stops an active daemon when the proxy config changed", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-predeploy-cleanup-"))
+  /** @type {Record<string, import("../src/json.js").JsonValue>[]} */
+  const commands = []
+  let inspectCount = 0
+
+  try {
+    const result = await predeployCleanup({
+      config: buildConfig(dir, "unused-marker"),
+      inspectSocket: async () => {
+        inspectCount += 1
+
+        return {
+          activeReleaseId: inspectCount === 1 ? "v1" : undefined,
+          alive: inspectCount === 1,
+          application: inspectCount === 1 ? "predeploy-cleanup-test" : undefined
+        }
+      },
+      sendCommand: async ({command}) => {
+        commands.push(command)
+
+        if (command.command === "status") {
+          return {
+            activeReleaseId: "v1",
+            application: "predeploy-cleanup-test",
+            control: {path: path.join(dir, "rollbridge.sock")},
+            orphans: [],
+            proxy: {host: "127.0.0.1", port: 9999, upstreamHost: "127.0.0.1"},
+            releases: [],
+            services: [],
+            singletons: [],
+            status: "success"
+          }
+        }
+
+        return {status: "success"}
+      }
+    })
+
+    assert.equal(result.action, "daemon-stopped")
+    assert.deepEqual(commands.map((command) => command.command), ["status", "shutdown"])
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }

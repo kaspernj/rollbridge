@@ -362,10 +362,11 @@ export async function runCli(argv) {
     .command("predeploy-cleanup")
     .description("Prepare a host for deploy: recover Rollbridge orphans and stop configured legacy processes when no release is active.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--release-path <path>", "Pending release path; restarts the daemon if this release changes Rollbridge itself")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
-      const result = await predeployCleanup({config})
+      const result = await predeployCleanup({config, releasePath: options.releasePath})
 
       console.log(formatPredeployCleanupResult(result))
     })
@@ -423,8 +424,8 @@ function formatPredeployCleanupResult(result) {
 
   const lines = []
 
-  if (result.action === "daemon-without-active-release-stopped") {
-    lines.push("Stopped Rollbridge daemon without an active release.")
+  if (result.action === "daemon-stopped") {
+    lines.push("Stopped existing Rollbridge daemon before deploy.")
   } else {
     lines.push("No active Rollbridge daemon found.")
   }

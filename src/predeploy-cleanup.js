@@ -1,5 +1,7 @@
 // @ts-check
 
+import fs from "node:fs"
+import path from "node:path"
 import {spawnSync} from "node:child_process"
 import {setTimeout as sleep} from "node:timers/promises"
 import {inspectControlSocket} from "./daemon.js"
@@ -7,6 +9,7 @@ import {recoverOrphans} from "./recover.js"
 import {sendControlCommand} from "./control-client.js"
 
 /**
+ * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{pid: number, parentPid: number, args: string}} ProcessRow
  * @typedef {{action: string, legacyProcesses: ProcessRow[], recoveredOrphans: number}} PredeployCleanupResult
  */
@@ -18,6 +21,8 @@ import {sendControlCommand} from "./control-client.js"
  * @param {object} args - Options.
  * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
  * @param {(socketPath: string) => Promise<import("./daemon.js").ControlSocketInspection>} [args.inspectSocket] - Control socket probe.
+ * @param {string} [args.releasePath] - Pending release path, used to restart the daemon when this release changes Rollbridge itself.
+ * @param {(args: {command: Record<string, JsonValue>, path: string}) => Promise<Record<string, JsonValue>>} [args.sendCommand] - Control command sender.
  * @param {(command: string, args: string[]) => import("node:child_process").SpawnSyncReturns<Buffer>} [args.runCommand] - Command runner.
  * @param {(pid: number, signal: string) => void} [args.killProcess] - Signal sender.
  * @param {(args: {config: import("./config.js").RollbridgeConfig, force: boolean}) => Promise<import("./recover.js").RecoverResult>} [args.recover] - Orphan recovery function.
@@ -27,34 +32,136 @@ export async function predeployCleanup({
   config,
   inspectSocket = inspectControlSocket,
   killProcess = process.kill,
+  releasePath,
   recover = recoverOrphans,
-  runCommand = spawnSync
+  runCommand = spawnSync,
+  sendCommand = sendControlCommand
 }) {
   const inspection = await inspectSocket(config.control.path)
 
   if (inspection.alive) {
-    if (inspection.application === undefined) {
-      throw new Error(`A non-Rollbridge process is using ${config.control.path}; refusing predeploy cleanup.`)
-    }
+    const status = await activeDaemonStatus({config, inspection, sendCommand})
 
-    if (inspection.application !== config.application) {
-      throw new Error(`A Rollbridge daemon for "${inspection.application}" is using ${config.control.path}; expected "${config.application}".`)
-    }
-
-    if (inspection.activeReleaseId) {
+    if (status.activeReleaseId && daemonMatchesPendingRelease({config, releasePath, status})) {
       return {action: "daemon-active", legacyProcesses: [], recoveredOrphans: 0}
     }
 
-    await sendControlCommand({command: {command: "shutdown"}, path: config.control.path})
+    await sendCommand({command: {command: "shutdown"}, path: config.control.path})
+    await waitForControlSocketShutdown({config, inspectSocket})
   }
 
   const recoveredOrphans = await recoverConfiguredOrphans(config, recover)
   const legacyProcesses = await stopLegacyProcesses({config, killProcess, runCommand})
 
   return {
-    action: inspection.alive ? "daemon-without-active-release-stopped" : "no-daemon-cleaned",
+    action: inspection.alive ? "daemon-stopped" : "no-daemon-cleaned",
     legacyProcesses,
     recoveredOrphans
+  }
+}
+
+/**
+ * @param {object} args - Options.
+ * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
+ * @param {import("./daemon.js").ControlSocketInspection} args.inspection - Socket inspection.
+ * @param {(args: {command: Record<string, JsonValue>, path: string}) => Promise<Record<string, JsonValue>>} args.sendCommand - Control command sender.
+ * @returns {Promise<import("./daemon.js").DaemonStatus>} Daemon status.
+ */
+async function activeDaemonStatus({config, inspection, sendCommand}) {
+  if (inspection.application === undefined) {
+    throw new Error(`A non-Rollbridge process is using ${config.control.path}; refusing predeploy cleanup.`)
+  }
+
+  if (inspection.application !== config.application) {
+    throw new Error(`A Rollbridge daemon for "${inspection.application}" is using ${config.control.path}; expected "${config.application}".`)
+  }
+
+  const status = await sendCommand({command: {command: "status"}, path: config.control.path})
+
+  return /** @type {import("./daemon.js").DaemonStatus} */ (status)
+}
+
+/**
+ * @param {object} args - Options.
+ * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
+ * @param {string} [args.releasePath] - Pending release path.
+ * @param {import("./daemon.js").DaemonStatus} args.status - Active daemon status.
+ * @returns {boolean} True when the active daemon can be reused for this deploy.
+ */
+function daemonMatchesPendingRelease({config, releasePath, status}) {
+  if (!proxyMatchesConfig(status.proxy, config.proxy)) return false
+  if (releasePath !== undefined && rollbridgePackageChanged({releasePath, status})) return false
+
+  return true
+}
+
+/**
+ * @param {import("./daemon.js").DaemonStatus["proxy"]} currentProxy - Current proxy status.
+ * @param {import("./config.js").ProxyConfig} expectedProxy - Pending release proxy config.
+ * @returns {boolean} True when the current daemon proxy matches the pending config.
+ */
+function proxyMatchesConfig(currentProxy, expectedProxy) {
+  return currentProxy.host === expectedProxy.host &&
+    currentProxy.port === expectedProxy.port &&
+    currentProxy.upstreamHost === expectedProxy.upstreamHost
+}
+
+/**
+ * @param {object} args - Options.
+ * @param {string} args.releasePath - Pending release path.
+ * @param {import("./daemon.js").DaemonStatus} args.status - Active daemon status.
+ * @returns {boolean} True when the pending release uses a different Rollbridge package version.
+ */
+function rollbridgePackageChanged({releasePath, status}) {
+  const activeRelease = status.releases.find((release) => release.releaseId === status.activeReleaseId)
+  if (activeRelease === undefined) return false
+
+  const releaseVersion = rollbridgePackageVersion(releasePath)
+  const activeVersion = rollbridgePackageVersion(activeRelease.releasePath)
+
+  return releaseVersion !== undefined &&
+    activeVersion !== undefined &&
+    releaseVersion !== activeVersion
+}
+
+/**
+ * @param {string} releasePath - Release path containing node_modules.
+ * @returns {string | undefined} Installed Rollbridge package version.
+ */
+function rollbridgePackageVersion(releasePath) {
+  try {
+    const packageJson = JSON.parse(fs.readFileSync(path.join(releasePath, "node_modules", "rollbridge", "package.json"), "utf8"))
+
+    if (packageJson && typeof packageJson === "object" && "version" in packageJson && typeof packageJson.version === "string") {
+      return packageJson.version
+    }
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined
+
+    throw error
+  }
+
+  return undefined
+}
+
+/**
+ * @param {object} args - Options.
+ * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
+ * @param {(socketPath: string) => Promise<import("./daemon.js").ControlSocketInspection>} args.inspectSocket - Control socket probe.
+ * @returns {Promise<void>} Resolves after the socket stops accepting Rollbridge commands.
+ */
+async function waitForControlSocketShutdown({config, inspectSocket}) {
+  const deadline = Date.now() + 30000
+
+  while (true) {
+    const inspection = await inspectSocket(config.control.path)
+    if (!inspection.alive) return
+
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for Rollbridge daemon at ${config.control.path} to shut down.`)
+    }
+
+    await sleep(250)
   }
 }
 
