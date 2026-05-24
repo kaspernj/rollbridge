@@ -40,9 +40,9 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Expose `ROLLBRIDGE_REPLICA_INDEX`, replica count, and per-replica template context (`{{replicaIndex}}`/`{{replicaCount}}`).
   - [x] Restart or stop one replica without affecting the rest (`rollbridge restart --process worker#0`).
   - [x] Preserve readable status output for replica groups (each instance shown as `<id>#<index>`).
-- [ ] Persistent daemon state and recovery.
+- [x] Persistent daemon state and recovery.
   - [x] Persist active release, draining releases, process metadata, counters, and recent events (opt-in `statePath`; atomic snapshot on change + periodic).
-  - [ ] Reconnect status to still-running child processes after daemon restart where possible. (Largely infeasible — a new daemon cannot re-attach exit/stdout to processes it did not spawn; orphans are reported instead, see below.)
+  - [x] Reconnect status to still-running child processes after daemon restart where possible. (Feasible subset: `status` now includes an `orphans` array — still-alive managed processes from the prior daemon's persisted state, re-checked each call. Full re-management/stdout-exit re-attach stays infeasible; the daemon reports them and `rollbridge recover` stops them.)
   - [x] Detect and report orphaned Rollbridge-managed processes. (On startup, reports persisted process pids that are still alive; advisory, see `statePath`.)
   - [x] Add a recovery mode for safe startup after daemon crash or machine reboot. (`rollbridge recover` lists orphaned processes from the persisted state and, with `--force`, stops them and clears the state; refuses while a daemon is running.)
 - [x] Rollback support.

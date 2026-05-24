@@ -6,7 +6,7 @@ import net from "node:net"
 import httpProxy from "http-proxy"
 import EventLog from "./event-log.js"
 import ReleaseGroup from "./release-group.js"
-import {clearState, liveProcesses, readState, writeState} from "./state-store.js"
+import {clearState, isProcessAlive, liveProcesses, readState, writeState} from "./state-store.js"
 import {resolveGroupId, resolveUserId} from "./system-ids.js"
 
 const EVENT_HISTORY_LIMIT = 1000
@@ -16,7 +16,7 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
- * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  */
 
 export default class RollbridgeDaemon {
@@ -52,6 +52,9 @@ export default class RollbridgeDaemon {
     this.statePath = config.statePath
     this.persistTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
     this.pendingWrite = /** @type {Promise<void> | undefined} */ (undefined)
+    // Still-alive managed processes left by a previous daemon (from statePath), captured at
+    // startup and surfaced in status(). The daemon cannot re-manage them, only report them.
+    this.orphans = /** @type {{id: string, pid: number, releaseId: string | null}[]} */ ([])
 
     this.proxy.on("error", (error, req, res) => this.onProxyError(error, req, res))
   }
@@ -649,7 +652,10 @@ export default class RollbridgeDaemon {
     if (!this.statePath || this.stopping) return
 
     const statePath = this.statePath
-    const snapshot = {...this.status(), events: this.eventLog.recent(), persistedAt: new Date().toISOString()}
+    // Drop the orphans view from the snapshot: it reflects a *previous* daemon's leftovers, not
+    // this daemon's own managed state, and is recomputed from the persisted processes on restart.
+    const {orphans: _orphans, ...status} = this.status()
+    const snapshot = {...status, events: this.eventLog.recent(), persistedAt: new Date().toISOString()}
 
     // Serialize writes (and track the tail) so shutdown can wait for an in-flight write before
     // clearing the file — otherwise a write started before shutdown could recreate it afterward.
@@ -672,6 +678,10 @@ export default class RollbridgeDaemon {
     if (!this.statePath) return
 
     const orphans = liveProcesses(await readState(this.statePath))
+
+    // Keep them for status() so `rollbridge status` reflects still-running children after a
+    // restart, not just the startup log below.
+    this.orphans = orphans
 
     for (const orphan of orphans) {
       this.logger("orphaned managed process detected", {pid: orphan.pid, processId: orphan.id, releaseId: orphan.releaseId})
@@ -731,6 +741,9 @@ export default class RollbridgeDaemon {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,
       application: this.config.application,
       control: {...this.config.control},
+      // Re-check liveness each call so the list self-clears as the operator stops the leftovers
+      // (for example via `rollbridge recover`) and never goes stale.
+      orphans: this.orphans.filter((orphan) => isProcessAlive(orphan.pid)),
       proxy: {
         host: this.config.proxy.host,
         port: this.proxyPort ?? this.config.proxy.port,
