@@ -164,6 +164,26 @@ managed process (unknown, or a companion with no active release) is also an
 error. Restarting a `service` bounces a shared broker (for example Velocious
 Beacon), which briefly disrupts every process that depends on it.
 
+## `predeploy-cleanup`
+
+```
+rollbridge predeploy-cleanup [--config <path>] [--release-path <path>]
+```
+
+Prepares a host for the first Rollbridge deploy. If a Rollbridge daemon already
+has an active release, the command exits without stopping anything. Otherwise it
+recovers Rollbridge-managed orphans from `statePath` and stops the legacy
+processes configured in [`legacyTakeover`](config.md#legacytakeover), then exits
+before `rollbridge deploy` starts the new daemon/proxy.
+
+When `--release-path` is provided, the command also restarts the existing daemon
+if the active release uses a different Rollbridge package version than the
+pending release. It also restarts the daemon when the active daemon's proxy host,
+port, or upstream host differs from the pending config.
+
+Use it immediately before `rollbridge deploy --ensure-daemon` when migrating an
+app from `screen`, `process_bot`, or another old supervisor to Rollbridge.
+
 ## `recover`
 
 ```

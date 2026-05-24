@@ -70,6 +70,47 @@ test("validateConfig defaults wildcard proxy upstreams to loopback", () => {
   assert.equal(config.proxy.upstreamHost, "127.0.0.1")
 })
 
+test("validateConfig accepts legacy takeover screens and process matchers", () => {
+  const {config, issues} = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    legacyTakeover: {
+      forceStopTimeoutMs: 250,
+      processes: [
+        {includes: ["/srv/demo/", "velocious server", "--port 4500"], name: "legacy web"}
+      ],
+      screens: ["demo-backend"]
+    },
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.deepEqual(issues, [])
+  assert.deepEqual(config.legacyTakeover, {
+    forceStopTimeoutMs: 250,
+    processes: [
+      {includes: ["/srv/demo/", "velocious server", "--port 4500"], name: "legacy web"}
+    ],
+    screens: ["demo-backend"]
+  })
+})
+
+test("validateConfig rejects empty legacy takeover config", () => {
+  const {issues} = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    legacyTakeover: {},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.ok(issues.some((issue) => issue.message === "legacyTakeover must define at least one screen or process matcher"), JSON.stringify(issues))
+})
+
 test("validateConfig defaults outputLines and accepts a positive override", () => {
   const {config, issues} = validateConfig({
     application: "demo",

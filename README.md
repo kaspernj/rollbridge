@@ -174,6 +174,20 @@ stop them before restarting the daemon. A clean `shutdown` removes the file. See
 statePath: "/var/lib/rollbridge/ticket-server.state.json"
 ```
 
+During the first migration from an old supervisor, set `legacyTakeover` and run
+`rollbridge predeploy-cleanup --release-path <path>` before `rollbridge deploy`.
+Rollbridge will only stop configured legacy processes when no reusable active
+Rollbridge release is running.
+
+```js
+legacyTakeover: {
+  screens: ["ticket-server"],
+  processes: [
+    {name: "legacy web", includes: ["/home/dev/ticket-server/", "velocious server", "--port 8082"]}
+  ]
+}
+```
+
 A function export receives no arguments and lets you build the config at load
 time:
 
@@ -464,6 +478,13 @@ Shut down the daemon and managed processes:
 
 ```bash
 rollbridge shutdown --config rollbridge.js
+```
+
+Prepare a first Rollbridge deploy by recovering Rollbridge-managed orphans and
+stopping configured legacy processes:
+
+```bash
+rollbridge predeploy-cleanup --config rollbridge.js --release-path /srv/app/current
 ```
 
 Enable shell completion (bash or zsh) for command names and option flags:

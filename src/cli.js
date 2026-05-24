@@ -8,6 +8,7 @@ import {Command} from "commander"
 import RollbridgeDaemon from "./daemon.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
 import {runEnvironmentChecks, runReleaseChecks} from "./doctor.js"
+import {predeployCleanup} from "./predeploy-cleanup.js"
 import {recoverOrphans} from "./recover.js"
 import {sendControlCommand} from "./control-client.js"
 
@@ -358,6 +359,19 @@ export async function runCli(argv) {
     })
 
   program
+    .command("predeploy-cleanup")
+    .description("Prepare a host for deploy: recover Rollbridge orphans and stop configured legacy processes when no release is active.")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--release-path <path>", "Pending release path; restarts the daemon if this release changes Rollbridge itself")
+    .action(async (options) => {
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const result = await predeployCleanup({config, releasePath: options.releasePath})
+
+      console.log(formatPredeployCleanupResult(result))
+    })
+
+  program
     .command("recover")
     .description("Stop orphaned processes left by a crashed daemon (reads statePath; lists them unless --force).")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
@@ -397,6 +411,29 @@ export async function runCli(argv) {
     })
 
   await program.parseAsync(argv)
+}
+
+/**
+ * @param {import("./predeploy-cleanup.js").PredeployCleanupResult} result - Cleanup result.
+ * @returns {string} Human-readable summary.
+ */
+function formatPredeployCleanupResult(result) {
+  if (result.action === "daemon-active") {
+    return "Rollbridge daemon already has an active release; no legacy cleanup needed."
+  }
+
+  const lines = []
+
+  if (result.action === "daemon-stopped") {
+    lines.push("Stopped existing Rollbridge daemon before deploy.")
+  } else {
+    lines.push("No active Rollbridge daemon found.")
+  }
+
+  lines.push(`Recovered ${result.recoveredOrphans} Rollbridge orphaned process${result.recoveredOrphans === 1 ? "" : "es"}.`)
+  lines.push(`Stopped ${result.legacyProcesses.length} legacy process${result.legacyProcesses.length === 1 ? "" : "es"}.`)
+
+  return lines.join("\n")
 }
 
 /**
