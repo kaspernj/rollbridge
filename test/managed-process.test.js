@@ -107,6 +107,32 @@ test("counts automatic restarts and reports startedAt and uptime while running",
   }
 })
 
+test("a queued auto-restart timer is unref'd so it can't keep the process alive", async () => {
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} ${JSON.stringify(crasherPath)}`,
+    cwd: undefined,
+    env: {},
+    id: "crasher",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 5000,
+    shouldRestart: () => true,
+    stopTimeoutMs: 500
+  })
+
+  try {
+    await managed.start()
+
+    // After the fixture crashes a restart is queued. Under the default unlimited restart policy a
+    // ref'd timer would respawn forever and block process exit, so the queued timer must be unref'd.
+    await waitFor(() => managed.restartTimer !== undefined)
+
+    assert.equal(managed.restartTimer?.hasRef(), false)
+  } finally {
+    await managed.stop()
+  }
+})
+
 /**
  * Builds a managed crasher with a specific restart policy.
  * @param {import("../src/config.js").RestartConfig} restart - Restart policy.
