@@ -202,7 +202,11 @@ issue with an example fix. Exits `1` when issues are found. With `--json`, print
 ## `doctor`
 
 ```
-rollbridge doctor [--config <path>] [--json]
+rollbridge doctor [--config <path>]
+                  [--release-path <path>]
+                  [--release-id <id>]
+                  [--revision <sha>]
+                  [--json]
 ```
 
 Validates the config, then probes the environment: whether a daemon already
@@ -214,6 +218,36 @@ state file, left by a daemon that didn't shut down cleanly (advisory; a recycled
 pid can be a false positive, so verify before stopping). Exits `1` when any check
 fails (so a green `doctor` means a fresh daemon can start). With `--json`, prints
 `{"checks": [{"name", "ok", "detail"}], "ok"}`.
+
+### Pre-flighting a release with `--release-path`
+
+Process commands, working directories, and env values are
+[templates](config.md#template-variables) (`{{releasePath}}`, `{{port}}`, …) that
+are only rendered at deploy time, against a specific release. Pass
+`--release-path <path>` to a **prepared release directory** to add deploy-time
+checks against it:
+
+- **release path** — the release directory exists.
+- **process templates** — every process's `command`, `cwd`, and `env` templates
+  resolve (no `{{…}}` references an undefined variable). Ports are rendered with
+  the low end of each process's configured range.
+- **process working directories** — each process's rendered `cwd` (defaulting to
+  the release path) exists.
+
+`--release-id` and `--revision` set `{{releaseId}}`/`{{revision}}` for rendering
+(defaulting the way `deploy` does: `--release-id` falls back to `--revision` or
+the release path's basename, and `--revision` falls back to `--release-id`). Run
+it as part of a deploy pipeline, after preparing the release and before
+`rollbridge deploy`, to catch a template typo or a missing directory before
+traffic is involved:
+
+```bash
+rollbridge doctor --config /etc/rollbridge/app.js --release-path /srv/app/releases/20260524
+```
+
+These checks render replica index `0` and use representative ports, so they
+catch template and path problems but not values that only exist once the daemon
+allocates real ports and spawns processes.
 
 ## `logs`
 

@@ -3,7 +3,7 @@
 import {EventEmitter} from "node:events"
 import ManagedProcess from "./managed-process.js"
 import {findAvailablePort} from "./port-allocator.js"
-import {renderObject, renderTemplate} from "./template.js"
+import {processTemplateContext, renderObject, renderTemplate} from "./template.js"
 import {waitForHealth} from "./health.js"
 
 /**
@@ -259,23 +259,17 @@ export default class ReleaseGroup extends EventEmitter {
    * @returns {Record<string, JsonValue>} Template context.
    */
   contextForProcess(processConfig, replica = {count: 1, index: 0}) {
-    return {
+    return processTemplateContext({
       application: this.config.application,
-      env: {...process.env},
-      port: this.ports[processConfig.id],
       ports: this.ports,
       processId: processConfig.id,
-      proxy: {
-        host: this.config.proxy.host,
-        port: this.config.proxy.port,
-        upstreamHost: this.config.proxy.upstreamHost
-      },
+      proxy: this.config.proxy,
       releaseId: this.releaseId,
       releasePath: this.releasePath,
       replicaCount: replica.count,
       replicaIndex: replica.index,
       revision: this.revision
-    }
+    })
   }
 
   /**

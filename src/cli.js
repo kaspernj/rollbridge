@@ -7,7 +7,7 @@ import {spawn} from "node:child_process"
 import {Command} from "commander"
 import RollbridgeDaemon from "./daemon.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
-import {runEnvironmentChecks} from "./doctor.js"
+import {runEnvironmentChecks, runReleaseChecks} from "./doctor.js"
 import {recoverOrphans} from "./recover.js"
 import {sendControlCommand} from "./control-client.js"
 
@@ -248,6 +248,9 @@ export async function runCli(argv) {
     .command("doctor")
     .description("Check the environment before starting the daemon: config, control socket, and proxy port.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--release-path <path>", "Also pre-flight a prepared release: render its templates and check the release and working directories")
+    .option("--release-id <id>", "Release id used when rendering templates (defaults to --revision or the release path basename)")
+    .option("--revision <sha>", "Revision used when rendering templates (defaults to --release-id)")
     .option("--json", "Output machine-readable JSON")
     .action(async (options) => {
       let configPath
@@ -272,6 +275,10 @@ export async function runCli(argv) {
       } else {
         checks.push({detail: `valid: ${config.processes.length} ${config.processes.length === 1 ? "process" : "processes"}, proxy on ${config.proxy.host}:${config.proxy.port}`, name: "config", ok: true})
         checks.push(...await runEnvironmentChecks(config))
+
+        if (options.releasePath) {
+          checks.push(...await runReleaseChecks(config, {releaseId: options.releaseId, releasePath: options.releasePath, revision: options.revision}))
+        }
       }
 
       const failed = checks.filter((check) => !check.ok).length
