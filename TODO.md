@@ -25,7 +25,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Report memory stats and last memory-triggered restart in `status`.
   - [x] Restart memory-heavy workers gracefully when possible, with a forced stop timeout.
   - [x] Add tests with a fixture process that allocates memory above the configured limit.
-- [ ] Worker auto-restart and restart policy controls.
+- [x] Worker auto-restart and restart policy controls.
   - [x] Add config for max restarts, restart window, exponential backoff, and disabled restart behavior (per-process `restart` policy).
   - [x] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events. (Per-process `lastStartReason` + a `reason` on the `process started` event; the `memory` reason is wired and fires once memory supervision restarts a process.)
   - [x] Add a `restart` CLI command for a single process, a policy group, or all non-proxied workers.
@@ -50,7 +50,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Add a `rollback` CLI command that health-checks the target before switching.
   - [x] Define how rollback interacts with singleton workers and draining releases. (Reuses the deploy flow: replaces singletons and drains the current release.)
   - [x] Document migration constraints for rollback.
-- [ ] Observability and diagnostics.
+- [x] Observability and diagnostics.
   - [x] Add structured event history for deploys, switches, stops, crashes, memory restarts, and failed commands. (In-memory `EventLog` tapping the daemon logger; memory-restart events populate once memory supervision logs them.)
   - [x] Add restart counters and uptime to status (exit reasons already reported via `exitCode`/`exitSignal`/`state`).
   - [x] Add memory stats and child-process-tree details to status (with memory supervision). (`rssBytes`/`memoryRestarts`/`lastMemoryRestartAt` plus `children`: the sampled process tree with each member's pid, command, and RSS.)
@@ -58,7 +58,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Add an `events` CLI command (after structured event history lands).
   - [x] Add optional file logging with rotation guidance (`docs/logging.md`; daemon log file via `--daemon-log-path`, logrotate `copytruncate`).
   - [x] Add machine-readable JSON output for all CLI commands (data commands print JSON; `validate`/`doctor`/`logs` take `--json`).
-- [ ] Config validation and doctoring.
+- [x] Config validation and doctoring.
   - [x] Add `validate` to parse config and report all config errors without starting the daemon.
   - [x] Add `doctor` to check config validity, control socket reachability, proxy port availability, and control-socket directory writability.
   - [x] Extend `doctor` with state-path checks: state-path directory writability and orphaned-process reporting from a prior state file.
