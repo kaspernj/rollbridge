@@ -123,6 +123,14 @@ Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
 `lastMemoryRestartAt`, and `children` (the process tree: each group member's
 `pid`, `command`, and `rssBytes`).
 
+When [`statePath`](config.md#statepath) is configured, status also includes an
+`orphans` array: managed processes from a **previous** daemon that are still
+alive (`id`, `pid`, `releaseId`) — for example after the daemon restarted but its
+detached children kept running. It is empty in the normal case. Liveness is
+re-checked on each call, so the list clears itself as you stop the leftovers (see
+[`recover`](#recover)). These are reported only — the new daemon can't re-adopt
+them.
+
 ## `stop`
 
 ```

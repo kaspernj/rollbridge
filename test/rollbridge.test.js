@@ -528,6 +528,50 @@ test("reports orphaned managed processes from a previous daemon's state", async 
   }
 })
 
+test("status surfaces still-alive orphaned processes from a previous daemon and drops them once gone", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
+  const statePath = path.join(dir, "state.json")
+  const leftover = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio: "ignore"})
+
+  await once(leftover, "spawn")
+
+  const config = normalizeConfig({
+    application: "rollbridge-test",
+    control: {path: path.join(dir, "rollbridge.sock")},
+    processes: [{command: "true", id: "web", policy: "proxied", port: {from: 0, to: 0}}],
+    proxy: {host: "127.0.0.1", port: 0},
+    statePath
+  })
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+
+  try {
+    // A prior daemon left a worker with this (still-alive) pid.
+    await writeState(statePath, {
+      activeReleaseId: "v1",
+      releases: [{processes: [{id: "worker", pid: leftover.pid}], releaseId: "v1"}],
+      services: [],
+      singletons: []
+    })
+
+    await daemon.reportOrphans()
+
+    // status reflects the still-running child even though the daemon cannot re-manage it.
+    assert.deepEqual(daemon.status().orphans, [{id: "worker", pid: leftover.pid, releaseId: "v1"}])
+
+    // Once the leftover is stopped, status re-checks liveness and drops it.
+    leftover.kill("SIGKILL")
+    await waitFor(() => daemon.status().orphans.length === 0)
+    assert.deepEqual(daemon.status().orphans, [])
+
+    // The dead entry is pruned from the underlying list, not merely filtered, so a recycled pid
+    // can't resurrect a cleared orphan.
+    assert.deepEqual(daemon.orphans, [])
+  } finally {
+    leftover.kill("SIGKILL")
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
 test("the daemon records a structured event history served by the events command", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)
