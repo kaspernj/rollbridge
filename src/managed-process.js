@@ -237,6 +237,11 @@ export default class ManagedProcess extends EventEmitter {
         this.logger("process restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
       })
     }, delayMs)
+
+    // The daemon's listening servers govern its lifetime; a pending restart must never be the sole
+    // handle keeping the process alive (like the memory and persist timers above). Otherwise a
+    // crashed process with an unlimited restart policy would respawn forever and block exit.
+    this.restartTimer.unref?.()
   }
 
   /**
