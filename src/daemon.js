@@ -737,13 +737,16 @@ export default class RollbridgeDaemon {
 
   /** @returns {DaemonStatus} Status payload. */
   status() {
+    // Re-check liveness and prune the dead permanently, so the list self-clears as the operator
+    // stops the leftovers (e.g. via `rollbridge recover`). Pruning (not just filtering) matters:
+    // a cleared orphan must not reappear if the OS later recycles its pid for an unrelated process.
+    this.orphans = this.orphans.filter((orphan) => isProcessAlive(orphan.pid))
+
     return {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,
       application: this.config.application,
       control: {...this.config.control},
-      // Re-check liveness each call so the list self-clears as the operator stops the leftovers
-      // (for example via `rollbridge recover`) and never goes stale.
-      orphans: this.orphans.filter((orphan) => isProcessAlive(orphan.pid)),
+      orphans: [...this.orphans],
       proxy: {
         host: this.config.proxy.host,
         port: this.proxyPort ?? this.config.proxy.port,

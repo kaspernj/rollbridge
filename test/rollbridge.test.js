@@ -562,6 +562,10 @@ test("status surfaces still-alive orphaned processes from a previous daemon and 
     leftover.kill("SIGKILL")
     await waitFor(() => daemon.status().orphans.length === 0)
     assert.deepEqual(daemon.status().orphans, [])
+
+    // The dead entry is pruned from the underlying list, not merely filtered, so a recycled pid
+    // can't resurrect a cleared orphan.
+    assert.deepEqual(daemon.orphans, [])
   } finally {
     leftover.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
