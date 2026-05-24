@@ -23,6 +23,7 @@ export default {
 | --- | --- | --- | --- |
 | `application` | string | basename of the config file's directory | Names the app; used in the default control-socket path and the `ROLLBRIDGE_APPLICATION` env var. |
 | `control` | object | — | Control-socket settings (see below). |
+| `legacyTakeover` | object | unset | Optional matchers for `rollbridge predeploy-cleanup` to stop pre-Rollbridge supervisors during first handover (see below). |
 | `proxy` | object | **required** | Proxy listener and shared defaults (see below). |
 | `processes` | array | **required** | Managed processes (see below). Exactly one must be `proxied`. |
 | `releaseRetention` | object | — | How many stopped releases the daemon retains (see below). |
@@ -87,6 +88,38 @@ statePath: "/var/lib/rollbridge/ticket-server.state.json"
 ```
 
 Leave `statePath` unset to disable persistence (the default).
+
+## `legacyTakeover`
+
+`legacyTakeover` lets deploy scripts run `rollbridge predeploy-cleanup` during
+the first migration from an old supervisor. The command only uses these matchers
+when no active Rollbridge release is running. If a Rollbridge daemon already has
+an active release, it exits without stopping legacy processes.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `legacyTakeover.screens` | array of strings | `[]` | GNU Screen session names to stop with `screen -S <name> -X quit`. |
+| `legacyTakeover.processes` | array | `[]` | Process command-line matchers. Each entry must define `includes`, and may define `name`. |
+| `legacyTakeover.forceStopTimeoutMs` | number | `proxy.forceStopTimeoutMs` | Grace period after `SIGTERM` before `SIGKILL` is sent to matched legacy processes. |
+
+Each `legacyTakeover.processes[]` entry:
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `includes` | array of strings | **required** | Every string must appear in a process command line for it to be considered a legacy seed process. Descendants of seed processes are stopped too. |
+| `name` | string | generated | Human-readable label for diagnostics. |
+
+Example:
+
+```js
+legacyTakeover: {
+  forceStopTimeoutMs: 10000,
+  screens: ["ticket-server"],
+  processes: [
+    {name: "legacy web", includes: ["/home/dev/ticket-server/", "velocious server", "--port 8082"]}
+  ]
+}
+```
 
 ## `processes[]`
 

@@ -16,8 +16,10 @@ import {pathToFileURL} from "node:url"
  * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, nonBlockingDrain: boolean, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
  * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
+ * @typedef {{includes: string[], name: string}} LegacyTakeoverProcessConfig
+ * @typedef {{forceStopTimeoutMs: number, processes: LegacyTakeoverProcessConfig[], screens: string[]}} LegacyTakeoverConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
- * @typedef {{application: string, control: ControlConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig, statePath?: string}} RollbridgeConfig
+ * @typedef {{application: string, control: ControlConfig, legacyTakeover?: LegacyTakeoverConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig, statePath?: string}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
  */
 
@@ -134,12 +136,13 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
     path: normalizeString(controlSource.path, "control.path", issues, {default: `/tmp/rollbridge-${application}.sock`})
   }
   const processes = processesSource.map((processSource, index) => normalizeProcess(processSource, index, proxy, issues))
+  const legacyTakeover = normalizeLegacyTakeover(source.legacyTakeover, proxy, issues)
   const releaseRetention = normalizeReleaseRetention(objectAt(source.releaseRetention, "releaseRetention", issues, {}), issues)
   const statePath = source.statePath === undefined || source.statePath === null ? undefined : normalizeString(source.statePath, "statePath", issues)
 
   validateProcessSet(processes, issues)
 
-  return {config: {application, control, processes, proxy, releaseRetention, statePath}, issues}
+  return {config: {application, control, legacyTakeover, processes, proxy, releaseRetention, statePath}, issues}
 }
 
 /**
@@ -338,6 +341,102 @@ function normalizeLifecycle(value, key, issues) {
   }
 
   return lifecycle
+}
+
+/**
+ * @param {JsonValue} value - Raw legacy takeover config.
+ * @param {ProxyConfig} proxy - Proxy config defaults.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {LegacyTakeoverConfig | undefined} Normalized legacy takeover config, or undefined when omitted.
+ */
+function normalizeLegacyTakeover(value, proxy, issues) {
+  if (value === undefined || value === null) return undefined
+
+  if (!isPlainObject(value)) {
+    issues.push({fix: "Set legacyTakeover to a mapping with screens and/or processes.", message: "legacyTakeover must be an object"})
+
+    return {forceStopTimeoutMs: proxy.forceStopTimeoutMs, processes: [], screens: []}
+  }
+
+  const forceStopTimeoutMs = normalizeNumber(value.forceStopTimeoutMs, "legacyTakeover.forceStopTimeoutMs", issues, {default: proxy.forceStopTimeoutMs})
+  const screens = normalizeStringList(value.screens, "legacyTakeover.screens", issues)
+  const processes = normalizeLegacyTakeoverProcesses(value.processes, issues)
+
+  if (screens.length === 0 && processes.length === 0) {
+    issues.push({fix: "Set legacyTakeover.screens or legacyTakeover.processes so predeploy-cleanup knows what legacy processes it may stop.", message: "legacyTakeover must define at least one screen or process matcher"})
+  }
+
+  return {
+    forceStopTimeoutMs: nonNegativeOrDefault(forceStopTimeoutMs, "legacyTakeover.forceStopTimeoutMs", issues, proxy.forceStopTimeoutMs, false),
+    processes,
+    screens
+  }
+}
+
+/**
+ * @param {JsonValue} value - Raw list value.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {string[]} Normalized strings.
+ */
+function normalizeStringList(value, key, issues) {
+  if (value === undefined || value === null) return []
+
+  if (!Array.isArray(value)) {
+    issues.push({fix: `Set ${key} to a list of strings.`, message: `${key} must be an array`})
+
+    return []
+  }
+
+  return value.flatMap((entry, index) => {
+    if (typeof entry === "string" && entry.length > 0) return [entry]
+
+    issues.push({fix: `Set ${key}[${index}] to a non-empty string.`, message: `${key}[${index}] must be a non-empty string`})
+    return []
+  })
+}
+
+/**
+ * @param {JsonValue} value - Raw legacy process matchers.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {LegacyTakeoverProcessConfig[]} Normalized process matchers.
+ */
+function normalizeLegacyTakeoverProcesses(value, issues) {
+  if (value === undefined || value === null) return []
+
+  if (!Array.isArray(value)) {
+    issues.push({fix: "Set legacyTakeover.processes to a list of mappings with includes strings.", message: "legacyTakeover.processes must be an array"})
+
+    return []
+  }
+
+  return value.flatMap((entry, index) => normalizeLegacyTakeoverProcess(entry, index, issues))
+}
+
+/**
+ * @param {JsonValue} value - Raw legacy process matcher.
+ * @param {number} index - Matcher index.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {LegacyTakeoverProcessConfig[]} Normalized matcher, or an empty list when invalid.
+ */
+function normalizeLegacyTakeoverProcess(value, index, issues) {
+  const key = `legacyTakeover.processes[${index}]`
+
+  if (!isPlainObject(value)) {
+    issues.push({fix: `Set ${key} to a mapping with includes strings.`, message: `${key} must be an object`})
+
+    return []
+  }
+
+  const includes = normalizeStringList(value.includes, `${key}.includes`, issues)
+  if (includes.length === 0) {
+    issues.push({fix: `Set ${key}.includes to one or more command-line substrings that identify the legacy process.`, message: `${key}.includes must contain at least one matcher`})
+  }
+
+  return [{
+    includes,
+    name: normalizeString(value.name, `${key}.name`, issues, {default: `legacy process ${index + 1}`})
+  }]
 }
 
 /**
