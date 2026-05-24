@@ -62,7 +62,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Add `validate` to parse config and report all config errors without starting the daemon.
   - [x] Add `doctor` to check config validity, control socket reachability, proxy port availability, and control-socket directory writability.
   - [x] Extend `doctor` with state-path checks: state-path directory writability and orphaned-process reporting from a prior state file.
-  - [ ] Extend `doctor` with process-command and release-path checks once those are resolvable (they need per-release rendered templates, which only exist at deploy time).
+  - [x] Extend `doctor` with process-command and release-path checks once those are resolvable (they need per-release rendered templates, which only exist at deploy time). (`rollbridge doctor --release-path <path>` renders each process's command/cwd/env against that release and checks the release directory, template resolvability, and rendered working directories; uses representative ports and replica index 0.)
   - [x] Validate duplicate process IDs, missing ports on proxied processes, invalid ranges, and the single-proxied-process policy rule.
   - [x] Validate unsupported lifecycle-hook combinations once worker lifecycle hooks land. (`lifecycle.drainCommand` requires a positive `drainTimeoutMs`; `nonBlockingDrain` is companion-only; a `lifecycle.stopCommand` may not be combined with a custom `stopSignal`, since the command runs instead of the signal.)
   - [x] Include example fixes in validation output.

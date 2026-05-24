@@ -45,6 +45,38 @@ export function renderTemplate(value, context) {
 }
 
 /**
+ * Builds the template context for rendering one process's command, cwd, and env. It is the
+ * single source of truth for the render context so callers stay in sync — the daemon uses it at
+ * deploy time, and `doctor` uses it (with representative ports) to pre-flight a release.
+ * @param {object} args - Context inputs.
+ * @param {string} args.application - Application name.
+ * @param {Record<string, number>} args.ports - Allocated (or representative) ports by process id.
+ * @param {string} args.processId - The process this context renders.
+ * @param {{host: string, port: number, upstreamHost: string}} args.proxy - Proxy address.
+ * @param {string} args.releaseId - Release id.
+ * @param {string} args.releasePath - Release directory.
+ * @param {number} args.replicaCount - Total replicas configured for this process.
+ * @param {number} args.replicaIndex - This replica's index.
+ * @param {string} args.revision - Release revision.
+ * @returns {TemplateContext} The render context.
+ */
+export function processTemplateContext({application, ports, processId, proxy, releaseId, releasePath, replicaCount, replicaIndex, revision}) {
+  return {
+    application,
+    env: {...process.env},
+    port: ports[processId],
+    ports,
+    processId,
+    proxy: {host: proxy.host, port: proxy.port, upstreamHost: proxy.upstreamHost},
+    releaseId,
+    releasePath,
+    replicaCount,
+    replicaIndex,
+    revision
+  }
+}
+
+/**
  * Renders all string values in a plain JSON-like object.
  * @param {JsonValue} value - Value to render.
  * @param {TemplateContext} context - Template context.

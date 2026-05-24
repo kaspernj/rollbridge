@@ -10,7 +10,7 @@ import path from "node:path"
 import test from "node:test"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
-import {runEnvironmentChecks} from "../src/doctor.js"
+import {runEnvironmentChecks, runReleaseChecks} from "../src/doctor.js"
 import {writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
 
@@ -210,6 +210,91 @@ test("runEnvironmentChecks fails when a Rollbridge daemon already holds the sock
 })
 
 /**
+ * @param {object} args - Options.
+ * @param {string} args.root - Temp root directory (holds the control socket).
+ * @param {import("../src/json.js").JsonValue[]} args.processes - Process definitions to validate.
+ * @returns {import("../src/config.js").RollbridgeConfig} Normalized config.
+ */
+function releaseConfig({processes, root}) {
+  return normalizeConfig({
+    application: "doctor-release-test",
+    control: {path: path.join(root, "rollbridge.sock")},
+    processes,
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+}
+
+test("runReleaseChecks passes for an existing release with resolvable templates", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const releasePath = path.join(root, "release")
+
+  await fs.mkdir(path.join(releasePath, "backend"), {recursive: true})
+
+  try {
+    const config = releaseConfig({processes: [{command: "run web --port {{port}} --release {{releaseId}}", cwd: "{{releasePath}}/backend", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
+    const checks = await runReleaseChecks(config, {releasePath})
+
+    assert.equal(checkNamed(checks, "release path").ok, true)
+    assert.equal(checkNamed(checks, "process templates").ok, true)
+    assert.equal(checkNamed(checks, "process working directories").ok, true)
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("runReleaseChecks flags a command that references an undefined template variable", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const releasePath = path.join(root, "release")
+
+  await fs.mkdir(releasePath, {recursive: true})
+
+  try {
+    const config = releaseConfig({processes: [{command: "run web --secret {{missingVar}}", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
+    const templates = checkNamed(await runReleaseChecks(config, {releasePath}), "process templates")
+
+    assert.equal(templates.ok, false)
+    assert.match(templates.detail, /web:.*missingVar/)
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("runReleaseChecks reports a missing process working directory", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const releasePath = path.join(root, "release")
+
+  // The release directory exists, but the process's rendered cwd subdirectory does not.
+  await fs.mkdir(releasePath, {recursive: true})
+
+  try {
+    const config = releaseConfig({processes: [{command: "run web", cwd: "{{releasePath}}/backend", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
+    const checks = await runReleaseChecks(config, {releasePath})
+
+    assert.equal(checkNamed(checks, "release path").ok, true)
+
+    const directories = checkNamed(checks, "process working directories")
+
+    assert.equal(directories.ok, false)
+    assert.match(directories.detail, /web .*backend/)
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("runReleaseChecks reports a missing release path", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+
+  try {
+    const config = releaseConfig({processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
+    const checks = await runReleaseChecks(config, {releasePath: path.join(root, "does-not-exist")})
+
+    assert.equal(checkNamed(checks, "release path").ok, false)
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+/**
  * Runs the CLI while capturing console output.
  * @param {string[]} argv - Process argv.
  * @returns {Promise<string>} Captured stdout and stderr lines.
@@ -302,5 +387,44 @@ test("doctor --json emits structured checks", async () => {
     process.exitCode = 0
     await fs.rm(okRoot, {force: true, recursive: true})
     await fs.rm(badRoot, {force: true, recursive: true})
+  }
+})
+
+test("doctor --release-path adds release checks, passing or failing on the working directory", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const releasePath = path.join(root, "release")
+
+  await fs.mkdir(path.join(releasePath, "backend"), {recursive: true})
+
+  const rawConfig = {
+    application: "doctor-release-cli",
+    control: {path: path.join(root, "rollbridge.sock")},
+    processes: [{command: "run web --port {{port}}", cwd: "{{releasePath}}/backend", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: await freePort()}
+  }
+
+  await fs.writeFile(path.join(root, "rollbridge.js"), `module.exports = ${JSON.stringify(rawConfig)}\n`)
+
+  try {
+    const passing = await captureCli(["node", "rollbridge", "doctor", "-c", path.join(root, "rollbridge.js"), "--release-path", releasePath])
+
+    assert.match(passing, /✓ release path:/)
+    assert.match(passing, /✓ process templates:/)
+    assert.match(passing, /✓ process working directories:/)
+    assert.match(passing, /All checks passed\./)
+    assert.notEqual(process.exitCode, 1)
+
+    // A release without the rendered backend directory fails the working-directories check.
+    const emptyRelease = path.join(root, "empty-release")
+
+    await fs.mkdir(emptyRelease, {recursive: true})
+
+    const failing = await captureCli(["node", "rollbridge", "doctor", "-c", path.join(root, "rollbridge.js"), "--release-path", emptyRelease])
+
+    assert.match(failing, /✗ process working directories:/)
+    assert.equal(process.exitCode, 1)
+  } finally {
+    process.exitCode = 0
+    await fs.rm(root, {force: true, recursive: true})
   }
 })
