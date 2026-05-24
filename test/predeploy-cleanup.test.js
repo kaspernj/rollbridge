@@ -31,7 +31,7 @@ function buildConfig(dir, marker) {
 
 test("predeploy cleanup stops configured legacy process when no daemon is active", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-predeploy-cleanup-"))
-  const marker = `legacy-marker-${process.pid}-${Date.now()}`
+  const marker = `rollbridge-app-legacy-marker-${process.pid}-${Date.now()}`
   const legacy = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", marker], {stdio: "ignore"})
 
   await once(legacy, "spawn")

@@ -223,7 +223,8 @@ async function stopLegacyProcesses({config, killProcess, runCommand}) {
  */
 function legacyProcesses(config) {
   const rows = processRows()
-  const legacyPids = new Set(rows.filter((row) => legacySeedProcess(row, config)).map((row) => row.pid))
+  const protectedPids = protectedProcessIds(rows)
+  const legacyPids = new Set(rows.filter((row) => legacySeedProcess(row, config, protectedPids)).map((row) => row.pid))
   let changed = true
 
   while (changed) {
@@ -243,11 +244,12 @@ function legacyProcesses(config) {
 /**
  * @param {ProcessRow} row - Process row.
  * @param {import("./config.js").RollbridgeConfig} config - Rollbridge config.
+ * @param {Set<number>} protectedPids - Current cleanup process and ancestors.
  * @returns {boolean} True when the row identifies a configured legacy process.
  */
-function legacySeedProcess(row, config) {
+function legacySeedProcess(row, config, protectedPids) {
   const takeoverConfig = config.legacyTakeover
-  if (takeoverConfig === undefined || row.args.includes("rollbridge")) return false
+  if (takeoverConfig === undefined || protectedPids.has(row.pid)) return false
 
   if (takeoverConfig.screens.some((screenName) => row.args.includes(`SCREEN -dmS ${screenName}`))) {
     return true
@@ -256,6 +258,23 @@ function legacySeedProcess(row, config) {
   return takeoverConfig.processes.some((processConfig) => (
     processConfig.includes.every((matcher) => row.args.includes(matcher))
   ))
+}
+
+/**
+ * @param {ProcessRow[]} rows - Current process table rows.
+ * @returns {Set<number>} Pids that belong to the running cleanup command.
+ */
+function protectedProcessIds(rows) {
+  const byPid = new Map(rows.map((row) => [row.pid, row]))
+  const protectedPids = new Set([process.pid])
+  let parentPid = process.ppid
+
+  while (parentPid > 0 && !protectedPids.has(parentPid)) {
+    protectedPids.add(parentPid)
+    parentPid = byPid.get(parentPid)?.parentPid || 0
+  }
+
+  return protectedPids
 }
 
 /** @returns {ProcessRow[]} Current process table rows. */
@@ -271,7 +290,6 @@ function processRows() {
 
     const pid = Number(match[1])
     const parentPid = Number(match[2])
-    if (pid === process.pid || pid === process.ppid) return []
 
     return [{args: match[3], parentPid, pid}]
   })
