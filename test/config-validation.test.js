@@ -158,6 +158,36 @@ test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values",
   assert.ok(validateLifecycle({drainCommand: "drain"}).issues
     .some((issue) => issue.message === "processes[0].lifecycle.drainCommand requires a positive processes[0].lifecycle.drainTimeoutMs"))
   assert.deepEqual(validateLifecycle({drainCommand: "drain", drainTimeoutMs: 1000}).issues, [])
+
+  // A stopCommand replaces stopSignal, so a stopCommand alongside the default SIGTERM is fine.
+  assert.deepEqual(validateLifecycle({stopCommand: "kill -TERM $ROLLBRIDGE_PID"}).issues, [])
+})
+
+test("validateConfig rejects a custom stopSignal alongside a stopCommand that would ignore it", () => {
+  /**
+   * @param {Record<string, import("../src/json.js").JsonValue>} overrides - Extra fields merged onto the worker process.
+   * @returns {{config: import("../src/config.js").RollbridgeConfig, issues: import("../src/config.js").ConfigIssue[]}} Validation result.
+   */
+  const validateWorker = (overrides) => validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}, {command: "run worker", id: "worker", policy: "companion", ...overrides}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  // A custom stopSignal with a stopCommand is contradictory: stopCommand runs instead of the signal.
+  assert.ok(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}, stopSignal: "SIGINT"}).issues
+    .some((issue) => /sets both lifecycle.stopCommand and a custom stopSignal/.test(issue.message)),
+  "a custom stopSignal next to a stopCommand must be rejected")
+
+  // stopSignal alone (no stopCommand) is fine — the signal is what stops the worker.
+  assert.deepEqual(validateWorker({stopSignal: "SIGINT"}).issues, [])
+
+  // stopCommand alone (default SIGTERM) is fine — nothing custom is silently dropped.
+  assert.deepEqual(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}}).issues, [])
+
+  // An explicit default stopSignal next to a stopCommand is not flagged (SIGTERM is the default).
+  assert.deepEqual(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}, stopSignal: "SIGTERM"}).issues, [])
 })
 
 test("validateConfig defaults replicas, accepts companion replicas, and rejects bad placements", () => {
