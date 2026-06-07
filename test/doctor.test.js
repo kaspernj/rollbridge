@@ -208,6 +208,29 @@ test("runEnvironmentChecks passes when the running Rollbridge daemon holds the s
   }
 })
 
+test("runEnvironmentChecks fails when the running daemon does not own the configured proxy port", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-doctor-"))
+  const config = buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort()})
+  const changedConfigPort = await freePort()
+  const changedConfig = buildConfig({controlPath: config.control.path, proxyPort: changedConfigPort})
+  const server = net.createServer()
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+
+  await daemon.start()
+  await new Promise((resolve) => server.listen(changedConfigPort, "127.0.0.1", () => resolve(undefined)))
+
+  try {
+    const checks = await runEnvironmentChecks(changedConfig)
+
+    assert.equal(checkNamed(checks, "control socket").ok, true)
+    assert.equal(checkNamed(checks, "proxy port").ok, false)
+  } finally {
+    await new Promise((resolve) => server.close(() => resolve(undefined)))
+    await daemon.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 /**
  * @param {object} args - Options.
  * @param {string} args.root - Temp root directory (holds the control socket).

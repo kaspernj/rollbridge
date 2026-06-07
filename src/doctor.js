@@ -79,7 +79,7 @@ async function orphanCheck(statePath, daemonRunning) {
 
 /**
  * @param {string} socketPath - Control socket path.
- * @returns {Promise<{alive: boolean, application?: string} | {error: string}>} Probe result, or the probe error.
+ * @returns {Promise<import("./daemon.js").ControlSocketInspection | {error: string}>} Probe result, or the probe error.
  */
 async function inspectControlSocketSafely(socketPath) {
   try {
@@ -91,7 +91,7 @@ async function inspectControlSocketSafely(socketPath) {
 
 /**
  * @param {import("./config.js").RollbridgeConfig} config - Normalized config.
- * @param {{alive: boolean, application?: string} | {error: string}} inspection - Control socket probe result.
+ * @param {import("./daemon.js").ControlSocketInspection | {error: string}} inspection - Control socket probe result.
  * @returns {DoctorCheck} Control socket reachability check.
  */
 function controlSocketCheck(config, inspection) {
@@ -135,7 +135,7 @@ async function controlSocketDirectoryCheck(config) {
 
 /**
  * @param {import("./config.js").RollbridgeConfig} config - Normalized config.
- * @param {{alive: boolean, application?: string} | {error: string}} inspection - Control socket probe result.
+ * @param {import("./daemon.js").ControlSocketInspection | {error: string}} inspection - Control socket probe result.
  * @returns {Promise<DoctorCheck>} Whether the proxy port can be bound or is owned by the running daemon.
  */
 async function proxyPortCheck(config, inspection) {
@@ -146,7 +146,7 @@ async function proxyPortCheck(config, inspection) {
     return {detail: `${address} is available`, name: "proxy port", ok: true}
   }
 
-  if (!("error" in inspection) && inspection.application === config.application) {
+  if (!("error" in inspection) && inspection.application === config.application && inspection.proxy?.host === config.proxy.host && inspection.proxy.port === config.proxy.port) {
     return {detail: `${address} is already held by the running Rollbridge daemon`, name: "proxy port", ok: true}
   }
 
