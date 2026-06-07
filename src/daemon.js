@@ -821,7 +821,7 @@ export function releasesToPrune(releases, policy, now) {
 }
 
 /**
- * @typedef {{alive: boolean, application?: string, activeReleaseId?: string | null}} ControlSocketInspection
+ * @typedef {{alive: boolean, application?: string, activeReleaseId?: string | null, proxy?: {host: string, port: number}}} ControlSocketInspection
  */
 
 /**
@@ -874,7 +874,7 @@ export async function inspectControlSocket(socketPath, timeoutMs = 1000) {
 
       const status = parseControlStatus(buffer.slice(0, newlineIndex))
 
-      finish(status ? {activeReleaseId: status.activeReleaseId, alive: true, application: status.application} : {alive: true})
+      finish(status ? {activeReleaseId: status.activeReleaseId, alive: true, application: status.application, proxy: status.proxy} : {alive: true})
     })
     socket.once("error", (error) => {
       if (settled) return
@@ -896,7 +896,7 @@ export async function inspectControlSocket(socketPath, timeoutMs = 1000) {
 /**
  * Parses a control status response line into a Rollbridge identity, if it is one.
  * @param {string} line - JSON response line.
- * @returns {{application: string, activeReleaseId: string | null} | undefined} Identity, or undefined when unrecognized.
+ * @returns {{application: string, activeReleaseId: string | null, proxy: {host: string, port: number} | undefined} | undefined} Identity, or undefined when unrecognized.
  */
 function parseControlStatus(line) {
   /** @type {JsonValue} */
@@ -911,5 +911,7 @@ function parseControlStatus(line) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
   if (typeof parsed.application !== "string") return undefined
 
-  return {activeReleaseId: typeof parsed.activeReleaseId === "string" ? parsed.activeReleaseId : null, application: parsed.application}
+  const proxy = "proxy" in parsed && parsed.proxy && typeof parsed.proxy === "object" && !Array.isArray(parsed.proxy) && typeof parsed.proxy.host === "string" && typeof parsed.proxy.port === "number" ? {host: parsed.proxy.host, port: parsed.proxy.port} : undefined
+
+  return {activeReleaseId: typeof parsed.activeReleaseId === "string" ? parsed.activeReleaseId : null, application: parsed.application, proxy}
 }

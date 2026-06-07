@@ -26,7 +26,7 @@ export async function runEnvironmentChecks(config) {
 
   checks.push(controlSocketCheck(config, socketInspection))
   checks.push(await controlSocketDirectoryCheck(config))
-  checks.push(await proxyPortCheck(config))
+  checks.push(await proxyPortCheck(config, socketInspection))
 
   if (config.statePath !== undefined) {
     // A live daemon persists its own (live) pids into the state file, so they are not orphans.
@@ -79,7 +79,7 @@ async function orphanCheck(statePath, daemonRunning) {
 
 /**
  * @param {string} socketPath - Control socket path.
- * @returns {Promise<{alive: boolean, application?: string} | {error: string}>} Probe result, or the probe error.
+ * @returns {Promise<import("./daemon.js").ControlSocketInspection | {error: string}>} Probe result, or the probe error.
  */
 async function inspectControlSocketSafely(socketPath) {
   try {
@@ -91,7 +91,7 @@ async function inspectControlSocketSafely(socketPath) {
 
 /**
  * @param {import("./config.js").RollbridgeConfig} config - Normalized config.
- * @param {{alive: boolean, application?: string} | {error: string}} inspection - Control socket probe result.
+ * @param {import("./daemon.js").ControlSocketInspection | {error: string}} inspection - Control socket probe result.
  * @returns {DoctorCheck} Control socket reachability check.
  */
 function controlSocketCheck(config, inspection) {
@@ -107,6 +107,10 @@ function controlSocketCheck(config, inspection) {
 
   if (inspection.application === undefined) {
     return {detail: `another process is already listening on ${socketPath}; the daemon would fail to bind it`, name: "control socket", ok: false}
+  }
+
+  if (inspection.application === config.application) {
+    return {detail: `Rollbridge daemon for "${inspection.application}" is running on ${socketPath}`, name: "control socket", ok: true}
   }
 
   return {detail: `a Rollbridge daemon for "${inspection.application}" is already running on ${socketPath}; stop it before starting another`, name: "control socket", ok: false}
@@ -131,14 +135,19 @@ async function controlSocketDirectoryCheck(config) {
 
 /**
  * @param {import("./config.js").RollbridgeConfig} config - Normalized config.
- * @returns {Promise<DoctorCheck>} Whether the proxy port can be bound.
+ * @param {import("./daemon.js").ControlSocketInspection | {error: string}} inspection - Control socket probe result.
+ * @returns {Promise<DoctorCheck>} Whether the proxy port can be bound or is owned by the running daemon.
  */
-async function proxyPortCheck(config) {
+async function proxyPortCheck(config, inspection) {
   const address = `${config.proxy.host}:${config.proxy.port}`
   const bind = await canBindPort(config.proxy.host, config.proxy.port)
 
   if (bind.ok) {
     return {detail: `${address} is available`, name: "proxy port", ok: true}
+  }
+
+  if (!("error" in inspection) && inspection.application === config.application && inspection.proxy?.host === config.proxy.host && inspection.proxy.port === config.proxy.port) {
+    return {detail: `${address} is already held by the running Rollbridge daemon`, name: "proxy port", ok: true}
   }
 
   return {detail: `${address} is unavailable (${bind.code})`, name: "proxy port", ok: false}
