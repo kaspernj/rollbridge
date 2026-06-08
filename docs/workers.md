@@ -47,7 +47,8 @@ the worker's chance to finish its current job and exit cleanly.
   finish the current job and exit on `SIGTERM` (the default); some use `SIGINT`
   or `SIGQUIT`. Use the one your worker treats as "drain and exit".
 - Set `gracefulStopMs` to at least your longest job's duration, so a job in
-  progress is not cut off by the `SIGKILL` fallback.
+  progress is not cut off by the `SIGKILL` fallback. Use `"indefinite"` only for
+  workers that are safe to leave draining until they exit on their own.
 
 ```js
 {
@@ -56,7 +57,7 @@ the worker's chance to finish its current job and exit cleanly.
   command: "npx velocious background-jobs-worker",
   replicas: 4,
   stopSignal: "SIGTERM",
-  gracefulStopMs: 60000
+  gracefulStopMs: "indefinite"
 }
 ```
 
@@ -73,8 +74,9 @@ the worker's chance to finish its current job and exit cleanly.
 
 Because old workers are retired on the release's **connection** drain (not on
 their own job queue draining), a job still running when the release is retired
-gets only the `gracefulStopMs` window to finish. Keep jobs **idempotent and
-safe to retry** so a job interrupted at the `SIGKILL` fallback can run again.
+gets only the `gracefulStopMs` window to finish, unless `gracefulStopMs` is
+`"indefinite"`. Keep jobs **idempotent and safe to retry** so a job interrupted
+at a finite `SIGKILL` fallback can run again.
 
 ## Command-based lifecycle hooks
 
@@ -107,7 +109,7 @@ in parallel with the connection drain. The new release's workers handle new work
 while the old workers finish their in-flight jobs:
 
 ```js
-{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, gracefulStopMs: 60000}
+{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, gracefulStopMs: "indefinite"}
 ```
 
 See [`docs/config.md`](config.md) for `stopSignal`, `replicas`, and

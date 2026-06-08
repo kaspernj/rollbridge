@@ -154,11 +154,12 @@ export default class ReleaseGroup extends EventEmitter {
    * @returns {import("./config.js").ProcessConfig[]} Ordered process configs.
    */
   releaseProcessStartOrder() {
-    const releaseProcesses = this.config.processes.filter((processConfig) => !["singleton", "service"].includes(processConfig.policy))
+    const releaseProcesses = this.config.processes.filter((processConfig) => processConfig.policy !== "singleton" && (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff"))
+    const serviceProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "service")
     const companionProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "companion")
     const proxiedProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "proxied")
 
-    return [...companionProcesses, ...proxiedProcesses]
+    return [...serviceProcesses, ...companionProcesses, ...proxiedProcesses]
   }
 
   /** @returns {void} Marks this release active. */
@@ -175,7 +176,7 @@ export default class ReleaseGroup extends EventEmitter {
 
     for (const processConfig of this.config.processes) {
       if (!processConfig.port) continue
-      if (processConfig.policy === "service" && this.servicePorts[processConfig.id] !== undefined) {
+      if (processConfig.policy === "service" && processConfig.deployStrategy !== "handoff" && this.servicePorts[processConfig.id] !== undefined) {
         this.ports[processConfig.id] = this.servicePorts[processConfig.id]
         usedPorts.add(this.servicePorts[processConfig.id])
         continue

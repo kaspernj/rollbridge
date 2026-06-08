@@ -419,7 +419,7 @@ export default class RollbridgeDaemon {
     await release.allocatePorts()
 
     for (const processConfig of this.config.processes) {
-      if (processConfig.policy !== "service") continue
+      if (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff") continue
       if (this.services.has(processConfig.id)) continue
 
       const service = release.buildProcess(processConfig, {shouldRestart: () => !this.stopping})

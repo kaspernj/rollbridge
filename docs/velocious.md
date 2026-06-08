@@ -14,7 +14,7 @@ A production version of this config lives at
 | Velocious process | Policy | Why |
 | --- | --- | --- |
 | `beacon` | `service` | A shared broker the other processes connect to. It should survive deploys and keep a **stable port**, so workers and the web process always reach the same Beacon. |
-| `background-jobs-main` | `service` (or `singleton`) | The job coordinator. Run it as a `service` when it should outlive releases on a stable port; run it as a `singleton` when it must run the latest release's code after every deploy (see [Choosing the jobs-main policy](#choosing-the-jobs-main-policy)). |
+| `background-jobs-main` | `service` with `deployStrategy: "handoff"` | The job coordinator. Run it as a handoff service so each release's workers and web process use a same-release coordinator while old releases drain (see [Choosing the jobs-main policy](#choosing-the-jobs-main-policy)). |
 | `background-jobs-worker` | `companion` | Release-scoped: one set of workers per active release, started before the web process and running that release's code. |
 | `web` | `proxied` | Receives external HTTP/WebSocket traffic, is health-checked before traffic switches, and is drained on the next deploy. Exactly one process is `proxied`. |
 
@@ -49,10 +49,11 @@ export default {
       port: 7330
     },
 
-    // Job coordinator — waits for Beacon, stable port other jobs processes use.
+    // Job coordinator — one release-scoped service instance per deploy.
     {
       id: "background-jobs-main",
       policy: "service",
+      deployStrategy: "handoff",
       cwd: "{{releasePath}}/backend",
       env: {
         NODE_ENV: "production",
@@ -60,7 +61,7 @@ export default {
         VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}"
       },
       command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- npx velocious background-jobs-main",
-      port: 7331
+      port: {from: 7331, to: 7399}
     },
 
     // Workers — one set per release; raise gracefulStopMs to let in-flight
@@ -75,7 +76,7 @@ export default {
         VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"
       },
       command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- wait-for-it 127.0.0.1:{{ports.background-jobs-main}} --strict -- npx velocious background-jobs-worker",
-      gracefulStopMs: 60000
+      gracefulStopMs: "indefinite"
     },
 
     // Web/API — the one proxied process.
@@ -98,11 +99,13 @@ export default {
 
 ## Wiring processes together
 
-Beacon and `background-jobs-main` get **fixed** ports (`7330`, `7331`) because
-they are `service`s — a stable port lets every release's workers and web process
-find them. The proxied `web` process gets a **range** (`{from: 14500, to:
-14599}`); Rollbridge allocates a free port per release so the old and new web
-releases can run side by side during the drain.
+Beacon gets a **fixed** port (`7330`) because it is a persistent `service` — a
+stable port lets every release's processes find the shared broker.
+`background-jobs-main` gets a **range** (`{from: 7331, to: 7399}`) because it is a
+handoff service: Rollbridge allocates a new port per release so old workers keep
+talking to the old coordinator while new workers and web use the new one. The
+proxied `web` process also gets a **range** (`{from: 14500, to: 14599}`) so old
+and new web releases can run side by side during the drain.
 
 Cross-reference ports with `{{ports.<id>}}` and pass them to Velocious through
 `env`. Rollbridge also injects `ROLLBRIDGE_<ID>_PORT` for every process (e.g.
@@ -115,8 +118,8 @@ environment instead of templating if you prefer — see
 Only the `proxied` process is health-checked, so dependent processes must wait
 for their dependencies themselves. Two mechanisms combine:
 
-1. **Policy ordering.** On each deploy Rollbridge starts `service`s first, then
-   the release's `companion`s, then the `proxied` process (see
+1. **Policy ordering.** On each deploy Rollbridge starts handoff `service`s
+   first, then the release's `companion`s, then the `proxied` process (see
    [README → Deploy ordering](../README.md#deploy-ordering)).
 2. **Readiness gating.** `wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- …`
    blocks the command until Beacon's port accepts connections, so
@@ -159,8 +162,9 @@ The worker is a `companion`, so each release runs its own workers:
   is drained and retired — the worker's `stopSignal`, then `SIGKILL` after
   `gracefulStopMs`.
 - Set `stopSignal` to the signal your worker drains on and `gracefulStopMs` to at
-  least your longest in-flight job, so a job gets time to finish before the
-  forced kill. Set `replicas` to run a pool of workers.
+  least your longest in-flight job. Use `gracefulStopMs: "indefinite"` when the
+  worker can safely drain until it exits on its own. Set `replicas` to run a pool
+  of workers.
 
 See [`docs/workers.md`](workers.md) for the full safe background-job deployment
 pattern (companion + `replicas` + `stopSignal`/`lifecycle` hooks +
@@ -185,7 +189,7 @@ jobs across a deploy:
   },
   command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- wait-for-it 127.0.0.1:{{ports.background-jobs-main}} --strict -- npx velocious background-jobs-worker",
   replicas: 4,
-  gracefulStopMs: 60000
+  gracefulStopMs: "indefinite"
 }
 ```
 
@@ -193,9 +197,8 @@ jobs across a deploy:
   each with `ROLLBRIDGE_REPLICA_INDEX`/`ROLLBRIDGE_REPLICA_COUNT` if you shard work.
 - On deploy the new release's workers start before traffic switches; the old
   release's workers receive `SIGTERM` (the default `stopSignal`) when the old
-  release is retired, then `SIGKILL` after `gracefulStopMs` — so size
-  `gracefulStopMs` to your longest job. Both releases' workers briefly consume the
-  shared queue, so keep job code backwards-compatible and jobs idempotent.
+  release is retired, then wait to exit. With `gracefulStopMs: "indefinite"`,
+  Rollbridge does not send a `SIGKILL` fallback.
 
 If your worker quiesces on a command or a non-default signal, add a `lifecycle`
 block — Rollbridge runs `quietCommand`, drains for up to `drainTimeoutMs`, then
@@ -208,27 +211,28 @@ lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}
 
 ### Choosing the jobs-main policy
 
-`background-jobs-main` is duplicate-unsafe (you never want two coordinators), so
-it is either a `service` or a `singleton` — never a `companion`:
+`background-jobs-main` coordinates workers, so choose its lifecycle deliberately:
 
-- **`service`** — keeps running across deploys on its stable port. Workers from
-  every release talk to the same coordinator, so there's no coordination gap on
-  deploy. The trade-off: a `service` keeps running the **release it was started
-  from** and only adopts the latest release's template if it crashes and
-  restarts (or the daemon restarts). If `background-jobs-main` itself needs the
-  newest code immediately after every deploy, this is the wrong policy.
-- **`singleton`** — Rollbridge stops the old instance and then starts the new
-  one on each deploy, so it always runs the latest release's code and two copies
-  never overlap. The trade-off: a brief coordination gap while it restarts.
+- **`service` with `deployStrategy: "handoff"`** — starts one coordinator per
+  release on a port from a range. New workers and web get the new release's port;
+  old workers keep the old release's port while they drain. This is the safest
+  default when the coordinator should run the same code version as its workers.
+- **`service` with the default `deployStrategy: "persistent"`** — keeps one
+  daemon-wide coordinator on a stable port. Workers from every release talk to the
+  same coordinator, but it keeps running the release it was started from and only
+  adopts the latest template if it restarts later.
+- **`singleton`** — stops the old instance and then starts the new one on each
+  deploy, so it always runs the latest release's code and two copies never
+  overlap. The trade-off: a brief coordination gap while it restarts.
 
 Beacon is a broker rather than code that changes per release, so `service` is
 almost always right for it.
 
 ## Verifying
 
-After a deploy, `rollbridge status` should show `beacon` and
-`background-jobs-main` as long-lived `service`s with unchanged ports across
-deploys, one `background-jobs-worker` for the active release, and the `web`
+After a deploy, `rollbridge status` should show `beacon` as a long-lived service
+with an unchanged port, `background-jobs-main` as the active release's handoff
+service, one `background-jobs-worker` for the active release, and the `web`
 process `proxied` with its connection counts. Use
 [`rollbridge logs --process <id>`](cli.md) to read recent output from any
 process, and [`docs/troubleshooting.md`](troubleshooting.md) for health-check,
