@@ -127,6 +127,7 @@ legacyTakeover: {
 | --- | --- | --- | --- |
 | `id` | string | **required** | Unique identifier. Appears in `status`, logs, and `ROLLBRIDGE_*` env vars. |
 | `policy` | `"proxied"` \| `"companion"` \| `"singleton"` \| `"service"` | `"companion"` | Lifecycle policy (see [README → Process Policies](../README.md#process-policies)). Exactly one process must be `proxied`. |
+| `deployStrategy` | `"persistent"` \| `"handoff"` | `"persistent"` | Service deploy behavior. Only valid on `policy: "service"`; see below. |
 | `command` | string | **required** | Shell command to run (templated). |
 | `cwd` | string | the release path | Working directory (templated). |
 | `env` | object of string → string | `{}` | Extra environment variables (values templated). Merged over the injected `ROLLBRIDGE_*` vars. |
@@ -135,7 +136,7 @@ legacyTakeover: {
 | `stopSignal` | signal name (e.g. `"SIGTERM"`, `"SIGINT"`, `"SIGQUIT"`) | `"SIGTERM"` | Signal sent to gracefully stop the process; after `gracefulStopMs` it is `SIGKILL`ed. Use a worker's quit signal so it finishes in-flight work before exiting. |
 | `nonBlockingDrain` | boolean | `false` | When a release is retired, drain this process **immediately** (in parallel with the proxied connection drain) instead of after it. Companion processes only — typically background workers (see below). |
 | `lifecycle` | object | no hooks | Command hooks run when gracefully stopping the process (see below). |
-| `gracefulStopMs` | number | `proxy.forceStopTimeoutMs` | Graceful-stop window: time between `stopSignal`/`stopCommand` and `SIGKILL` for this process. |
+| `gracefulStopMs` | number or `"indefinite"` | `proxy.forceStopTimeoutMs` | Graceful-stop window: time between `stopSignal`/`stopCommand` and `SIGKILL` for this process. Use `"indefinite"` to wait for process exit without sending `SIGKILL`. |
 | `restartDelayMs` | number | `1000` | Base delay before restarting this process after a crash (the backoff base; see `restart`). |
 | `restart` | object | unlimited restarts, constant delay | Automatic-restart policy: cap, rolling window, and backoff (see below). |
 | `memory` | object | unset (no monitoring) | Memory supervision: restart the process when its RSS exceeds a limit (see below). |
@@ -161,6 +162,32 @@ restart every replica, or `worker#0` for one). Replicas get `replicaIndex`/
 environment, so each instance can pick a distinct shard, queue, or lock. A single
 process (`replicas: 1`) keeps its plain id and is replica `0` of `1`.
 
+### `processes[].deployStrategy`
+
+`deployStrategy` controls how `policy: "service"` processes behave across deploys:
+
+| Value | Behavior |
+| --- | --- |
+| `"persistent"` | The default. Rollbridge runs one daemon-wide service instance on a stable port. Deploys update the stored template for future restarts but do not replace a healthy service. |
+| `"handoff"` | Rollbridge starts a new release-scoped service instance before the new release's companions and proxied process start. The old release keeps its old service port while it drains, then that old service stops with the old release. |
+
+Use `"handoff"` when release-scoped processes must talk to a same-release service
+while old and new releases overlap. A handoff service must define a **multi-port
+range** so old and new instances can run at the same time:
+
+```js
+{
+  id: "background-jobs-main",
+  policy: "service",
+  deployStrategy: "handoff",
+  command: "npx velocious background-jobs-main",
+  port: {from: 7331, to: 7399}
+}
+```
+
+Reference it from same-release processes with `{{ports.background-jobs-main}}`.
+During a deploy, old workers keep the old port and new workers get the new port.
+
 ### `processes[].lifecycle`
 
 Command hooks run when Rollbridge **gracefully stops** the process — during a
@@ -181,12 +208,13 @@ ignored. Use one or the other.
 
 The full stop sequence is: run `quietCommand` → drain (`drainCommand`, or wait
 `drainTimeoutMs` for the process to exit) → if still running, run `stopCommand`
-or send `stopSignal` → `SIGKILL` after `gracefulStopMs`. Each hook command is run
-through a shell with the process's environment plus `ROLLBRIDGE_PID` (the
-process-group leader's pid, so a hook can `kill -TSTP -$ROLLBRIDGE_PID`). Every
-hook is **bounded by a timeout** (its drain timeout, or `gracefulStopMs`) and its
-failure is non-fatal — the sequence proceeds and `SIGKILL` is always the final
-fallback, so a slow or broken hook can't wedge a stop.
+or send `stopSignal` → `SIGKILL` after `gracefulStopMs` unless
+`gracefulStopMs: "indefinite"` is set. Each hook command is run through a shell
+with the process's environment plus `ROLLBRIDGE_PID` (the process-group leader's
+pid, so a hook can `kill -TSTP -$ROLLBRIDGE_PID`). Every hook is **bounded by a
+timeout** (its drain timeout, `gracefulStopMs`, or 30 seconds when the graceful
+stop window is indefinite) and its failure is non-fatal — the sequence proceeds
+to the stop signal/command so a slow or broken hook can't wedge a stop.
 
 ```js
 {id: "worker", policy: "companion", command: "…", lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}}

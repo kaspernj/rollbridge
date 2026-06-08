@@ -243,6 +243,80 @@ test("service processes start before releases and restart with the latest deploy
   }
 })
 
+test("handoff services start per release and drain with their release", async () => {
+  const fixture = await createFixture({handoffService: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+  /** @type {WebSocket | undefined} */
+  let socket
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    socket = await openWebSocket(daemon)
+    const v1 = statusRelease(daemon, "v1")
+    const v1Service = v1.processes.find((processStatus) => processStatus.id === "beacon")
+
+    assert.ok(v1Service?.pid, "v1 service should be running")
+    assert.equal(v1.ports.beacon > 0, true)
+
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    const v2 = statusRelease(daemon, "v2")
+    const v2Service = v2.processes.find((processStatus) => processStatus.id === "beacon")
+
+    assert.ok(v2Service?.pid, "v2 service should be running")
+    assert.notEqual(v2.ports.beacon, v1.ports.beacon)
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state, "running")
+
+    socket.close()
+    socket = undefined
+
+    await waitFor(() => statusRelease(daemon, "v1").state === "stopped")
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state, "stopped")
+
+    const events = await processEvents(fixture.serviceLogPath)
+
+    assert.ok(events.some((event) => event.event === "start" && event.releaseId === "v1"), "v1 service should start")
+    assert.ok(events.some((event) => event.event === "start" && event.releaseId === "v2"), "v2 service should start")
+    assert.ok(events.some((event) => event.event === "stop" && event.releaseId === "v1"), "v1 service should stop after drain")
+  } finally {
+    if (socket) socket.close()
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("handoff services stop after release-local dependents finish draining", async () => {
+  const fixture = await createFixture({handoffService: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerStopDelayMs: 200})
+  const daemon = await startDaemon(fixture.config)
+  /** @type {WebSocket | undefined} */
+  let socket
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    socket = await openWebSocket(daemon)
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    await waitFor(() => statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state === "stopped")
+
+    const drainingRelease = statusRelease(daemon, "v1")
+
+    assert.equal(drainingRelease.state, "draining")
+    assert.equal(drainingRelease.processes.find((processStatus) => processStatus.id === "beacon")?.state, "running")
+
+    socket.close()
+    socket = undefined
+    await waitFor(() => statusRelease(daemon, "v1").state === "stopped")
+
+    const events = await processEvents(fixture.serviceLogPath)
+    const v1ServiceStop = events.find((event) => event.event === "stop" && event.releaseId === "v1")
+
+    assert.ok(v1ServiceStop, "v1 handoff service should stop after release drain")
+  } finally {
+    if (socket) socket.close()
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("a replicated companion starts one instance per replica, and restart targets one or all", async () => {
   const fixture = await createFixture({companionReplicas: 3})
   const daemon = await startDaemon(fixture.config)
@@ -972,7 +1046,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{companionReplicas?: number, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number}} [options] - Fixture options.
+ * @param {{companionReplicas?: number, handoffService?: boolean, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number, workerStopDelayMs?: number}} [options] - Fixture options.
  * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string, statePath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -983,15 +1057,16 @@ async function createFixture(options = {}) {
   /** @type {Array<Record<string, import("../src/json.js").JsonValue>>} */
   const processes = []
 
-  if (options.includeService) {
+  if (options.includeService || options.handoffService) {
     processes.push({
       command: `${JSON.stringify(process.execPath)} ${JSON.stringify(serviceAppPath)} --release={{releaseId}}`,
+      ...(options.handoffService ? {deployStrategy: "handoff"} : {}),
       env: {
         ROLLBRIDGE_SERVICE_LOG: serviceLogPath
       },
       id: "beacon",
       policy: "service",
-      port: {from: 0, to: 0},
+      port: options.handoffService ? {from: 15000, to: 15099} : {from: 0, to: 0},
       restartDelayMs: 50
     })
   }
@@ -1015,7 +1090,7 @@ async function createFixture(options = {}) {
 
   if (options.nonBlockingDrainWorker) {
     processes.push({
-      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+      command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.on('SIGTERM', () => setTimeout(() => process.exit(0), ${options.workerStopDelayMs || 0})); setInterval(() => {}, 1000)`)}`,
       id: "worker",
       nonBlockingDrain: true,
       policy: "companion"

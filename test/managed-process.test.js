@@ -381,6 +381,39 @@ test("sends the configured stopSignal as the graceful stop signal", async () => 
   assert.equal(managed.status().state, "stopped")
 })
 
+test("indefinite stop waits for the process to exit without SIGKILL", async () => {
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.on('SIGTERM', () => setTimeout(() => process.exit(0), 150)); setInterval(() => {}, 1000)")}`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: "indefinite"
+  })
+  /** @type {string[]} */
+  const signals = []
+  const killProcessGroup = managed.killProcessGroup.bind(managed)
+
+  managed.killProcessGroup = (signal) => {
+    signals.push(signal)
+    killProcessGroup(signal)
+  }
+
+  try {
+    await managed.start()
+    await managed.stop()
+
+    assert.equal(managed.status().state, "stopped")
+    assert.deepEqual(signals, ["SIGTERM"])
+  } finally {
+    await managed.stop()
+  }
+})
+
 test("a memory restart respawns and is counted when the supervisor still wants the process", async () => {
   const managed = buildLongLived(() => true)
 

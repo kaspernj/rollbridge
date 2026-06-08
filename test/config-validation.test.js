@@ -204,6 +204,81 @@ test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values",
   assert.deepEqual(validateLifecycle({stopCommand: "kill -TERM $ROLLBRIDGE_PID"}).issues, [])
 })
 
+test("validateConfig accepts indefinite graceful stop windows", () => {
+  const {config, issues} = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}},
+      {command: "run worker", gracefulStopMs: "indefinite", id: "worker", policy: "companion"}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.deepEqual(issues, [])
+  assert.equal(config.processes[1].gracefulStopMs, "indefinite")
+})
+
+test("validateConfig accepts handoff services only with a multi-port service range", () => {
+  const valid = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}},
+      {command: "run service", deployStrategy: "handoff", id: "beacon", policy: "service", port: {from: 18100, to: 18199}}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.deepEqual(valid.issues, [])
+  assert.equal(valid.config.processes[1].deployStrategy, "handoff")
+
+  const defaulted = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.equal(defaulted.config.processes[0].deployStrategy, "persistent")
+
+  const invalidProcess = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}},
+      {command: "run worker", deployStrategy: "handoff", id: "worker", policy: "companion"}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.ok(invalidProcess.issues.some((issue) => issue.message === "Process \"worker\" can only set deployStrategy: \"handoff\" on a service process"), JSON.stringify(invalidProcess.issues))
+
+  const missingPort = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}},
+      {command: "run service", deployStrategy: "handoff", id: "beacon", policy: "service"}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.ok(missingPort.issues.some((issue) => issue.message === "Handoff service \"beacon\" must define a port range"), JSON.stringify(missingPort.issues))
+
+  const fixedPort = validateConfig({
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}},
+      {command: "run service", deployStrategy: "handoff", id: "beacon", policy: "service", port: 18100}
+    ],
+    proxy: {host: "127.0.0.1", port: 8182}
+  })
+
+  assert.ok(fixedPort.issues.some((issue) => issue.message === "Handoff service \"beacon\" must use a multi-port range"), JSON.stringify(fixedPort.issues))
+})
+
 test("validateConfig rejects a custom stopSignal alongside a stopCommand that would ignore it", () => {
   /**
    * @param {Record<string, import("../src/json.js").JsonValue>} overrides - Extra fields merged onto the worker process.

@@ -10,7 +10,8 @@ import {processGroupMembers} from "./process-memory.js"
  * @typedef {"deploy" | "crash" | "manual" | "memory"} ManagedProcessStartReason
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
- * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, lifecycle: import("./config.js").LifecycleConfig, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopSignal: string, stopTimeoutMs: number}} ManagedProcessDefinition
+ * @typedef {import("./config.js").StopTimeoutMs} StopTimeoutMs
+ * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, lifecycle: import("./config.js").LifecycleConfig, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopSignal: string, stopTimeoutMs: StopTimeoutMs}} ManagedProcessDefinition
  * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
@@ -29,7 +30,7 @@ export default class ManagedProcess extends EventEmitter {
    * @param {number} args.restartDelayMs - Restart delay.
    * @param {() => boolean} args.shouldRestart - Restart policy callback.
    * @param {string} [args.stopSignal] - Signal sent to gracefully stop the process (default "SIGTERM").
-   * @param {number} args.stopTimeoutMs - Stop timeout.
+   * @param {StopTimeoutMs} args.stopTimeoutMs - Stop timeout.
    */
   constructor({command, cwd, env, id, lifecycle = {drainTimeoutMs: 0}, logger, memory, outputLines, restart = {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0}, restartDelayMs, shouldRestart, stopSignal = "SIGTERM", stopTimeoutMs}) {
     super()
@@ -356,8 +357,10 @@ export default class ManagedProcess extends EventEmitter {
 
     const {drainCommand, drainTimeoutMs, quietCommand, stopCommand} = this.lifecycle
 
+    const hookTimeoutMs = this.hookTimeoutMs()
+
     // 1. Quiesce: tell the process to stop accepting new work.
-    if (quietCommand) await this.runHook(quietCommand, this.stopTimeoutMs, "quiet command")
+    if (quietCommand) await this.runHook(quietCommand, hookTimeoutMs, "quiet command")
 
     // 2. Drain: let in-flight work finish, bounded by drainTimeoutMs (0 skips the step). A
     //    drainCommand blocks until drained; otherwise wait for the process to exit on its own.
@@ -368,7 +371,7 @@ export default class ManagedProcess extends EventEmitter {
 
     // 3. Stop whatever is still running, then SIGKILL if it outlasts the graceful window.
     if (this.child) {
-      if (stopCommand) await this.runHook(stopCommand, this.stopTimeoutMs, "stop command")
+      if (stopCommand) await this.runHook(stopCommand, hookTimeoutMs, "stop command")
       else this.killProcessGroup(this.stopSignal)
 
       const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
@@ -381,6 +384,13 @@ export default class ManagedProcess extends EventEmitter {
     }
 
     this.state = "stopped"
+  }
+
+  /** @returns {number} Timeout used for lifecycle hooks. */
+  hookTimeoutMs() {
+    if (this.stopTimeoutMs === "indefinite") return 30000
+
+    return this.stopTimeoutMs
   }
 
   /**
@@ -465,11 +475,15 @@ export default class ManagedProcess extends EventEmitter {
   }
 
   /**
-   * @param {number} timeoutMs - Timeout.
+   * @param {StopTimeoutMs} timeoutMs - Timeout.
    * @returns {Promise<boolean>} True when the process exited before timeout.
    */
   async waitForExit(timeoutMs) {
     if (!this.exitPromise) return true
+    if (timeoutMs === "indefinite") {
+      await this.exitPromise
+      return true
+    }
 
     let timer = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined)
     const timeoutPromise = new Promise((resolve) => {

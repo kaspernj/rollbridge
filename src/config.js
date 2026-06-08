@@ -13,7 +13,9 @@ import {pathToFileURL} from "node:url"
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
  * @typedef {{drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, stopCommand?: string}} LifecycleConfig
- * @typedef {{cwd?: string, env: Record<string, string>, gracefulStopMs: number, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, nonBlockingDrain: boolean, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
+ * @typedef {number | "indefinite"} StopTimeoutMs
+ * @typedef {"persistent" | "handoff"} ServiceDeployStrategy
+ * @typedef {{cwd?: string, deployStrategy: ServiceDeployStrategy, env: Record<string, string>, gracefulStopMs: StopTimeoutMs, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, nonBlockingDrain: boolean, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
  * @typedef {{group?: number | string, mode?: number, owner?: number | string, path: string}} ControlConfig
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{includes: string[], name: string}} LegacyTakeoverProcessConfig
@@ -185,7 +187,7 @@ function normalizeProcess(value, index, proxy, issues) {
   if (!isPlainObject(value)) {
     issues.push({fix: `Define processes[${index}] as a mapping with id, policy, and command.`, message: `processes[${index}] must be an object`})
 
-    return {command: "", cwd: undefined, env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", lifecycle: {drainTimeoutMs: 0}, memory: undefined, nonBlockingDrain: false, outputLines: 50, policy: "companion", port: undefined, replicas: 1, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
+    return {command: "", cwd: undefined, deployStrategy: "persistent", env: {}, gracefulStopMs: proxy.forceStopTimeoutMs, health: undefined, id: "", lifecycle: {drainTimeoutMs: 0}, memory: undefined, nonBlockingDrain: false, outputLines: 50, policy: "companion", port: undefined, replicas: 1, restart: defaultRestartConfig(), restartDelayMs: 1000, stopSignal: "SIGTERM"}
   }
 
   const source = value
@@ -193,8 +195,9 @@ function normalizeProcess(value, index, proxy, issues) {
   return {
     command: normalizeString(source.command, `processes[${index}].command`, issues),
     cwd: source.cwd === undefined ? undefined : normalizeString(source.cwd, `processes[${index}].cwd`, issues),
+    deployStrategy: normalizeDeployStrategy(source.deployStrategy, `processes[${index}].deployStrategy`, issues),
     env: normalizeEnv(source.env, `processes[${index}].env`, issues),
-    gracefulStopMs: normalizeNumber(source.gracefulStopMs, `processes[${index}].gracefulStopMs`, issues, {default: proxy.forceStopTimeoutMs}),
+    gracefulStopMs: normalizeStopTimeout(source.gracefulStopMs, `processes[${index}].gracefulStopMs`, proxy.forceStopTimeoutMs, issues),
     health: normalizeHealth(source.health, `processes[${index}].health`, proxy, issues),
     id: normalizeString(source.id, `processes[${index}].id`, issues),
     lifecycle: normalizeLifecycle(source.lifecycle, `processes[${index}].lifecycle`, issues),
@@ -458,6 +461,36 @@ function normalizeStopSignal(value, key, issues) {
 }
 
 /**
+ * @param {JsonValue} value - Raw graceful stop timeout.
+ * @param {string} key - Config key.
+ * @param {number} fallback - Default timeout in milliseconds.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {StopTimeoutMs} Normalized stop timeout.
+ */
+function normalizeStopTimeout(value, key, fallback, issues) {
+  if (value === "indefinite") return "indefinite"
+
+  const timeoutMs = normalizeNumber(value, key, issues, {default: fallback})
+
+  return nonNegativeOrDefault(timeoutMs, key, issues, fallback, false)
+}
+
+/**
+ * @param {JsonValue} value - Raw service deploy strategy.
+ * @param {string} key - Config key.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ * @returns {ServiceDeployStrategy} Normalized service deploy strategy.
+ */
+function normalizeDeployStrategy(value, key, issues) {
+  if (value === undefined || value === null) return "persistent"
+  if (value === "persistent" || value === "handoff") return value
+
+  issues.push({fix: `Set ${key} to "persistent" or "handoff".`, message: `${key} must be one of: persistent, handoff`})
+
+  return "persistent"
+}
+
+/**
  * @param {JsonValue} value - Raw output retention value.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
@@ -613,6 +646,16 @@ function validateProcessSet(processes, issues) {
 
     if (processConfig.nonBlockingDrain && processConfig.policy !== "companion") {
       issues.push({fix: `Set nonBlockingDrain only on a companion process; "${processConfig.id}" is ${processConfig.policy}.`, message: `Process "${processConfig.id}" can only set nonBlockingDrain on a companion process`})
+    }
+
+    if (processConfig.deployStrategy === "handoff") {
+      if (processConfig.policy !== "service") {
+        issues.push({fix: `Set deployStrategy: "handoff" only on service processes; "${processConfig.id}" is ${processConfig.policy}.`, message: `Process "${processConfig.id}" can only set deployStrategy: "handoff" on a service process`})
+      } else if (!processConfig.port) {
+        issues.push({fix: `Add a port range to hand off service "${processConfig.id}" so old and new instances can overlap.`, message: `Handoff service "${processConfig.id}" must define a port range`})
+      } else if (processConfig.port.from === processConfig.port.to) {
+        issues.push({fix: `Set service "${processConfig.id}" to a multi-port range, e.g. port: {from: ${processConfig.port.from}, to: ${processConfig.port.from + 99}}.`, message: `Handoff service "${processConfig.id}" must use a multi-port range`})
+      }
     }
 
     if (processConfig.lifecycle.stopCommand && processConfig.stopSignal !== "SIGTERM") {

@@ -53,6 +53,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.connectionCount = 0
     this.connections = /** @type {ReleaseConnections} */ ({http: 0, websocket: 0})
     this.processes = /** @type {Map<string, ManagedProcess>} */ (new Map())
+    this.handoffServiceIds = /** @type {Set<string>} */ (new Set())
     this.nonBlockingDrainIds = /** @type {Set<string>} */ (new Set())
     this.ports = /** @type {Record<string, number>} */ ({})
     this.servicePorts = servicePorts
@@ -75,6 +76,7 @@ export default class ReleaseGroup extends EventEmitter {
           const processInstance = this.buildProcess(processConfig, {count: processConfig.replicas, index, instanceId})
 
           this.processes.set(instanceId, processInstance)
+          if (processConfig.policy === "service" && processConfig.deployStrategy === "handoff") this.handoffServiceIds.add(instanceId)
           if (processConfig.nonBlockingDrain) this.nonBlockingDrainIds.add(instanceId)
           await processInstance.start("deploy")
         }
@@ -154,11 +156,12 @@ export default class ReleaseGroup extends EventEmitter {
    * @returns {import("./config.js").ProcessConfig[]} Ordered process configs.
    */
   releaseProcessStartOrder() {
-    const releaseProcesses = this.config.processes.filter((processConfig) => !["singleton", "service"].includes(processConfig.policy))
+    const releaseProcesses = this.config.processes.filter((processConfig) => processConfig.policy !== "singleton" && (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff"))
+    const serviceProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "service")
     const companionProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "companion")
     const proxiedProcesses = releaseProcesses.filter((processConfig) => processConfig.policy === "proxied")
 
-    return [...companionProcesses, ...proxiedProcesses]
+    return [...serviceProcesses, ...companionProcesses, ...proxiedProcesses]
   }
 
   /** @returns {void} Marks this release active. */
@@ -175,7 +178,7 @@ export default class ReleaseGroup extends EventEmitter {
 
     for (const processConfig of this.config.processes) {
       if (!processConfig.port) continue
-      if (processConfig.policy === "service" && this.servicePorts[processConfig.id] !== undefined) {
+      if (processConfig.policy === "service" && processConfig.deployStrategy !== "handoff" && this.servicePorts[processConfig.id] !== undefined) {
         this.ports[processConfig.id] = this.servicePorts[processConfig.id]
         usedPorts.add(this.servicePorts[processConfig.id])
         continue
@@ -331,7 +334,8 @@ export default class ReleaseGroup extends EventEmitter {
     // connection drain, not held until after it. The rest stop once connections have closed.
     const entries = [...this.processes.entries()]
     const nonBlockingStops = entries.filter(([id]) => this.nonBlockingDrainIds.has(id)).map(([, processInstance]) => processInstance.stop())
-    const connectionDependent = entries.filter(([id]) => !this.nonBlockingDrainIds.has(id)).map(([, processInstance]) => processInstance)
+    const handoffServices = entries.filter(([id]) => this.handoffServiceIds.has(id)).map(([, processInstance]) => processInstance)
+    const connectionDependent = entries.filter(([id]) => !this.nonBlockingDrainIds.has(id) && !this.handoffServiceIds.has(id)).map(([, processInstance]) => processInstance)
 
     if (this.connectionCount > 0) {
       await new Promise((resolve) => {
@@ -345,6 +349,7 @@ export default class ReleaseGroup extends EventEmitter {
 
     await Promise.allSettled(connectionDependent.map((processInstance) => processInstance.stop()))
     await Promise.allSettled(nonBlockingStops)
+    await Promise.allSettled(handoffServices.map((processInstance) => processInstance.stop()))
     this.state = "stopped"
     this.stoppedAt = new Date().toISOString()
   }
