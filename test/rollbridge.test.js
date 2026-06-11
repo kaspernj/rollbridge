@@ -123,8 +123,8 @@ test("wildcard proxy bind host targets release processes through loopback", asyn
   }
 })
 
-test("failed release startup logs process output before cleanup", async () => {
-  const fixture = await createFixture({webCommand: `${JSON.stringify(process.execPath)} -e "console.log('startup stdout'); console.error('startup stderr'); const http = require('node:http'); http.createServer((_request, response) => { response.writeHead(500); response.end('bad') }).listen(Number(process.env.ROLLBRIDGE_PORT), '127.0.0.1')"`, webHealthTimeoutMs: 500})
+test("failed release startup logs process output and cleanup status", async () => {
+  const fixture = await createFixture({handoffService: true, webCommand: `${JSON.stringify(process.execPath)} -e "console.log('startup stdout'); console.error('startup stderr'); const http = require('node:http'); http.createServer((_request, response) => { response.writeHead(500); response.end('bad') }).listen(Number(process.env.ROLLBRIDGE_PORT), '127.0.0.1')"`, webHealthTimeoutMs: 500})
   /** @type {Array<{data?: Record<string, import("../src/json.js").JsonValue>, message: string}>} */
   const logs = []
   const daemon = new RollbridgeDaemon({
@@ -140,13 +140,22 @@ test("failed release startup logs process output before cleanup", async () => {
       /Health check failed/
     )
 
-    const processStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.processId === "web")
+    const processStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.phase === "before cleanup" && entry.data?.processId === "web")
+    const cleanupProcessStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.phase === "after cleanup" && entry.data?.processId === "web")
+    const handoffServiceStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.phase === "after cleanup" && entry.data?.processId === "beacon")
 
     assert.ok(processStatusLog, "expected failed web process diagnostics to be logged")
     assert.ok(processStatusLog.data, "expected diagnostic data")
     assert.ok(Array.isArray(processStatusLog.data.logs), "expected retained process output in diagnostics")
     assert.ok(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stdout"))
     assert.ok(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stderr"))
+    assert.equal(processStatusLog.data.state, "running")
+    assert.ok(cleanupProcessStatusLog, "expected failed web cleanup diagnostics to be logged")
+    assert.equal(cleanupProcessStatusLog.data?.state, "stopped")
+    assert.equal(cleanupProcessStatusLog.data?.exitSignal, "SIGTERM")
+    assert.ok(handoffServiceStatusLog, "expected handoff service cleanup diagnostics to be logged")
+    assert.equal(handoffServiceStatusLog.data?.state, "stopped")
+    assert.equal(handoffServiceStatusLog.data?.exitSignal, "SIGTERM")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
