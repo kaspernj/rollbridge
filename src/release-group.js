@@ -91,8 +91,9 @@ export default class ReleaseGroup extends EventEmitter {
       }
     } catch (error) {
       this.state = "failed"
+      this.logStartupFailure(error instanceof Error ? error : String(error), {phase: "before cleanup"})
       await this.stop()
-      this.logStartupFailure(error instanceof Error ? error : String(error))
+      this.logStartupFailure(error instanceof Error ? error : String(error), {phase: "after cleanup"})
       throw error
     }
   }
@@ -125,13 +126,15 @@ export default class ReleaseGroup extends EventEmitter {
   }
 
   /**
-   * Logs process diagnostics before failed startup cleanup stops and removes the release processes.
+   * Logs process diagnostics around failed startup cleanup.
    * @param {Error | string} error - Startup failure.
+   * @param {{phase: string}} options - Diagnostic phase.
    * @returns {void}
    */
-  logStartupFailure(error) {
+  logStartupFailure(error, {phase}) {
     this.logger("release startup failed", {
       error: error instanceof Error ? error.message : error,
+      phase,
       releaseId: this.releaseId
     })
 
@@ -143,6 +146,7 @@ export default class ReleaseGroup extends EventEmitter {
         exitCode: status.exitCode ?? null,
         exitSignal: status.exitSignal ?? null,
         logs: status.logs,
+        phase,
         pid: status.pid ?? null,
         processId: status.id,
         releaseId: this.releaseId,
