@@ -91,8 +91,8 @@ export default class ReleaseGroup extends EventEmitter {
       }
     } catch (error) {
       this.state = "failed"
-      this.logStartupFailure(error instanceof Error ? error : String(error))
       await this.stop()
+      this.logStartupFailure(error instanceof Error ? error : String(error))
       throw error
     }
   }

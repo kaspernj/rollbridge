@@ -27,10 +27,11 @@
   },
   "scripts": {
     "all-checks": "npm run typecheck && npm run lint && npm test",
-    "lint": "eslint",
+    "lint": "npm run eslint && npm run typecheck",
     "release:patch": "release-patch",
     "test": "node --test test/*.test.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "eslint": "eslint"
   },
   "engines": {
     "node": ">=20"
