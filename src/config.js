@@ -2,6 +2,7 @@
 
 import fs from "node:fs/promises"
 import {createHash} from "node:crypto"
+import {createRequire} from "node:module"
 import os from "node:os"
 import path from "node:path"
 import {pathToFileURL} from "node:url"
@@ -28,6 +29,7 @@ import {pathToFileURL} from "node:url"
 
 const PROCESS_POLICIES = new Set(["proxied", "companion", "singleton", "service"])
 const DEFAULT_CONFIG_FILENAMES = ["rollbridge.js"]
+const commonJsRequire = createRequire(import.meta.url)
 
 /**
  * Imports a JavaScript config module without validating it.
@@ -43,6 +45,7 @@ export async function parseConfigFile(configPath) {
   const configSource = await fs.readFile(absolutePath)
 
   configUrl.searchParams.set("rollbridgeConfig", createHash("sha256").update(configSource).digest("hex"))
+  delete commonJsRequire.cache[commonJsRequire.resolve(absolutePath)]
 
   const moduleNamespace = await import(configUrl.href)
   const exported = moduleNamespace.default
