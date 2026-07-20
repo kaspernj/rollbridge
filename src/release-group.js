@@ -233,6 +233,34 @@ export default class ReleaseGroup extends EventEmitter {
   }
 
   /**
+   * Applies refreshed process definitions before retiring this release.
+   * @param {import("./config.js").RollbridgeConfig} config - Current deployment config.
+   * @returns {void}
+   */
+  refreshProcessDefinitions(config) {
+    this.config = config
+    this.handoffServiceIds.clear()
+    this.nonBlockingDrainIds.clear()
+
+    for (const processConfig of config.processes) {
+      const instances = this.getProcesses(processConfig.id)
+
+      for (let index = 0; index < instances.length; index += 1) {
+        const instance = instances[index]
+        const nextDefinition = this.buildProcess(processConfig, {
+          count: processConfig.replicas,
+          index,
+          instanceId: instance.id
+        })
+
+        instance.process.updateDefinition(nextDefinition)
+        if (processConfig.policy === "service" && processConfig.deployStrategy === "handoff") this.handoffServiceIds.add(instance.id)
+        if (processConfig.nonBlockingDrain) this.nonBlockingDrainIds.add(instance.id)
+      }
+    }
+  }
+
+  /**
    * @param {import("./config.js").ProcessConfig} processConfig - Process config.
    * @param {{count: number, index: number}} replica - Replica index and total count.
    * @returns {Record<string, string>} Base environment.
@@ -325,13 +353,15 @@ export default class ReleaseGroup extends EventEmitter {
   /**
    * Starts draining and stops once existing connections close or timeout.
    * @param {number} timeoutMs - Drain timeout.
+   * @param {import("./config.js").RollbridgeConfig} [config] - Refreshed config governing retirement.
    * @returns {Promise<void>} Resolves when stopped.
    */
-  async drainAndStop(timeoutMs) {
+  async drainAndStop(timeoutMs, config = this.config) {
     if (this.state === "stopped") return
 
     this.state = "draining"
     this.drainStartedAt = new Date().toISOString()
+    this.refreshProcessDefinitions(config)
 
     // Stop nonBlockingDrain processes (e.g. job workers) immediately and in the background, so
     // their lifecycle drain runs as soon as the release is retired — in parallel with the

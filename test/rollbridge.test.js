@@ -102,6 +102,96 @@ test("failed health check leaves the previous release active", async () => {
   }
 })
 
+test("deploy reloads process config and retires the previous worker with the refreshed timeout", async () => {
+  const fixture = await createFixture({nonBlockingDrainWorker: true, workerStopDelayMs: 10000})
+  const initialConfig = normalizeConfig({
+    ...fixture.config,
+    processes: fixture.config.processes.map((processConfig) => processConfig.id === "worker"
+      ? {...processConfig, gracefulStopMs: "indefinite"}
+      : processConfig)
+  })
+  const configPath = await writeConfigFile(initialConfig, fixture.root)
+  const daemon = new RollbridgeDaemon({config: initialConfig, configPath, logger: () => {}})
+
+  try {
+    await daemon.start()
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const refreshedConfig = normalizeConfig({
+      ...initialConfig,
+      processes: initialConfig.processes.map((processConfig) => processConfig.id === "worker"
+        ? {...processConfig, gracefulStopMs: 50}
+        : processConfig)
+    })
+
+    await writeConfigFile(refreshedConfig, fixture.root)
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    await waitFor(() => statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state === "stopped", 1000)
+
+    assert.equal(daemon.config.processes.find((processConfig) => processConfig.id === "worker")?.gracefulStopMs, 50)
+    assert.equal(await fetchText(daemon, "/release"), "v2")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("deploy rejects a reloaded config that changes the running proxy", async () => {
+  const fixture = await createFixture()
+  const configPath = await writeConfigFile(fixture.config, fixture.root)
+  const daemon = new RollbridgeDaemon({config: fixture.config, configPath, logger: () => {}})
+
+  try {
+    await daemon.start()
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await writeConfigFile(normalizeConfig({
+      ...fixture.config,
+      proxy: {...fixture.config.proxy, host: "0.0.0.0"}
+    }), fixture.root)
+
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /proxy\.host.*restart the Rollbridge daemon/
+    )
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("a failed deploy does not adopt reloaded process config", async () => {
+  const fixture = await createFixture()
+  const configPath = await writeConfigFile(fixture.config, fixture.root)
+  const daemon = new RollbridgeDaemon({config: fixture.config, configPath, logger: () => {}})
+
+  try {
+    await daemon.start()
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const failingConfig = normalizeConfig({
+      ...fixture.config,
+      processes: fixture.config.processes.map((processConfig) => processConfig.id === "web"
+        ? {...processConfig, health: {...processConfig.health, path: "/not-ready", timeoutMs: 100}}
+        : processConfig)
+    })
+
+    await writeConfigFile(failingConfig, fixture.root)
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /Health check failed/
+    )
+
+    assert.equal(daemon.config.processes.find((processConfig) => processConfig.id === "web")?.health?.path, "/ping")
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("wildcard proxy bind host targets release processes through loopback", async () => {
   const fixture = await createFixture({proxyHost: "0.0.0.0"})
   const daemon = await startDaemon(fixture.config)
@@ -1276,10 +1366,9 @@ async function processEvents(logPath) {
  * @returns {Promise<string>} Written config path.
  */
 async function writeConfigFile(config, root) {
-  const configPath = path.join(root, "rollbridge.js")
+  const configPath = path.join(root, "rollbridge.mjs")
 
-  // CommonJS so the module loads from a temp dir (no package.json) on any supported Node version.
-  await fs.writeFile(configPath, `module.exports = ${JSON.stringify(config, null, 2)}\n`)
+  await fs.writeFile(configPath, `export default ${JSON.stringify(config, null, 2)}\n`)
 
   return configPath
 }

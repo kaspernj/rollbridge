@@ -3,7 +3,9 @@
 import fs from "node:fs/promises"
 import http from "node:http"
 import net from "node:net"
+import {isDeepStrictEqual} from "node:util"
 import httpProxy from "http-proxy"
+import {loadConfig} from "./config.js"
 import EventLog from "./event-log.js"
 import ReleaseGroup from "./release-group.js"
 import {clearState, isProcessAlive, liveProcesses, readState, writeState} from "./state-store.js"
@@ -23,10 +25,12 @@ export default class RollbridgeDaemon {
   /**
    * @param {object} args - Options.
    * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
+   * @param {string} [args.configPath] - Config file path to reload before deploys.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} [args.logger] - Logger.
    */
-  constructor({config, logger}) {
+  constructor({config, configPath, logger}) {
     this.config = config
+    this.configPath = configPath
     this.eventLog = new EventLog(EVENT_HISTORY_LIMIT)
 
     const baseLogger = logger || ((message, data = {}) => console.log(JSON.stringify({at: new Date().toISOString(), data, message})))
@@ -319,9 +323,13 @@ export default class RollbridgeDaemon {
   async deploy({releaseId, releasePath, revision}) {
     if (this.stopping) throw new Error("Rollbridge is shutting down")
 
+    const nextConfig = this.configPath ? await loadConfig(this.configPath) : this.config
+
+    this.assertReloadCompatible(nextConfig)
+
     const newReleaseId = releaseId || revision || new Date().toISOString().replace(/[^0-9]/g, "")
     const release = new ReleaseGroup({
-      config: this.config,
+      config: nextConfig,
       logger: this.logger,
       releaseId: newReleaseId,
       releasePath,
@@ -343,6 +351,7 @@ export default class RollbridgeDaemon {
 
     const previousRelease = this.activeRelease
 
+    this.config = nextConfig
     this.releases.set(release.releaseId, release)
     release.activate()
     this.activeRelease = release
@@ -352,7 +361,7 @@ export default class RollbridgeDaemon {
     await this.replaceSingletons(release)
 
     if (previousRelease) {
-      void this.drainAndPrune(previousRelease)
+      void this.drainAndPrune(previousRelease, nextConfig)
     }
 
     this.persistState()
@@ -360,6 +369,45 @@ export default class RollbridgeDaemon {
     return {
       activeReleaseId: release.releaseId,
       previousReleaseId: previousRelease ? previousRelease.releaseId : null
+    }
+  }
+
+  /**
+   * Rejects config changes that require rebinding daemon-owned resources or changing process topology.
+   * @param {import("./config.js").RollbridgeConfig} nextConfig - Freshly loaded config.
+   * @returns {void}
+   */
+  assertReloadCompatible(nextConfig) {
+    /** @type {string[]} */
+    const restartRequired = []
+
+    if (nextConfig.application !== this.config.application) restartRequired.push("application")
+    if (!isDeepStrictEqual(nextConfig.control, this.config.control)) restartRequired.push("control")
+    if (nextConfig.statePath !== this.config.statePath) restartRequired.push("statePath")
+
+    if (nextConfig.proxy.host !== this.config.proxy.host) restartRequired.push("proxy.host")
+    if (nextConfig.proxy.port !== this.config.proxy.port) restartRequired.push("proxy.port")
+    if (nextConfig.proxy.upstreamHost !== this.config.proxy.upstreamHost) restartRequired.push("proxy.upstreamHost")
+
+    if (nextConfig.processes.length !== this.config.processes.length) {
+      restartRequired.push("processes")
+    } else {
+      for (const processConfig of this.config.processes) {
+        const nextProcessConfig = nextConfig.processes.find((candidate) => candidate.id === processConfig.id)
+
+        if (!nextProcessConfig ||
+          nextProcessConfig.policy !== processConfig.policy ||
+          nextProcessConfig.deployStrategy !== processConfig.deployStrategy ||
+          nextProcessConfig.replicas !== processConfig.replicas ||
+          !isDeepStrictEqual(nextProcessConfig.port, processConfig.port)) {
+          restartRequired.push("processes")
+          break
+        }
+      }
+    }
+
+    if (restartRequired.length > 0) {
+      throw new Error(`Config changes to ${restartRequired.join(", ")} cannot be applied live; restart the Rollbridge daemon before deploying.`)
     }
   }
 
@@ -418,7 +466,7 @@ export default class RollbridgeDaemon {
   async ensureServices(release, startedServices) {
     await release.allocatePorts()
 
-    for (const processConfig of this.config.processes) {
+    for (const processConfig of release.config.processes) {
       if (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff") continue
       if (this.services.has(processConfig.id)) continue
 
@@ -473,20 +521,7 @@ export default class RollbridgeDaemon {
 
       const nextDefinition = release.buildProcess(processConfig, {shouldRestart: () => !this.stopping})
 
-      service.updateDefinition({
-        command: nextDefinition.command,
-        cwd: nextDefinition.cwd,
-        env: nextDefinition.env,
-        lifecycle: nextDefinition.lifecycle,
-        logger: nextDefinition.logger,
-        memory: nextDefinition.memory,
-        outputLines: nextDefinition.outputLines,
-        restart: nextDefinition.restart,
-        restartDelayMs: nextDefinition.restartDelayMs,
-        shouldRestart: nextDefinition.shouldRestart,
-        stopSignal: nextDefinition.stopSignal,
-        stopTimeoutMs: nextDefinition.stopTimeoutMs
-      })
+      service.updateDefinition(nextDefinition)
     }
   }
 
@@ -611,11 +646,12 @@ export default class RollbridgeDaemon {
   /**
    * Drains and stops a retired release in the background, then prunes stopped releases.
    * @param {ReleaseGroup} release - Release to drain and stop.
+   * @param {import("./config.js").RollbridgeConfig} [config] - Refreshed config governing retirement.
    * @returns {Promise<void>} Resolves once drained, stopped, and pruned.
    */
-  async drainAndPrune(release) {
+  async drainAndPrune(release, config = this.config) {
     try {
-      await release.drainAndStop(this.config.proxy.drainTimeoutMs)
+      await release.drainAndStop(config.proxy.drainTimeoutMs, config)
       this.logger("release drained", {releaseId: release.releaseId})
     } catch (error) {
       this.logger("release drain failed", {error: error instanceof Error ? error.message : String(error), releaseId: release.releaseId})

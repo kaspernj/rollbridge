@@ -5,7 +5,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import {resolveConfigPath} from "../src/config.js"
+import {loadConfig, resolveConfigPath} from "../src/config.js"
 import {runCli} from "../src/cli.js"
 
 const validConfig = {
@@ -60,6 +60,21 @@ test("resolveConfigPath throws an actionable error when no default config exists
       () => resolveConfigPath(undefined, dir),
       /No config file found.*rollbridge\.js/
     )
+  } finally {
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
+test("loadConfig reloads a changed CommonJS module", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-cfgpath-"))
+  const configPath = await writeConfigModule(dir)
+
+  try {
+    assert.equal((await loadConfig(configPath)).application, "demo")
+
+    await fs.writeFile(configPath, `module.exports = ${JSON.stringify({...validConfig, application: "updated"}, null, 2)}\n`)
+
+    assert.equal((await loadConfig(configPath)).application, "updated")
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
