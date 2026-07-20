@@ -33,7 +33,7 @@ export async function runCli(argv) {
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
-      const daemon = new RollbridgeDaemon({config})
+      const daemon = new RollbridgeDaemon({config, configPath})
 
       await daemon.start()
 

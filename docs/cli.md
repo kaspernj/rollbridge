@@ -72,6 +72,14 @@ traffic to it, then drains and stops the previous release. Prints
 If the new release fails to start or health-check, the previous release stays
 active and the command errors.
 
+Before each deploy, the daemon reloads the config path it was started with.
+Compatible process and lifecycle changes apply to the new release and govern
+how the previous release retires, including updated `nonBlockingDrain`,
+`stopSignal`, `lifecycle`, and `gracefulStopMs` settings. The daemon adopts the
+new config only after the replacement release starts successfully. Changes to
+daemon-owned listeners or process topology fail the deploy with a restart
+instruction; see [Config reloads](config.md#config-reloads).
+
 - `--release-path <path>` (**required**) — path to the prepared release
   directory; available to process templates as `{{releasePath}}`.
 - `--release-id <id>` — identifier for the release. Defaults to `--revision`,

@@ -543,8 +543,12 @@ so its output goes to the journal (`journalctl -u rollbridge`). Key directives:
 The daemon is long-lived and survives deploys. **Deploy with
 `rollbridge deploy` (or `rollbridge deploy --ensure-daemon`), not
 `systemctl restart`** — pointing `--config` at a stable, daemon-wide file while
-release paths are passed per deploy. Use `command -v rollbridge` to find the
-absolute CLI path for `ExecStart`.
+release paths are passed per deploy. The daemon reloads compatible process and
+lifecycle config before each deploy, so updated graceful-stop deadlines govern
+the release being retired without interrupting the stable proxy. Listener and
+process-topology changes still require a daemon restart; see
+[`docs/config.md`](docs/config.md#config-reloads). Use `command -v rollbridge`
+to find the absolute CLI path for `ExecStart`.
 
 See [`docs/logging.md`](docs/logging.md) for where the daemon's JSON logs go
 (stdout / journald / the `--daemon-log-path` file) and how to rotate them — the

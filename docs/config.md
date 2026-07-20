@@ -17,6 +17,28 @@ export default {
 }
 ```
 
+## Config reloads
+
+The daemon reloads the config file it was started with before every deploy and
+rollback. Compatible changes apply to the replacement release, daemon-wide
+service restart definitions, and the retirement of the previous release. This
+means changes to process commands, environment, health checks, lifecycle hooks,
+`nonBlockingDrain`, stop signals, graceful-stop timeouts, restart policies, and
+memory supervision do not require restarting the stable proxy daemon. Updated
+retirement settings also apply to processes that were started by the previous
+release.
+
+The replacement config is adopted only after the new release starts and passes
+its health check. Invalid config, an incompatible change, or a failed release
+leaves the previous config and release active.
+
+Settings that own daemon listeners or change the managed-process topology still
+require a daemon restart: `application`, `control`, `statePath`, `proxy.host`,
+`proxy.port`, `proxy.upstreamHost`, and changes to process ids, count, `policy`,
+`deployStrategy`, `replicas`, or `port`. A deploy with one of these changes
+fails before starting the replacement and names the settings that require a
+restart.
+
 ## Top-level fields
 
 | Field | Type | Default | Description |
