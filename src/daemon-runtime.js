@@ -57,23 +57,48 @@ export async function prepareDaemonRuntime(basePath) {
 }
 
 /**
- * Rejects a runtime parent that another local user could replace or modify.
+ * Rejects a runtime path beneath any ancestor that another local user could replace.
  * @param {string} basePath - Runtime parent directory.
- * @returns {Promise<void>} Resolves when private to the current user.
+ * @returns {Promise<void>} Resolves when the full path is safely anchored.
  */
 async function validateRuntimeBase(basePath) {
-  const stats = await fs.lstat(basePath)
+  const absolutePath = path.resolve(basePath)
+  const rootPath = path.parse(absolutePath).root
+  const relativeParts = path.relative(rootPath, absolutePath).split(path.sep).filter(Boolean)
+  const paths = [rootPath]
 
-  if (!stats.isDirectory() || stats.isSymbolicLink()) {
-    throw new Error(`Rollbridge daemon runtime path must be a real directory: ${basePath}`)
+  for (const part of relativeParts) paths.push(path.join(paths.at(-1) || rootPath, part))
+
+  for (const candidatePath of paths) {
+    const stats = await fs.lstat(candidatePath)
+
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      throw new Error(`Every Rollbridge daemon runtime path component must be a real directory: ${candidatePath}`)
+    }
+
+    if (typeof process.getuid !== "function") continue
+
+    const ownedByTrustedUser = stats.uid === 0 || stats.uid === process.getuid()
+    const writableByOthers = (stats.mode & 0o022) !== 0
+    const sticky = (stats.mode & 0o1000) !== 0
+
+    if (candidatePath !== absolutePath && !ownedByTrustedUser) {
+      throw new Error(`Rollbridge daemon runtime ancestor must be owned by root or the current user: ${candidatePath}`)
+    }
+
+    if (candidatePath !== absolutePath && writableByOthers && !sticky) {
+      throw new Error(`Rollbridge daemon runtime ancestor must be sticky or not writable by group or other users: ${candidatePath}`)
+    }
   }
 
+  const stats = await fs.lstat(absolutePath)
+
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
-    throw new Error(`Rollbridge daemon runtime path must be owned by the current user: ${basePath}`)
+    throw new Error(`Rollbridge daemon runtime path must be owned by the current user: ${absolutePath}`)
   }
 
   if ((stats.mode & 0o022) !== 0) {
-    throw new Error(`Rollbridge daemon runtime path must not be writable by group or other users: ${basePath}`)
+    throw new Error(`Rollbridge daemon runtime path must not be writable by group or other users: ${absolutePath}`)
   }
 }
 

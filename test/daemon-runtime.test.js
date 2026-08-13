@@ -65,3 +65,26 @@ test("runtime preparation rejects a symlinked or shared-writable parent", async 
     await fs.rm(root, {force: true, recursive: true})
   }
 })
+
+test("runtime preparation rejects a private leaf beneath a replaceable ancestor", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX directory permissions are not available on Windows")
+    return
+  }
+
+  const unsafeAncestor = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-runtime-unsafe-ancestor-"))
+  const privateLeaf = path.join(unsafeAncestor, "private-runtime")
+
+  try {
+    await fs.chmod(unsafeAncestor, 0o777)
+    await fs.mkdir(privateLeaf, {mode: 0o700})
+
+    await assert.rejects(
+      () => prepareDaemonRuntime(privateLeaf),
+      /ancestor must be sticky or not writable by group or other users/
+    )
+  } finally {
+    await fs.chmod(unsafeAncestor, 0o700)
+    await fs.rm(unsafeAncestor, {force: true, recursive: true})
+  }
+})
