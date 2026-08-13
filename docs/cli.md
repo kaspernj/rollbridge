@@ -35,11 +35,12 @@ such as systemd (see `examples/rollbridge.service`).
 
 For boot/crash recovery, pass an explicit absolute `--config` and all three
 release options together. Rollbridge validates every bootstrap input before it
-binds listeners or starts processes, then binds the listeners and activates that
-exact release through the same deploy path used by the control socket: services,
+binds listeners or starts processes, then binds the proxy and activates that
+exact release through the normal deploy path: services,
 companions, the proxied process and health check, traffic switching, singletons,
-and service-template refresh. It then remains in the foreground with the normal
-signal behavior.
+and service-template refresh. Only after activation succeeds does it expose the
+control socket, preventing another deployment from overlapping bootstrap. It
+then remains in the foreground with the normal signal behavior.
 
 Bootstrap paths must be absolute and normalized, the release path must be an
 accessible directory, and release id/revision values accept letters, numbers,
@@ -47,10 +48,10 @@ dots, underscores, and hyphens (maximum 200 characters, beginning with a letter
 or number). Supplying only some bootstrap options, or an invalid value, exits
 non-zero before listeners start. Activation failure emits a structured
 `bootstrap activation failed` event, cleans up processes owned by that attempt,
-and exits non-zero without inventing an active release. `statePath` entries from
-a previous daemon remain advisory orphans: bootstrap never runs recovery and
-never signals those processes, and retains their live PID records in `statePath`
-for explicit recovery.
+and exits non-zero without exposing the control socket or inventing an active
+release. `statePath` entries from a previous daemon remain advisory orphans:
+bootstrap never runs recovery and never signals those processes, and retains
+their live PID records in `statePath` for explicit recovery.
 
 With no release options, daemon behavior is unchanged: it starts listener-only
 and waits for control-socket deployments.

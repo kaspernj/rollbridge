@@ -15,7 +15,7 @@ if (process.env.ROLLBRIDGE_TEST_STARTED_PATH) {
 
 const server = http.createServer((request, response) => {
   if (request.url === "/ping") {
-    if (healthFails) {
+    if (healthFails || (process.env.ROLLBRIDGE_TEST_HEALTH_GATE_PATH && !fs.existsSync(process.env.ROLLBRIDGE_TEST_HEALTH_GATE_PATH))) {
       response.writeHead(500, {"Content-Type": "application/json"})
       response.end(JSON.stringify({message: "bad release"}))
       return
