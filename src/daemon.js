@@ -64,11 +64,29 @@ export default class RollbridgeDaemon {
     this.proxy.on("error", (error, req, res) => this.onProxyError(error, req, res))
   }
 
-  /** @returns {Promise<void>} Starts proxy and control listeners. */
-  async start() {
+  /**
+   * Starts daemon listeners.
+   * @param {{exposeControl?: boolean}} [options] - Whether to expose the control socket immediately.
+   * @returns {Promise<void>} Resolves when the requested listeners are ready.
+   */
+  async start({exposeControl = true} = {}) {
     await this.reportOrphans()
     await this.startProxy()
+    if (exposeControl) await this.exposeControl()
+  }
+
+  /** @returns {Promise<void>} Exposes control commands and begins periodic state persistence. */
+  async exposeControl() {
+    if (this.stopping) throw new Error("Rollbridge is shutting down")
+
     await this.startControlServer()
+
+    if (this.stopping) {
+      await this.closeServer(this.controlServer)
+      await fs.rm(this.config.control.path, {force: true})
+      throw new Error("Rollbridge is shutting down")
+    }
+
     this.startStatePersistence()
   }
 

@@ -39,7 +39,7 @@ export async function runCli(argv) {
       const config = await loadConfig(configPath)
       const daemon = new RollbridgeDaemon({config, configPath})
 
-      await daemon.start()
+      await daemon.start({exposeControl: !bootstrap})
 
       const shutdown = async () => {
         await daemon.shutdown()
@@ -52,6 +52,7 @@ export async function runCli(argv) {
       if (bootstrap) {
         try {
           await daemon.deploy(bootstrap)
+          await daemon.exposeControl()
         } catch {
           daemon.logger("bootstrap activation failed", {releaseId: bootstrap.releaseId, status: "error"})
           await daemon.shutdown()

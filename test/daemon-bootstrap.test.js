@@ -47,7 +47,7 @@ test("daemon bootstrap activates the exact release through the foreground daemon
   const child = spawnDaemon(fixture, {releaseId: "release-42", revision: "abc123"})
 
   try {
-    await waitForLog(child, "traffic switched")
+    await waitForLog(child, "control socket listening")
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
     const activeRelease = assertRelease(status, "release-42")
 
@@ -55,6 +55,33 @@ test("daemon bootstrap activates the exact release through the foreground daemon
     assert.equal(activeRelease.revision, "abc123")
     assert.ok(status.proxy && typeof status.proxy === "object" && !Array.isArray(status.proxy) && typeof status.proxy.port === "number")
     assert.equal((await fetch(`http://127.0.0.1:${status.proxy.port}/release`).then((response) => response.text())).trim(), "release-42")
+
+    child.kill("SIGTERM")
+    assert.equal((await once(child, "exit"))[0], 0)
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL")
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("daemon bootstrap does not expose control deploys until activation completes", async () => {
+  const fixture = await createFixture({healthGate: true, healthTimeoutMs: 60000})
+  const started = waitForFile(fixture.startedPath)
+  const child = spawnDaemon(fixture, {releaseId: "bootstrap-release", revision: "bootstrap123"})
+
+  try {
+    await started
+    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+
+    await fs.writeFile(fixture.healthGatePath, "ready\n")
+    await waitForLog(child, "control socket listening")
+
+    const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
+
+    assert.equal(status.activeReleaseId, "bootstrap-release")
+    assert.ok(Array.isArray(status.releases))
+    assert.equal(status.releases.length, 1)
+    assertRelease(status, "bootstrap-release")
 
     child.kill("SIGTERM")
     assert.equal((await once(child, "exit"))[0], 0)
@@ -182,7 +209,7 @@ test("daemon bootstrap reports but does not kill a live process from statePath",
   const child = spawnDaemon(fixture, {releaseId: "recovered", revision: "def456"})
 
   try {
-    await waitForLog(child, "traffic switched")
+    await waitForLog(child, "control socket listening")
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
 
     assert.ok(leftover.pid !== undefined && isProcessAlive(leftover.pid))
@@ -228,10 +255,10 @@ test("failed daemon bootstrap preserves prior live process records in statePath"
 })
 
 /**
- * @param {{healthPath?: string, healthTimeoutMs?: number, multiProcessSignal?: boolean, persistState?: boolean}} [options] - Fixture options.
- * @returns {Promise<{configPath: string, gatePath: string, lifecyclePath: string, root: string, socketPath: string, startedPath: string, statePath: string, stoppedPath: string}>} Fixture paths.
+ * @param {{healthGate?: boolean, healthPath?: string, healthTimeoutMs?: number, multiProcessSignal?: boolean, persistState?: boolean}} [options] - Fixture options.
+ * @returns {Promise<{configPath: string, gatePath: string, healthGatePath: string, lifecyclePath: string, root: string, socketPath: string, startedPath: string, statePath: string, stoppedPath: string}>} Fixture paths.
  */
-async function createFixture({healthPath = "/ping", healthTimeoutMs = 1000, multiProcessSignal = false, persistState = false} = {}) {
+async function createFixture({healthGate = false, healthPath = "/ping", healthTimeoutMs = 1000, multiProcessSignal = false, persistState = false} = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-bootstrap-"))
   const socketPath = path.join(root, "control.sock")
   const statePath = path.join(root, "state.json")
@@ -239,9 +266,15 @@ async function createFixture({healthPath = "/ping", healthTimeoutMs = 1000, mult
   const stoppedPath = path.join(root, "stopped.pid")
   const lifecyclePath = path.join(root, "lifecycle.jsonl")
   const gatePath = path.join(root, "continue.fifo")
+  const healthGatePath = path.join(root, "health-ready")
   const configPath = path.join(root, "rollbridge.js")
   const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`
   const lifecycleEnv = {ROLLBRIDGE_TEST_LIFECYCLE_PATH: lifecyclePath}
+  const webEnv = {
+    ROLLBRIDGE_TEST_STARTED_PATH: startedPath,
+    ROLLBRIDGE_TEST_STOPPED_PATH: stoppedPath,
+    ...(healthGate ? {ROLLBRIDGE_TEST_HEALTH_GATE_PATH: healthGatePath} : {})
+  }
   const config = {
     application: "bootstrap-test",
     control: {path: socketPath},
@@ -249,7 +282,7 @@ async function createFixture({healthPath = "/ping", healthTimeoutMs = 1000, mult
       {command: `trap '' TERM; printf '%s\\n' '{"event":"shutdown"}' >> ${JSON.stringify(lifecyclePath)}; kill -TERM "$ROLLBRIDGE_TEST_DAEMON_PID"; printf '{"event":"started","pid":%s,"processId":"database","replicaIndex":"0"}\\n' "$$" >> ${JSON.stringify(lifecyclePath)}; read ignored < ${JSON.stringify(gatePath)}`, env: lifecycleEnv, id: "database", policy: "service"},
       {command: `exec ${command}`, env: lifecycleEnv, id: "worker", policy: "companion", replicas: 2},
       {command: `exec ${command}`, env: lifecycleEnv, health: {path: healthPath, timeoutMs: healthTimeoutMs}, id: "web", policy: "proxied", port: {from: 0, to: 0}}
-    ] : [{command, env: {ROLLBRIDGE_TEST_STARTED_PATH: startedPath, ROLLBRIDGE_TEST_STOPPED_PATH: stoppedPath}, health: {path: healthPath, timeoutMs: healthTimeoutMs}, id: "web", policy: "proxied", port: {from: 0, to: 0}}],
+    ] : [{command, env: webEnv, health: {path: healthPath, timeoutMs: healthTimeoutMs}, id: "web", policy: "proxied", port: {from: 0, to: 0}}],
     proxy: {host: "127.0.0.1", port: 0},
     ...(persistState ? {statePath} : {})
   }
@@ -264,7 +297,7 @@ async function createFixture({healthPath = "/ping", healthTimeoutMs = 1000, mult
   }
 
   await fs.writeFile(configPath, `${setup}module.exports = ${JSON.stringify(config, null, 2)}\n`)
-  return {configPath, gatePath, lifecyclePath, root, socketPath, startedPath, statePath, stoppedPath}
+  return {configPath, gatePath, healthGatePath, lifecyclePath, root, socketPath, startedPath, statePath, stoppedPath}
 }
 
 /**

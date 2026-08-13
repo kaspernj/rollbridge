@@ -409,11 +409,12 @@ rollbridge daemon --config /srv/ticket-server/rollbridge.js \
 ```
 
 The four bootstrap inputs are all-or-nothing and use absolute config/release
-paths. Rollbridge binds its proxy and control listeners, activates the release
-through the normal deploy path, and stays foreground. A failed activation stops
-only processes started by that attempt and exits non-zero; persisted processes
-from a previous daemon are reported as orphans and are never recovered or killed
-implicitly; their live PID records remain in `statePath` for explicit recovery.
+paths. Rollbridge binds its proxy, activates the release through the normal
+deploy path, then exposes the control socket and stays foreground. A failed
+activation stops only processes started by that attempt and exits non-zero;
+persisted processes from a previous daemon are reported as orphans and are never
+recovered or killed implicitly; their live PID records remain in `statePath` for
+explicit recovery.
 
 Start the daemon only when it is not already running:
 
