@@ -40,8 +40,9 @@ export default class ReleaseGroup extends EventEmitter {
    * @param {string} args.releasePath - Release path.
    * @param {string | undefined} args.revision - Revision.
    * @param {Record<string, number>} [args.servicePorts] - Ports already owned by daemon-wide services.
+   * @param {() => boolean} [args.shouldStart] - Whether bootstrap may create another process.
    */
-  constructor({config, logger, releaseId, releasePath, revision, servicePorts = {}}) {
+  constructor({config, logger, releaseId, releasePath, revision, servicePorts = {}, shouldStart = () => true}) {
     super()
 
     this.config = config
@@ -57,6 +58,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.nonBlockingDrainIds = /** @type {Set<string>} */ (new Set())
     this.ports = /** @type {Record<string, number>} */ ({})
     this.servicePorts = servicePorts
+    this.shouldStart = shouldStart
     this.portsAllocated = false
     this.drainStartedAt = /** @type {string | undefined} */ (undefined)
     this.activatedAt = /** @type {string | undefined} */ (undefined)
@@ -72,6 +74,8 @@ export default class ReleaseGroup extends EventEmitter {
 
       for (const processConfig of this.releaseProcessStartOrder()) {
         for (let index = 0; index < processConfig.replicas; index += 1) {
+          if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
+
           const instanceId = replicaInstanceId(processConfig, index)
           const processInstance = this.buildProcess(processConfig, {count: processConfig.replicas, index, instanceId})
 
@@ -87,6 +91,8 @@ export default class ReleaseGroup extends EventEmitter {
             host: this.config.proxy.upstreamHost,
             port: this.ports[processConfig.id]
           })
+
+          if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
         }
       }
     } catch (error) {

@@ -1,12 +1,17 @@
 // @ts-check
 
 import crypto from "node:crypto"
+import fs from "node:fs"
 import http from "node:http"
 
 const port = Number(process.env.ROLLBRIDGE_PORT)
 const releaseId = process.env.ROLLBRIDGE_RELEASE_ID || "unknown"
 const healthFails = releaseId.includes("bad")
 const sockets = new Set()
+
+if (process.env.ROLLBRIDGE_TEST_STARTED_PATH) {
+  fs.writeFileSync(process.env.ROLLBRIDGE_TEST_STARTED_PATH, String(process.pid))
+}
 
 const server = http.createServer((request, response) => {
   if (request.url === "/ping") {
@@ -59,6 +64,14 @@ server.on("upgrade", (request, socket) => {
 })
 
 process.on("SIGTERM", () => {
+  if (process.env.ROLLBRIDGE_TEST_LIFECYCLE_PATH) {
+    fs.appendFileSync(process.env.ROLLBRIDGE_TEST_LIFECYCLE_PATH, `${JSON.stringify({event: "stopped", pid: process.pid, processId: process.env.ROLLBRIDGE_PROCESS_ID, replicaIndex: process.env.ROLLBRIDGE_REPLICA_INDEX})}\n`)
+  }
+
+  if (process.env.ROLLBRIDGE_TEST_STOPPED_PATH) {
+    fs.writeFileSync(process.env.ROLLBRIDGE_TEST_STOPPED_PATH, String(process.pid))
+  }
+
   server.close(() => process.exit(0))
 
   if (sockets.size === 0) {
@@ -66,4 +79,14 @@ process.on("SIGTERM", () => {
   }
 })
 
-server.listen(port, "127.0.0.1")
+const recordStarted = () => {
+  if (process.env.ROLLBRIDGE_TEST_LIFECYCLE_PATH) {
+    fs.appendFileSync(process.env.ROLLBRIDGE_TEST_LIFECYCLE_PATH, `${JSON.stringify({event: "started", pid: process.pid, processId: process.env.ROLLBRIDGE_PROCESS_ID, replicaIndex: process.env.ROLLBRIDGE_REPLICA_INDEX})}\n`)
+  }
+}
+
+if (process.env.ROLLBRIDGE_PORT) {
+  server.listen(port, "127.0.0.1", recordStarted)
+} else {
+  recordStarted()
+}
