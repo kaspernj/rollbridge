@@ -86,6 +86,14 @@ export function liveProcesses(state, alive = isProcessAlive) {
   try {
     const snapshot = /** @type {import("./daemon.js").DaemonStatus} */ (state)
 
+    if (Array.isArray(snapshot.orphans)) {
+      for (const orphan of snapshot.orphans) {
+        if (typeof orphan.id === "string" && typeof orphan.pid === "number" && (typeof orphan.releaseId === "string" || orphan.releaseId === null) && alive(orphan.pid)) {
+          live.push({id: orphan.id, pid: orphan.pid, releaseId: orphan.releaseId})
+        }
+      }
+    }
+
     for (const release of snapshot.releases) {
       for (const process of release.processes) {
         if (typeof process.pid === "number" && alive(process.pid)) live.push({id: process.id, pid: process.pid, releaseId: release.releaseId})

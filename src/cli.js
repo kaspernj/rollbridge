@@ -30,7 +30,11 @@ export async function runCli(argv) {
   program
     .command("daemon")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--release-path <path>", "Bootstrap release path (requires --config, --release-id, and --revision)")
+    .option("--release-id <id>", "Bootstrap release id (requires --config, --release-path, and --revision)")
+    .option("--revision <sha>", "Bootstrap revision (requires --config, --release-path, and --release-id)")
     .action(async (options) => {
+      const bootstrap = await validateDaemonBootstrapOptions(options)
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const daemon = new RollbridgeDaemon({config, configPath})
@@ -44,6 +48,17 @@ export async function runCli(argv) {
 
       process.once("SIGINT", () => { void shutdown() })
       process.once("SIGTERM", () => { void shutdown() })
+
+      if (bootstrap) {
+        try {
+          await daemon.deploy(bootstrap)
+        } catch {
+          daemon.logger("bootstrap activation failed", {releaseId: bootstrap.releaseId, status: "error"})
+          await daemon.shutdown()
+          process.exitCode = 1
+          return
+        }
+      }
     })
 
   program
@@ -694,6 +709,49 @@ async function validateConfigFile(configPath) {
 
     return {config, issues: [{fix: "Ensure the file exists and exports a default Rollbridge config object.", message}]}
   }
+}
+
+/**
+ * Validates the daemon's optional all-or-nothing bootstrap release interface before
+ * config loading or listener startup.
+ * @param {{config?: string, releaseId?: string, releasePath?: string, revision?: string}} options - Daemon CLI options.
+ * @returns {Promise<{releaseId: string, releasePath: string, revision: string} | undefined>} Validated bootstrap metadata.
+ */
+async function validateDaemonBootstrapOptions(options) {
+  const bootstrapValues = [options.releasePath, options.releaseId, options.revision]
+  const bootstrapRequested = bootstrapValues.some((value) => value !== undefined)
+
+  if (!bootstrapRequested) return undefined
+
+  if (!options.config || bootstrapValues.some((value) => value === undefined)) {
+    throw new Error("Daemon bootstrap options --config, --release-path, --release-id, and --revision must be provided together.")
+  }
+
+  if (!path.isAbsolute(options.config)) throw new Error("Daemon bootstrap --config must be an absolute path.")
+  if (path.normalize(options.config) !== options.config) throw new Error("Daemon bootstrap --config must be normalized and must not contain unsafe traversal segments.")
+  if (!path.isAbsolute(/** @type {string} */ (options.releasePath))) throw new Error("Daemon bootstrap --release-path must be an absolute path.")
+  if (path.normalize(/** @type {string} */ (options.releasePath)) !== options.releasePath) throw new Error("Daemon bootstrap --release-path must be normalized and must not contain unsafe traversal segments.")
+
+  const releaseId = /** @type {string} */ (options.releaseId)
+  const revision = /** @type {string} */ (options.revision)
+  const safeIdentifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/
+
+  if (!safeIdentifier.test(releaseId)) throw new Error("Daemon bootstrap --release-id must be a non-empty safe identifier containing only letters, numbers, dots, underscores, and hyphens.")
+  if (!safeIdentifier.test(revision)) throw new Error("Daemon bootstrap --revision must be a non-empty safe identifier containing only letters, numbers, dots, underscores, and hyphens.")
+
+  let releaseStat
+
+  try {
+    releaseStat = await fsPromises.stat(/** @type {string} */ (options.releasePath))
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+
+    throw new Error(`Daemon bootstrap --release-path is not accessible: ${reason}`, {cause: error})
+  }
+
+  if (!releaseStat.isDirectory()) throw new Error("Daemon bootstrap --release-path must name a directory.")
+
+  return {releaseId, releasePath: /** @type {string} */ (options.releasePath), revision}
 }
 
 /**

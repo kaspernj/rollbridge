@@ -399,6 +399,22 @@ Start the daemon:
 rollbridge daemon --config rollbridge.js
 ```
 
+Start the daemon and bootstrap an exact prepared release before leaving it in
+the foreground (for example from a boot-time service manager):
+
+```bash
+rollbridge daemon --config /srv/ticket-server/rollbridge.js \
+  --release-path /srv/ticket-server/releases/20260813090000/ticket-server \
+  --release-id 20260813090000 --revision abc123
+```
+
+The four bootstrap inputs are all-or-nothing and use absolute config/release
+paths. Rollbridge binds its proxy and control listeners, activates the release
+through the normal deploy path, and stays foreground. A failed activation stops
+only processes started by that attempt and exits non-zero; persisted processes
+from a previous daemon are reported as orphans and are never recovered or killed
+implicitly; their live PID records remain in `statePath` for explicit recovery.
+
 Start the daemon only when it is not already running:
 
 ```bash

@@ -56,6 +56,7 @@ export default class RollbridgeDaemon {
     this.statePath = config.statePath
     this.persistTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
     this.pendingWrite = /** @type {Promise<void> | undefined} */ (undefined)
+    this.startingReleases = /** @type {Set<ReleaseGroup>} */ (new Set())
     // Still-alive managed processes left by a previous daemon (from statePath), captured at
     // startup and surfaced in status(). The daemon cannot re-manage them, only report them.
     this.orphans = /** @type {{id: string, pid: number, releaseId: string | null}[]} */ ([])
@@ -334,19 +335,26 @@ export default class RollbridgeDaemon {
       releaseId: newReleaseId,
       releasePath,
       revision,
-      servicePorts: this.servicePorts
+      servicePorts: this.servicePorts,
+      shouldStart: () => !this.stopping
     })
 
     this.logger("deploy starting", {releaseId: newReleaseId, releasePath, revision})
     const startedServices = /** @type {string[]} */ ([])
 
+    this.startingReleases.add(release)
+
     try {
       await this.ensureServices(release, startedServices)
       await release.start()
+      if (this.stopping) throw new Error("Rollbridge is shutting down")
     } catch (error) {
       this.logger("deploy failed", {error: error instanceof Error ? error.message : String(error), releaseId: newReleaseId})
+      await release.stop()
       await this.stopStartedServices(startedServices)
       throw error
+    } finally {
+      this.startingReleases.delete(release)
     }
 
     const previousRelease = this.activeRelease
@@ -467,6 +475,7 @@ export default class RollbridgeDaemon {
     await release.allocatePorts()
 
     for (const processConfig of release.config.processes) {
+      if (this.stopping) throw new Error("Rollbridge is shutting down")
       if (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff") continue
       if (this.services.has(processConfig.id)) continue
 
@@ -486,6 +495,8 @@ export default class RollbridgeDaemon {
         delete this.servicePorts[processConfig.id]
         throw error
       }
+
+      if (this.stopping) throw new Error("Rollbridge is shutting down")
     }
   }
 
@@ -532,12 +543,14 @@ export default class RollbridgeDaemon {
    */
   async replaceSingletons(release) {
     for (const processConfig of this.config.processes) {
+      if (this.stopping) throw new Error("Rollbridge is shutting down")
       if (processConfig.policy !== "singleton") continue
 
       const previous = this.singletons.get(processConfig.id)
 
       if (previous) {
         await previous.stop()
+        if (this.stopping) throw new Error("Rollbridge is shutting down")
       }
 
       const singleton = release.buildProcess(processConfig)
@@ -688,9 +701,7 @@ export default class RollbridgeDaemon {
     if (!this.statePath || this.stopping) return
 
     const statePath = this.statePath
-    // Drop the orphans view from the snapshot: it reflects a *previous* daemon's leftovers, not
-    // this daemon's own managed state, and is recomputed from the persisted processes on restart.
-    const {orphans: _orphans, ...status} = this.status()
+    const status = this.status()
     const snapshot = {...status, events: this.eventLog.recent(), persistedAt: new Date().toISOString()}
 
     // Serialize writes (and track the tail) so shutdown can wait for an in-flight write before
@@ -742,17 +753,24 @@ export default class RollbridgeDaemon {
     this.proxy.close()
     await Promise.allSettled([...this.services.values()].map((processInstance) => processInstance.stop()))
     await Promise.allSettled([...this.singletons.values()].map((processInstance) => processInstance.stop()))
+    await Promise.allSettled([...this.startingReleases].map((release) => release.stop()))
     await Promise.allSettled([...this.releases.values()].map((release) => release.stop()))
     await this.closeServer(this.proxyServer)
     await this.closeServer(this.controlServer)
     await fs.rm(this.config.control.path, {force: true})
 
-    // A clean shutdown leaves no orphans, so remove the state file rather than leaving stale
-    // pids. Wait for any in-flight write first so it can't recreate the file afterward (no new
-    // writes start: stopping is set and the persist timer is cleared above).
+    // Wait for any in-flight write first so it can't recreate or overwrite the final state (no
+    // new writes start: stopping is set and the persist timer is cleared above). Prior-daemon
+    // orphans are not owned by this daemon, so retain their records until they are confirmed gone.
     if (this.statePath) {
       if (this.pendingWrite) await this.pendingWrite
-      await clearState(this.statePath)
+      const orphans = this.orphans.filter((orphan) => isProcessAlive(orphan.pid))
+
+      if (orphans.length > 0) {
+        await writeState(this.statePath, {activeReleaseId: null, orphans, releases: [], services: [], singletons: []})
+      } else {
+        await clearState(this.statePath)
+      }
     }
   }
 
