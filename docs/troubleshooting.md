@@ -1,5 +1,23 @@
 # Troubleshooting
 
+## Legacy or mismatched daemon runtime
+
+**Symptom.** `deploy --ensure-daemon` or `ensure-daemon` reports that the
+running daemon has a legacy or mismatched runtime and confirms that the deploy
+was not sent.
+
+**Cause.** A daemon already owns the stable proxy/control socket, but it cannot
+attest to the same immutable Rollbridge runtime as the CLI preparing the deploy.
+Rollbridge does not silently restart it because rebinding the proxy could cause
+downtime or abandon managed processes.
+
+**Fix.** Keep the current release active, explicitly stop and restart the daemon
+with the intended Rollbridge installation during a safe handoff, then retry the
+deploy. If durable runtime preparation itself fails, check permissions for
+`--daemon-runtime-path` (default
+`/tmp/rollbridge-<user-id>-<application-hash>-runtime`) before retrying. The directory
+must be private to the invoking user.
+
 Start with these three commands — they diagnose most problems without guessing:
 
 - `rollbridge validate` — config errors, with an example fix for each.

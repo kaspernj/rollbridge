@@ -2,10 +2,12 @@
 
 import fs from "node:fs"
 import fsPromises from "node:fs/promises"
+import {createHash} from "node:crypto"
 import path from "node:path"
 import {spawn} from "node:child_process"
 import {Command} from "commander"
 import RollbridgeDaemon from "./daemon.js"
+import {loadDaemonRuntimeIdentity, prepareDaemonRuntime} from "./daemon-runtime.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
 import {runEnvironmentChecks, runReleaseChecks} from "./doctor.js"
 import {predeployCleanup} from "./predeploy-cleanup.js"
@@ -37,7 +39,8 @@ export async function runCli(argv) {
       const bootstrap = await validateDaemonBootstrapOptions(options)
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
-      const daemon = new RollbridgeDaemon({config, configPath})
+      const runtime = await loadDaemonRuntimeIdentity(process.env.ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST)
+      const daemon = new RollbridgeDaemon({config, configPath, runtime})
 
       await daemon.start({exposeControl: !bootstrap})
 
@@ -71,6 +74,7 @@ export async function runCli(argv) {
     .option("--ensure-daemon", "Start the Rollbridge daemon if it is not already running")
     .option("--daemon-log-path <path>", "Log path used when --ensure-daemon starts the daemon")
     .option("--daemon-pid-path <path>", "PID file path used when --ensure-daemon starts the daemon")
+    .option("--daemon-runtime-path <path>", "Directory for durable daemon runtime snapshots")
     .option("--daemon-start-timeout-ms <ms>", "How long to wait for an ensured daemon to accept control commands")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
@@ -78,11 +82,11 @@ export async function runCli(argv) {
 
       if (options.ensureDaemon) {
         await ensureDaemonRunning({
-          argv,
           config,
           configPath,
           logPath: options.daemonLogPath,
           pidPath: options.daemonPidPath,
+          runtimePath: options.daemonRuntimePath,
           timeoutMs: normalizeTimeoutMs(options.daemonStartTimeoutMs)
         })
       }
@@ -125,16 +129,17 @@ export async function runCli(argv) {
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .option("--daemon-log-path <path>", "Daemon log path")
     .option("--daemon-pid-path <path>", "Daemon PID file path")
+    .option("--daemon-runtime-path <path>", "Directory for durable daemon runtime snapshots")
     .option("--daemon-start-timeout-ms <ms>", "How long to wait for the daemon to accept control commands")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const response = await ensureDaemonRunning({
-        argv,
         config,
         configPath,
         logPath: options.daemonLogPath,
         pidPath: options.daemonPidPath,
+        runtimePath: options.daemonRuntimePath,
         timeoutMs: normalizeTimeoutMs(options.daemonStartTimeoutMs)
       })
 
@@ -758,24 +763,28 @@ async function validateDaemonBootstrapOptions(options) {
 /**
  * Starts a daemon when needed and waits until it accepts status commands.
  * @param {object} args - Options.
- * @param {string[]} args.argv - Original CLI argv.
  * @param {import("./config.js").RollbridgeConfig} args.config - Loaded config.
  * @param {string} args.configPath - Config path.
  * @param {string | undefined} args.logPath - Optional daemon log path.
  * @param {string | undefined} args.pidPath - Optional daemon PID path.
+ * @param {string | undefined} args.runtimePath - Optional durable runtime directory.
  * @param {number} args.timeoutMs - Startup timeout.
  * @returns {Promise<Record<string, import("./json.js").JsonValue>>} Daemon status response.
  */
-async function ensureDaemonRunning({argv, config, configPath, logPath, pidPath, timeoutMs}) {
+async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtimePath, timeoutMs}) {
+  const runtime = await prepareDaemonRuntime(runtimePath || defaultDaemonRuntimePath(config))
   const existingStatus = await daemonStatus(config)
 
-  if (existingStatus) return existingStatus
+  if (existingStatus) {
+    assertCompatibleDaemonRuntime(existingStatus, runtime)
+    return existingStatus
+  }
 
   await startDaemonProcess({
-    argv,
     configPath,
     logPath: logPath || defaultDaemonLogPath(config),
-    pidPath: pidPath || defaultDaemonPidPath(config)
+    pidPath: pidPath || defaultDaemonPidPath(config),
+    runtime
   })
 
   return await waitForDaemonStatus(config, timeoutMs)
@@ -805,17 +814,13 @@ async function daemonStatus(config) {
 /**
  * Starts the foreground daemon command as a detached child.
  * @param {object} args - Options.
- * @param {string[]} args.argv - Original CLI argv.
  * @param {string} args.configPath - Config path.
  * @param {string} args.logPath - Log file path.
  * @param {string} args.pidPath - PID file path.
+ * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} args.runtime - Prepared runtime.
  * @returns {Promise<void>} Resolves after the child has been spawned.
  */
-async function startDaemonProcess({argv, configPath, logPath, pidPath}) {
-  const binPath = argv[1] || process.argv[1]
-
-  if (!binPath) throw new Error("Unable to determine Rollbridge CLI path for daemon startup")
-
+async function startDaemonProcess({configPath, logPath, pidPath, runtime}) {
   await fsPromises.mkdir(path.dirname(logPath), {recursive: true})
   await fsPromises.mkdir(path.dirname(pidPath), {recursive: true})
 
@@ -823,9 +828,9 @@ async function startDaemonProcess({argv, configPath, logPath, pidPath}) {
   const stderrFd = fs.openSync(logPath, "a")
 
   try {
-    const child = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {
+    const child = spawn(process.execPath, [path.join(runtime.path, "bin", "rollbridge"), "daemon", "--config", configPath], {
       detached: true,
-      env: process.env,
+      env: {...process.env, ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST: path.join(runtime.path, "runtime.json")},
       stdio: ["ignore", stdoutFd, stderrFd]
     })
 
@@ -881,6 +886,36 @@ function defaultDaemonLogPath(config) {
  */
 function defaultDaemonPidPath(config) {
   return `/tmp/rollbridge-${config.application}.pid`
+}
+
+/**
+ * @param {import("./config.js").RollbridgeConfig} config - Loaded config.
+ * @returns {string} Default durable daemon runtime directory.
+ */
+function defaultDaemonRuntimePath(config) {
+  const userId = typeof process.getuid === "function" ? process.getuid() : "user"
+  const applicationHash = createHash("sha256").update(config.application).digest("hex").slice(0, 16)
+
+  return `/tmp/rollbridge-${userId}-${applicationHash}-runtime`
+}
+
+/**
+ * Refuses to hand a deploy to a daemon whose immutable runtime does not match this CLI.
+ * @param {Record<string, import("./json.js").JsonValue>} status - Existing daemon status.
+ * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} expected - Expected runtime.
+ * @returns {void}
+ */
+function assertCompatibleDaemonRuntime(status, expected) {
+  const runtime = status.daemonRuntime
+  const compatible = runtime && typeof runtime === "object" && !Array.isArray(runtime) &&
+    runtime.format === expected.format && runtime.version === expected.version && runtime.digest === expected.digest
+
+  if (compatible) return
+
+  throw new Error(
+    "The running Rollbridge daemon has a legacy or mismatched runtime. " +
+    "The deploy was not sent. Keep the current release active, then explicitly stop and restart the daemon with this Rollbridge installation before retrying."
+  )
 }
 
 /**

@@ -18,7 +18,7 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
- * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  */
 
 export default class RollbridgeDaemon {
@@ -27,10 +27,12 @@ export default class RollbridgeDaemon {
    * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
    * @param {string} [args.configPath] - Config file path to reload before deploys.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} [args.logger] - Logger.
+   * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} [args.runtime] - Immutable daemon runtime identity.
    */
-  constructor({config, configPath, logger}) {
+  constructor({config, configPath, logger, runtime}) {
     this.config = config
     this.configPath = configPath
+    this.runtime = runtime
     this.eventLog = new EventLog(EVENT_HISTORY_LIMIT)
 
     const baseLogger = logger || ((message, data = {}) => console.log(JSON.stringify({at: new Date().toISOString(), data, message})))
@@ -818,6 +820,7 @@ export default class RollbridgeDaemon {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,
       application: this.config.application,
       control: {...this.config.control},
+      daemonRuntime: this.runtime ? {...this.runtime} : undefined,
       orphans: [...this.orphans],
       proxy: {
         host: this.config.proxy.host,

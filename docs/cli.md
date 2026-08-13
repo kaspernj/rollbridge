@@ -62,6 +62,7 @@ and waits for control-socket deployments.
 rollbridge ensure-daemon [--config <path>]
                          [--daemon-log-path <path>]
                          [--daemon-pid-path <path>]
+                         [--daemon-runtime-path <path>]
                          [--daemon-start-timeout-ms <ms>]
 ```
 
@@ -69,11 +70,24 @@ Starts the daemon as a detached process **only if** the control socket is not
 already accepting commands, waits until it responds, then prints the daemon
 status JSON. Idempotent — safe to call before every deploy.
 
+Before starting a detached daemon, Rollbridge atomically copies its runtime code
+and production dependency closure into a content-addressed directory outside
+the invoking release. This keeps the long-lived daemon valid when deploy
+retention removes that release. A responsive daemon is reused only when its
+runtime identity matches the invoking Rollbridge installation; a legacy or
+mismatched daemon causes the command to fail before any deploy is sent. Stop and
+restart such a daemon explicitly during a safe maintenance handoff.
+
 - `--daemon-log-path <path>` — file the detached daemon's stdout/stderr is
   appended to. Default: `/tmp/rollbridge-<application>.log`. See
   [`logging.md`](logging.md) for the log format and rotation guidance.
 - `--daemon-pid-path <path>` — file the detached daemon's PID is written to.
   Default: `/tmp/rollbridge-<application>.pid`.
+- `--daemon-runtime-path <path>` — parent directory for content-addressed daemon
+  runtime snapshots. Default:
+  `/tmp/rollbridge-<user-id>-<application-hash>-runtime`. The directory must be owned
+  by the current user and must not be group/world writable; preparation or
+  validation failure aborts before daemon startup or deploy handoff.
 - `--daemon-start-timeout-ms <ms>` — how long to wait for the daemon to accept
   control commands before failing. Default: `10000`.
 
@@ -87,6 +101,7 @@ rollbridge deploy --release-path <path>
                   [--ensure-daemon]
                   [--daemon-log-path <path>]
                   [--daemon-pid-path <path>]
+                  [--daemon-runtime-path <path>]
                   [--daemon-start-timeout-ms <ms>]
 ```
 
@@ -154,6 +169,10 @@ per release, service, and singleton process — its `state`, `pid`, automatic
 Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
 `lastMemoryRestartAt`, and `children` (the process tree: each group member's
 `pid`, `command`, and `rssBytes`).
+
+`daemonRuntime` identifies the immutable Rollbridge runtime serving the proxy:
+its runtime `format`, package `version`, content `digest`, and absolute `path`.
+`ensure-daemon` uses this attestation before reusing a responsive daemon.
 
 When [`statePath`](config.md#statepath) is configured, status also includes an
 `orphans` array: managed processes from a **previous** daemon that are still
