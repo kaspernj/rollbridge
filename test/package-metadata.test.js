@@ -60,7 +60,7 @@ test("package manifest excludes unexpected operational and coverage files", asyn
   const packageFiles = JSON.parse(stdout)[0].files
   const packagePaths = packageFiles.map((file) => file.path)
 
-  for (const requiredPath of ["LICENSE", "README.md", "bin/rollbridge", "package.json", "src/cli.js"]) {
+  for (const requiredPath of ["LICENSE", "README.md", "bin/rollbridge", "package.json", "src/cli.js", "src/daemon-runtime.js"]) {
     assert.ok(packagePaths.includes(requiredPath), `expected package to include ${requiredPath}`)
   }
   assert.ok(!packagePaths.some((packagePath) => packagePath === "tmp" || packagePath.startsWith("tmp/")))

@@ -44,6 +44,7 @@ test("completion bash prints a sourceable script with commands and option flags"
   assert.match(output, /compgen -W "daemon deploy rollback ensure-daemon status stop restart shutdown validate doctor logs events predeploy-cleanup recover completion"/)
   // A command's own options are completed after the command.
   assert.match(output, /deploy\)\n\s+opts="[^"]*--release-path[^"]*"/)
+  assert.match(output, /ensure-daemon\)\n\s+opts="[^"]*--daemon-runtime-path[^"]*"/)
   assert.match(output, /restart\)\n\s+opts="[^"]*--policy[^"]*"/)
 })
 

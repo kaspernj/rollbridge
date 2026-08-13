@@ -1117,7 +1117,9 @@ test("deploy can ensure the daemon before sending the release command", async ()
       "--daemon-log-path",
       logPath,
       "--daemon-pid-path",
-      pidPath
+      pidPath,
+      "--daemon-runtime-path",
+      path.join(fixture.root, "daemon-runtime")
     ])
 
     const status = await sendControlCommand({
