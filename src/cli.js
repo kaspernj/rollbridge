@@ -787,7 +787,10 @@ async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtim
     runtime
   })
 
-  return await waitForDaemonStatus(config, timeoutMs)
+  const startedStatus = await waitForDaemonStatus(config, timeoutMs)
+
+  assertCompatibleDaemonRuntime(startedStatus, runtime)
+  return startedStatus
 }
 
 /**

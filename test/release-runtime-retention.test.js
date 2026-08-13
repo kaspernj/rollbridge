@@ -188,6 +188,70 @@ test("ensure-daemon refuses a mismatched runtime attestation before deploy", asy
   }
 })
 
+test("concurrent startup loser re-attests the winner before sending deploy", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-runtime-start-race-"))
+  const winnerRelease = path.join(root, "releases", "winner")
+  const loserRelease = path.join(root, "releases", "loser")
+  const socketPath = path.join(root, "control.sock")
+  const configPath = path.join(root, "rollbridge.js")
+  const loserPausedPath = path.join(root, "loser-paused")
+  const winnerPidPath = path.join(root, "winner.pid")
+  const loserPidPath = path.join(root, "loser.pid")
+
+  try {
+    await Promise.all([prepareRelease(winnerRelease, false), prepareRelease(loserRelease, false)])
+    await installStartupPause(loserRelease, loserPausedPath)
+    await fs.writeFile(configPath, `export default ${JSON.stringify({
+      application: "runtime-start-race-test",
+      control: {path: socketPath},
+      processes: [{
+        command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
+        health: {intervalMs: 25, path: "/ping", timeoutMs: 3000},
+        id: "web",
+        policy: "proxied",
+        port: {from: 0, to: 0}
+      }],
+      proxy: {drainTimeoutMs: 100, forceStopTimeoutMs: 100, host: "127.0.0.1", port: 0}
+    }, null, 2)}\n`)
+
+    const loserDeploy = runReleaseCli(loserRelease, [
+      "deploy", "--ensure-daemon", "--config", configPath,
+      "--release-path", loserRelease, "--release-id", "loser",
+      "--daemon-log-path", path.join(root, "loser.log"), "--daemon-pid-path", loserPidPath,
+      "--daemon-runtime-path", path.join(root, "loser-runtime")
+    ])
+
+    await waitForFile(loserPausedPath)
+    await runReleaseCli(winnerRelease, [
+      "deploy", "--ensure-daemon", "--config", configPath,
+      "--release-path", winnerRelease, "--release-id", "winner",
+      "--daemon-log-path", path.join(root, "winner.log"), "--daemon-pid-path", winnerPidPath,
+      "--daemon-runtime-path", path.join(root, "winner-runtime")
+    ])
+
+    await assert.rejects(loserDeploy, /legacy or mismatched runtime.*deploy was not sent/s)
+    const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(status.activeReleaseId, "winner")
+  } finally {
+    try {
+      await sendControlCommand({command: {command: "shutdown"}, path: socketPath})
+    } catch {
+      // The winning daemon may have failed before accepting commands.
+    }
+
+    for (const pidPath of [winnerPidPath, loserPidPath]) {
+      const pid = Number.parseInt(await fs.readFile(pidPath, "utf8").catch(() => ""), 10)
+
+      if (Number.isInteger(pid)) {
+        try { process.kill(pid, "SIGKILL") } catch { /* The process already exited. */ }
+      }
+    }
+
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 /**
  * Creates a release-local Rollbridge package with production dependencies and,
  * for release A, a daemon module that performs one deliberately deferred import.
@@ -222,6 +286,43 @@ async function prepareRelease(releasePath, deferredImport) {
   assert.ok(source.includes(marker))
   await fs.writeFile(daemonPath, source.replace(marker, deferredRoute))
   await fs.writeFile(path.join(packagePath, "src", "deferred-runtime.js"), "export default \"deferred runtime loaded\\n\"\n")
+}
+
+/**
+ * Pauses a release after its initial missing-daemon probe so another runtime can win startup.
+ * @param {string} releasePath - Release directory.
+ * @param {string} pausedPath - Synchronization file.
+ * @returns {Promise<void>} Resolves after installing the test hook.
+ */
+async function installStartupPause(releasePath, pausedPath) {
+  const cliPath = path.join(releasePath, "node_modules", "rollbridge", "src", "cli.js")
+  const source = await fs.readFile(cliPath, "utf8")
+  const marker = "  await startDaemonProcess({\n"
+  const pause = `  await fsPromises.writeFile(${JSON.stringify(pausedPath)}, "paused\\n")\n  await new Promise((resolve) => setTimeout(resolve, 750))\n\n${marker}`
+
+  assert.ok(source.includes(marker))
+  await fs.writeFile(cliPath, source.replace(marker, pause))
+}
+
+/**
+ * @param {string} filePath - File to await.
+ * @returns {Promise<void>} Resolves when the file exists.
+ */
+async function waitForFile(filePath) {
+  const deadline = Date.now() + 5000
+
+  while (Date.now() < deadline) {
+    try {
+      await fs.stat(filePath)
+      return
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+
+  throw new Error(`Timed out waiting for ${filePath}`)
 }
 
 /**
