@@ -2,7 +2,7 @@
 
 import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
-import {processGroupMembers} from "./process-memory.js"
+import {processGroupHasLiveMembers, processGroupMembers} from "./process-memory.js"
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
@@ -354,6 +354,7 @@ export default class ManagedProcess extends EventEmitter {
     }
 
     const pgid = child.pid
+    const exitPromise = this.exitPromise
 
     this.state = "stopping"
 
@@ -373,7 +374,7 @@ export default class ManagedProcess extends EventEmitter {
 
     // 3. Stop whatever is still running, then SIGKILL if it outlasts the graceful window.
     if (this.processGroupExists(pgid)) {
-      if (stopCommand) await this.runHook(stopCommand, hookTimeoutMs, "stop command")
+      if (stopCommand) await this.runHook(stopCommand, hookTimeoutMs, "stop command", pgid)
       else this.killProcessGroup(this.stopSignal, pgid)
 
       const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
@@ -381,9 +382,11 @@ export default class ManagedProcess extends EventEmitter {
       if (!(await this.waitForProcessGroupExit(pgid, timeoutMs))) {
         this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: pgid})
         this.killProcessGroup("SIGKILL", pgid)
-        await this.waitForProcessGroupExit(pgid, "indefinite")
+        await this.waitForProcessGroupExit(pgid, 5000)
       }
     }
+
+    if (exitPromise) await exitPromise
 
     this.state = "stopped"
   }
@@ -402,9 +405,10 @@ export default class ManagedProcess extends EventEmitter {
    * @param {string} command - Shell command to run.
    * @param {number} timeoutMs - Maximum time to wait for the hook before killing it.
    * @param {string} label - Hook name, for log messages.
+   * @param {number | undefined} [pid] - Process-group leader exposed to the hook.
    * @returns {Promise<void>} Resolves when the hook exits, errors, or times out.
    */
-  async runHook(command, timeoutMs, label) {
+  async runHook(command, timeoutMs, label, pid = this.pid) {
     await new Promise((resolve) => {
       let settled = false
       const finish = () => { if (!settled) { settled = true; resolve(undefined) } }
@@ -416,7 +420,7 @@ export default class ManagedProcess extends EventEmitter {
         hook = spawn(command, {
           cwd: this.cwd,
           detached: true,
-          env: {...process.env, ...this.env, ROLLBRIDGE_PID: this.pid ? String(this.pid) : ""},
+          env: {...process.env, ...this.env, ROLLBRIDGE_PID: pid ? String(pid) : ""},
           shell: true,
           stdio: "ignore"
         })
@@ -482,6 +486,10 @@ export default class ManagedProcess extends EventEmitter {
    * @returns {boolean} True until the process group no longer exists.
    */
   processGroupExists(pgid) {
+    const hasLiveMembers = processGroupHasLiveMembers(pgid)
+
+    if (hasLiveMembers !== undefined) return hasLiveMembers
+
     try {
       process.kill(-pgid, 0)
 
