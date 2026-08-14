@@ -292,6 +292,41 @@ test("a configured stopCommand is used instead of the stop signal", async () => 
   }
 })
 
+test("stopCommand receives the retained process group id after the shell exits", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-hooks-"))
+  const pidPath = path.join(dir, "stop-pid")
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")} & wait`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    lifecycle: {
+      drainTimeoutMs: 0,
+      quietCommand: "kill -TERM $ROLLBRIDGE_PID; sleep 0.1",
+      stopCommand: `echo $ROLLBRIDGE_PID > ${JSON.stringify(pidPath)}; kill -TERM -$ROLLBRIDGE_PID`
+    },
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: 1000
+  })
+
+  try {
+    await managed.start()
+
+    const pgid = managed.pid
+
+    await managed.stop()
+
+    assert.equal(fs.readFileSync(pidPath, "utf8").trim(), String(pgid))
+  } finally {
+    await managed.stop()
+    fs.rmSync(dir, {force: true, recursive: true})
+  }
+})
+
 test("a failing lifecycle hook is logged but does not fail the stop", async () => {
   /** @type {string[]} */
   const messages = []
@@ -411,6 +446,48 @@ test("indefinite stop waits for the process to exit without SIGKILL", async () =
     assert.deepEqual(signals, ["SIGTERM"])
   } finally {
     await managed.stop()
+  }
+})
+
+test("stop waits for process group descendants after the detached shell exits", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-process-group-"))
+  const readyPath = path.join(dir, "ready")
+  const latePath = path.join(dir, "late")
+  const descendant = [
+    "const fs = require('node:fs')",
+    `process.on('SIGTERM', () => setTimeout(() => { fs.writeFileSync(${JSON.stringify(latePath)}, 'late'); process.exit(0) }, 300))`,
+    `fs.writeFileSync(${JSON.stringify(readyPath)}, 'ready')`,
+    "setInterval(() => {}, 1000)"
+  ].join("; ")
+  const managed = new ManagedProcess({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(descendant)} & wait`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: 2000
+  })
+
+  try {
+    await managed.start()
+    await waitFor(() => fs.existsSync(readyPath))
+
+    const startedAt = Date.now()
+
+    await managed.stop()
+
+    const elapsedMs = Date.now() - startedAt
+
+    assert.ok(elapsedMs >= 250, `stop resolved after only ${elapsedMs}ms`)
+    assert.ok(elapsedMs < 1500, `stop took ${elapsedMs}ms`)
+    assert.equal(fs.readFileSync(latePath, "utf8"), "late")
+  } finally {
+    await managed.stop()
+    fs.rmSync(dir, {force: true, recursive: true})
   }
 })
 

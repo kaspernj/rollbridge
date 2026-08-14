@@ -43,6 +43,34 @@ export function processGroupMembers(pgid) {
 }
 
 /**
+ * Reports whether a process group has a member that can still run. Defunct members remain
+ * visible to kill(2) until their parent reaps them, but cannot handle signals or do work.
+ * @param {number} pgid - Process-group id.
+ * @param {string} [procPath] - Procfs root (overridable for deterministic tests).
+ * @returns {boolean | undefined} Whether a live member exists, or undefined without procfs.
+ */
+export function processGroupHasLiveMembers(pgid, procPath = "/proc") {
+  /** @type {string[]} */
+  let entries
+
+  try {
+    entries = fs.readdirSync(procPath)
+  } catch {
+    return undefined
+  }
+
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+
+    const stat = processStat(entry, procPath)
+
+    if (stat?.pgrp === pgid && stat.state !== "Z" && stat.state !== "X") return true
+  }
+
+  return false
+}
+
+/**
  * Measures the total resident memory (RSS) of a managed process group.
  * @param {number} pgid - Process-group id (the detached spawn's pid).
  * @returns {number | undefined} Total resident memory in bytes, or undefined when unmeasurable.
@@ -72,10 +100,19 @@ function commandName(pid) {
  * @returns {number | undefined} The process-group id, or undefined when the process is gone.
  */
 function processGroupId(pid) {
+  return processStat(pid, "/proc")?.pgrp
+}
+
+/**
+ * @param {string} pid - Process id.
+ * @param {string} procPath - Procfs root.
+ * @returns {{pgrp: number, state: string} | undefined} Parsed process state and group.
+ */
+function processStat(pid, procPath) {
   let stat
 
   try {
-    stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8")
+    stat = fs.readFileSync(`${procPath}/${pid}/stat`, "utf8")
   } catch {
     return undefined
   }
@@ -86,9 +123,10 @@ function processGroupId(pid) {
 
   if (commEnd < 0) return undefined
 
-  const pgrp = Number(stat.slice(commEnd + 2).split(" ")[2])
+  const fields = stat.slice(commEnd + 2).split(" ")
+  const pgrp = Number(fields[2])
 
-  return Number.isInteger(pgrp) ? pgrp : undefined
+  return Number.isInteger(pgrp) ? {pgrp, state: fields[0]} : undefined
 }
 
 /**
