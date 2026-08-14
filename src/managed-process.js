@@ -353,6 +353,8 @@ export default class ManagedProcess extends EventEmitter {
       return
     }
 
+    const pgid = child.pid
+
     this.state = "stopping"
 
     const {drainCommand, drainTimeoutMs, quietCommand, stopCommand} = this.lifecycle
@@ -370,16 +372,16 @@ export default class ManagedProcess extends EventEmitter {
     }
 
     // 3. Stop whatever is still running, then SIGKILL if it outlasts the graceful window.
-    if (this.child) {
+    if (this.processGroupExists(pgid)) {
       if (stopCommand) await this.runHook(stopCommand, hookTimeoutMs, "stop command")
-      else this.killProcessGroup(this.stopSignal)
+      else this.killProcessGroup(this.stopSignal, pgid)
 
       const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
 
-      if (this.child && !(await this.waitForExit(timeoutMs))) {
-        this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: this.pid})
-        this.killProcessGroup("SIGKILL")
-        await this.waitForExit(5000)
+      if (!(await this.waitForProcessGroupExit(pgid, timeoutMs))) {
+        this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: pgid})
+        this.killProcessGroup("SIGKILL", pgid)
+        await this.waitForProcessGroupExit(pgid, "indefinite")
       }
     }
 
@@ -461,17 +463,49 @@ export default class ManagedProcess extends EventEmitter {
 
   /**
    * @param {string} signal - Signal name to send (the configured stop signal, or "SIGKILL").
+   * @param {number | undefined} [pgid] - Process group id (the current child pid by default).
    * @returns {void}
    */
-  killProcessGroup(signal) {
-    if (!this.child || !this.child.pid) return
+  killProcessGroup(signal, pgid = this.pid) {
+    if (!pgid) return
 
     try {
-      process.kill(-this.child.pid, signal)
+      process.kill(-pgid, signal)
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
       throw error
     }
+  }
+
+  /**
+   * @param {number} pgid - Process group id.
+   * @returns {boolean} True until the process group no longer exists.
+   */
+  processGroupExists(pgid) {
+    try {
+      process.kill(-pgid, 0)
+
+      return true
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return false
+      throw error
+    }
+  }
+
+  /**
+   * @param {number} pgid - Process group id.
+   * @param {StopTimeoutMs} timeoutMs - Timeout.
+   * @returns {Promise<boolean>} True once the process group no longer exists.
+   */
+  async waitForProcessGroupExit(pgid, timeoutMs) {
+    const deadline = timeoutMs === "indefinite" ? undefined : Date.now() + timeoutMs
+
+    while (this.processGroupExists(pgid)) {
+      if (deadline !== undefined && Date.now() >= deadline) return false
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+
+    return true
   }
 
   /**
