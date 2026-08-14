@@ -1,0 +1,17 @@
+# Canonical Rollbridge development service.
+name: rollbridge
+
+services:
+  dev:
+    image: threadwire-dev:local
+    entrypoint: ["/bin/sh", "-c"]
+    init: true
+    user: "1000:1000"
+    working_dir: /home/dev/rollbridge
+    environment:
+      GH_CONFIG_DIR: /home/dev/.config/gh
+      HOME: /home/dev
+    volumes:
+      - ${DEV_HOME_PATH:-/home/dev}:/home/dev
+      - ${GH_CONFIG_SOURCE_PATH:?Set GH_CONFIG_SOURCE_PATH in .env}:/home/dev/.config/gh:ro
+    command: ["exec sleep infinity"]
