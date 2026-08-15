@@ -56,6 +56,7 @@ export default class RollbridgeDaemon {
     this.proxy = httpProxy.createProxyServer({ws: true, xfwd: true})
     this.proxyServer = /** @type {http.Server | undefined} */ (undefined)
     this.controlServer = /** @type {net.Server | undefined} */ (undefined)
+    this.controlSockets = /** @type {Set<net.Socket>} */ (new Set())
     this.proxyPort = /** @type {number | undefined} */ (undefined)
     this.stopping = false
     this.statePath = config.statePath
@@ -249,8 +250,16 @@ export default class RollbridgeDaemon {
    * @returns {void}
    */
   handleControlSocket(socket) {
+    this.controlSockets.add(socket)
     socket.setEncoding("utf8")
     let buffer = ""
+
+    socket.once("close", () => this.controlSockets.delete(socket))
+    socket.on("error", (error) => {
+      const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null
+
+      this.logger("control connection error", {code, error: error.message})
+    })
 
     socket.on("data", (chunk) => {
       buffer += chunk
@@ -271,22 +280,34 @@ export default class RollbridgeDaemon {
    * @returns {void}
    */
   handleControlLine(line, socket) {
-    this.executeControlLine(line)
-      .then((response) => socket.write(`${JSON.stringify({status: "success", ...response})}\n`))
+    const closesConnection = isShutdownControlLine(line)
+    const respond = (/** @type {Record<string, JsonValue>} */ response) => {
+      const payload = `${JSON.stringify(response)}\n`
+
+      if (closesConnection) {
+        socket.end(payload, () => socket.destroy())
+      } else if (!socket.destroyed) {
+        socket.write(payload)
+      }
+    }
+
+    this.executeControlLine(line, socket)
+      .then((response) => respond({status: "success", ...response}))
       .catch((error) => {
         this.logger("command failed", {error: error instanceof Error ? error.message : String(error)})
-        socket.write(`${JSON.stringify({
+        respond({
           error: error instanceof Error ? error.message : String(error),
           status: "error"
-        })}\n`)
+        })
       })
   }
 
   /**
    * @param {string} line - JSON command line.
+   * @param {net.Socket} [controlSocket] - Requesting control connection, used only for shutdown completion.
    * @returns {Promise<Record<string, JsonValue>>} Command response.
    */
-  async executeControlLine(line) {
+  async executeControlLine(line, controlSocket) {
     const command = JSON.parse(line)
 
     if (!command || typeof command !== "object") {
@@ -332,7 +353,7 @@ export default class RollbridgeDaemon {
       // Stop accepting new control connections before cleanup, but keep this requesting
       // connection open as the completion channel. Waiting for all control connections here
       // would deadlock: server.close() includes the socket awaiting this response.
-      await this.shutdown({waitForControlConnections: false})
+      await this.shutdown({completionSocket: controlSocket, waitForControlConnections: false})
 
       return {message: "shutdown"}
     }
@@ -766,44 +787,54 @@ export default class RollbridgeDaemon {
 
   /**
    * Stops proxy, control socket, and child processes.
-   * @param {{waitForControlConnections?: boolean}} [options] - Whether to await all existing control connections.
+   * @param {{completionSocket?: net.Socket, waitForControlConnections?: boolean}} [options] - Shutdown connection behavior.
    * @returns {Promise<void>} Resolves when owned resources are stopped (and, by default, control connections close).
    */
-  async shutdown({waitForControlConnections = true} = {}) {
-    if (!this.shutdownPromise) this.shutdownPromise = this.performShutdown()
+  async shutdown({completionSocket, waitForControlConnections = true} = {}) {
+    if (!this.shutdownPromise) this.shutdownPromise = this.performShutdown(completionSocket)
 
     await this.shutdownPromise
     if (waitForControlConnections && this.controlClosePromise) await this.controlClosePromise
   }
 
-  /** @returns {Promise<void>} Retires listeners and cleans up every daemon-owned resource. */
-  async performShutdown() {
+  /**
+   * @param {net.Socket | undefined} completionSocket - Requester retained for the final response.
+   * @returns {Promise<void>} Retires listeners and cleans up every daemon-owned resource.
+   */
+  async performShutdown(completionSocket) {
     this.stopping = true
+    const cleanupErrors = /** @type {Error[]} */ ([])
 
     // server.close() stops new connections synchronously. Unlink immediately afterward so a
     // replacement can bind as soon as cleanup completes; existing connections remain usable for
     // the shutdown completion/error response.
     this.controlClosePromise = this.closeServer(this.controlServer)
-    await fs.rm(this.config.control.path, {force: true})
+
+    for (const socket of this.controlSockets) {
+      if (socket !== completionSocket) socket.destroy()
+    }
+
+    await captureShutdownError(cleanupErrors, "control socket unlink", () => this.removeControlSocket())
 
     if (this.persistTimer) {
       clearInterval(this.persistTimer)
       this.persistTimer = undefined
     }
 
-    this.proxy.close()
+    await captureShutdownError(cleanupErrors, "proxy close", async () => this.proxy.close())
     const stopResults = await Promise.allSettled([
       ...[...this.services.values()].map((processInstance) => processInstance.stop()),
       ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
       ...[...this.startingReleases].map((release) => release.stop()),
       ...[...this.releases.values()].map((release) => release.stop())
     ])
-    await this.closeServer(this.proxyServer)
+    await captureShutdownError(cleanupErrors, "proxy server close", () => this.closeServer(this.proxyServer))
 
     // Wait for any in-flight write first so it can't recreate or overwrite the final state (no
     // new writes start: stopping is set and the persist timer is cleared above). Prior-daemon
     // orphans are not owned by this daemon, so retain their records until they are confirmed gone.
-    if (this.statePath) {
+    await captureShutdownError(cleanupErrors, "persistent state cleanup", async () => {
+      if (!this.statePath) return
       if (this.pendingWrite) await this.pendingWrite
       const orphans = this.orphans.filter((orphan) => isProcessAlive(orphan.pid))
 
@@ -812,13 +843,20 @@ export default class RollbridgeDaemon {
       } else {
         await clearState(this.statePath)
       }
-    }
+    })
 
     const stopErrors = stopResults.filter((result) => result.status === "rejected").map((result) => result.reason)
 
     if (stopErrors.length > 0) {
-      throw new AggregateError(stopErrors, `Shutdown failed to stop ${stopErrors.length} owned resource${stopErrors.length === 1 ? "" : "s"}.`)
+      cleanupErrors.push(new AggregateError(stopErrors, `Shutdown failed to stop ${stopErrors.length} owned resource${stopErrors.length === 1 ? "" : "s"}.`))
     }
+
+    if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, cleanupErrors.map((error) => error.message).join("; "))
+  }
+
+  /** @returns {Promise<void>} Removes the configured control socket path. */
+  async removeControlSocket() {
+    await fs.rm(this.config.control.path, {force: true})
   }
 
   /**
@@ -877,6 +915,37 @@ function stringOrUndefined(value) {
   if (typeof value !== "string") throw new Error("Expected string value")
 
   return value
+}
+
+/**
+ * @param {string} line - Raw control line.
+ * @returns {boolean} Whether the line requests shutdown and needs a terminal response connection.
+ */
+function isShutdownControlLine(line) {
+  try {
+    const command = JSON.parse(line)
+
+    return Boolean(command && typeof command === "object" && command.command === "shutdown")
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Runs one shutdown cleanup step and records a labeled failure without skipping later cleanup.
+ * @param {Error[]} errors - Accumulated cleanup errors.
+ * @param {string} label - Non-secret cleanup step name.
+ * @param {() => Promise<void>} operation - Cleanup operation.
+ * @returns {Promise<void>} Resolves after the operation succeeds or its failure is recorded.
+ */
+async function captureShutdownError(errors, label, operation) {
+  try {
+    await operation()
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+
+    errors.push(new Error(`${label} failed: ${reason}`, {cause: error}))
+  }
 }
 
 const SECRET_BEARING_STATE_KEYS = new Set(["children", "command", "cwd", "env", "environment", "logs", "output"])

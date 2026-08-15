@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -36,12 +37,17 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
   const unrelatedConfig = buildConfig(unrelatedSocketPath)
   const daemon = new RollbridgeDaemon({config, logger: () => {}})
   const unrelated = new RollbridgeDaemon({config: unrelatedConfig, logger: () => {}})
+  let idleTarget = /** @type {net.Socket | undefined} */ (undefined)
+  let idleUnrelated = /** @type {net.Socket | undefined} */ (undefined)
   let replacement
   let gateReleased = false
 
   try {
     await daemon.start()
     await unrelated.start()
+    idleTarget = net.createConnection(socketPath)
+    idleUnrelated = net.createConnection(unrelatedSocketPath)
+    await Promise.all([once(idleTarget, "connect"), once(idleUnrelated, "connect")])
     await daemon.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
 
     const workerPid = daemon.activeRelease?.getProcess("worker")?.pid
@@ -68,6 +74,11 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
 
     const resolvedDuringStop = shutdownResolved
     const processAliveDuringStop = isProcessAlive(/** @type {number} */ (workerPid))
+    const idleTargetClosedDuringStop = idleTarget.destroyed
+    const idleUnrelatedClosedDuringStop = idleUnrelated.destroyed
+
+    // Ensure the RED path cannot leave an idle client handle blocking test cleanup.
+    idleTarget.destroy()
 
     await fs.writeFile(gatePath, "continue\n")
     gateReleased = true
@@ -78,6 +89,8 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
     assert.equal(resolvedDuringStop, false, "shutdown must not acknowledge while an owned process is still stopping")
     assert.equal(oldEndpointAccepted, false, "the targeted endpoint must stop accepting new commands before cleanup")
     assert.equal(processAliveDuringStop, true, "the fixture must hold shutdown while its owned process is alive")
+    assert.equal(idleTargetClosedDuringStop, true, "an idle accepted client must be closed when the targeted endpoint retires")
+    assert.equal(idleUnrelatedClosedDuringStop, false, "an unrelated daemon's accepted clients must remain untouched")
     assert.deepEqual(response, {message: "shutdown", status: "success"})
     await assert.rejects(() => fs.stat(socketPath), {code: "ENOENT"})
     assert.equal(isProcessAlive(/** @type {number} */ (workerPid)), false)
@@ -93,9 +106,67 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
     if (!gateReleased) {
       await fs.writeFile(gatePath, "continue\n").catch(() => {})
     }
+    idleTarget?.destroy()
+    idleUnrelated?.destroy()
     if (replacement) await replacement.shutdown()
     await daemon.shutdown()
     await unrelated.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("control socket unlink failure is reported only after owned cleanup completes", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-shutdown-unlink-failure-"))
+  const socketPath = path.join(root, "control.sock")
+  const statePath = path.join(root, "state.json")
+  const config = normalizeConfig({...rawConfig(socketPath), statePath})
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+
+  try {
+    await daemon.start()
+    await daemon.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
+    if (daemon.pendingWrite) await daemon.pendingWrite
+
+    const webPid = daemon.activeRelease?.getProcess("web")?.pid
+    const proxyPort = daemon.getProxyPort()
+
+    assert.equal(typeof webPid, "number")
+    assert.equal(typeof proxyPort, "number")
+
+    daemon.removeControlSocket = async () => { throw new Error("injected unlink failure") }
+
+    await assert.rejects(
+      () => sendControlCommand({command: {command: "shutdown"}, path: socketPath}),
+      /control socket unlink failed: injected unlink failure/
+    )
+
+    assert.equal(isProcessAlive(/** @type {number} */ (webPid)), false, "unlink failure must not strand an owned process")
+    await assert.rejects(() => fetch(`http://127.0.0.1:${proxyPort}/ping`))
+    await assert.rejects(() => fs.stat(statePath), {code: "ENOENT"})
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("direct shutdown closes idle accepted clients and converges", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-direct-shutdown-idle-"))
+  const socketPath = path.join(root, "control.sock")
+  const daemon = new RollbridgeDaemon({config: buildConfig(socketPath), logger: () => {}})
+  let idle = /** @type {net.Socket | undefined} */ (undefined)
+
+  try {
+    await daemon.start()
+    idle = net.createConnection(socketPath)
+    await once(idle, "connect")
+    const idleClosed = once(idle, "close")
+
+    await daemon.shutdown()
+    await idleClosed
+
+    assert.equal(idle.destroyed, true)
+    await assert.rejects(() => fs.stat(socketPath), {code: "ENOENT"})
+  } finally {
+    idle?.destroy()
     await fs.rm(root, {force: true, recursive: true})
   }
 })
