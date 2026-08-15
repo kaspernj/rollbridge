@@ -20,6 +20,8 @@ test("daemon bootstrap requires complete, safe, absolute inputs before binding l
     {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1"], message: /must be provided together/},
     {args: ["--config", "relative/config.js", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123"], message: /--config must be an absolute path/},
     {args: ["--config", "CONFIG", "--release-path", "relative/release", "--release-id", "v1", "--revision", "abc123"], message: /--release-path must be an absolute path/},
+    {args: ["--config", "CONFIG", "--release-path", "RELEASE_UNNORMALIZED", "--release-id", "v1", "--revision", "abc123"], message: /--release-path must be normalized/},
+    {args: ["--config", "CONFIG", "--release-path", "RELEASE_MISSING", "--release-id", "v1", "--revision", "abc123"], message: /--release-path is not accessible/},
     {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "unsafe id", "--revision", "abc123"], message: /--release-id/},
     {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "unsafe revision"], message: /--revision/}
   ]
@@ -27,7 +29,13 @@ test("daemon bootstrap requires complete, safe, absolute inputs before binding l
   for (const testCase of cases) {
     await t.test(testCase.message.source, async () => {
       const fixture = await createFixture()
-      const args = testCase.args.map((arg) => arg === "CONFIG" ? fixture.configPath : arg === "RELEASE" ? fixture.root : arg)
+      const args = testCase.args.map((arg) => {
+        if (arg === "CONFIG") return fixture.configPath
+        if (arg === "RELEASE") return fixture.root
+        if (arg === "RELEASE_UNNORMALIZED") return `${fixture.root}/child/..`
+        if (arg === "RELEASE_MISSING") return path.join(fixture.root, "missing")
+        return arg
+      })
 
       try {
         const result = await runDaemon(args)

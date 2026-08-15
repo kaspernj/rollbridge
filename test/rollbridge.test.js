@@ -8,11 +8,11 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import {fileURLToPath} from "node:url"
+import {fileURLToPath, pathToFileURL} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
-import {readState, writeState} from "../src/state-store.js"
+import {liveProcesses, readState, writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
@@ -633,6 +633,37 @@ test("persists daemon state to statePath and removes it on a clean shutdown", as
   }
 
   assert.equal(stateAfterShutdown, undefined, "state file removed on clean shutdown")
+})
+
+test("persisted daemon state excludes process commands, environment values, and output", async () => {
+  const secret = "state-secret-value"
+  const fixture = await createFixture({persistState: true})
+  const web = fixture.config.processes.find((processConfig) => processConfig.id === "web")
+
+  assert.ok(web)
+  web.env.ROLLBRIDGE_TEST_SECRET = secret
+  web.command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`console.log(process.env.ROLLBRIDGE_TEST_SECRET); import(${JSON.stringify(pathToFileURL(dummyAppPath).href)})`)}`
+
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await waitFor(() => Boolean(daemon.activeRelease?.getProcess("web")?.status().logs.some((entry) => entry.line === secret)))
+
+    daemon.persistState()
+    await waitFor(async () => (await fs.readFile(fixture.statePath, "utf8")).includes('"activeReleaseId": "v1"'))
+
+    const persisted = await fs.readFile(fixture.statePath, "utf8")
+
+    assert.doesNotMatch(persisted, /state-secret-value/)
+    assert.doesNotMatch(persisted, /ROLLBRIDGE_TEST_SECRET/)
+    assert.doesNotMatch(persisted, /"command"/)
+    assert.doesNotMatch(persisted, /"logs"/)
+    assert.deepEqual(liveProcesses(JSON.parse(persisted), () => true).map(({id, releaseId}) => ({id, releaseId})), [{id: "web", releaseId: "v1"}])
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
 })
 
 test("a clean shutdown clears the state file even when a persist write is in flight", async () => {

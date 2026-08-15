@@ -544,6 +544,10 @@ test("does not auto-restart when the restart policy is disabled (maxRestarts: 0)
 
 test("stops auto-restarting once maxRestarts within the window is reached", async () => {
   const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 0, maxRestarts: 2, windowMs: 60000})
+  /** @type {{data: Record<string, import("../src/json.js").JsonValue>, message: string}[]} */
+  const events = []
+
+  managed.logger = (message, data = {}) => { events.push({data, message}) }
 
   try {
     await managed.start()
@@ -554,6 +558,11 @@ test("stops auto-restarting once maxRestarts within the window is reached", asyn
 
     assert.equal(managed.status().restarts, 2)
     assert.equal(managed.status().state, "failed")
+    assert.deepEqual(events.find((event) => event.message === "restart limit reached")?.data, {
+      id: "crasher",
+      maxRestarts: 2,
+      windowMs: 60000
+    })
   } finally {
     await managed.stop()
   }

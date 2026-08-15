@@ -36,6 +36,12 @@ events. It is distinct from the two in-memory views:
 - `rollbridge events` — the recent structured daemon event history (the most
   recent 1000 events), the same events written to the log file.
 
+When `statePath` is configured, its recovery snapshot is intentionally not a
+log archive: process commands, environment mappings, child command lines, and
+captured stdout/stderr are excluded. Use the live APIs above or the configured
+daemon log for those diagnostics, and protect that log according to the
+sensitivity of application output.
+
 Both are cleared when the daemon restarts; the log file persists.
 
 ## Rotation

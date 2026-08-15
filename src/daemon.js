@@ -721,8 +721,9 @@ export default class RollbridgeDaemon {
     if (!this.statePath || this.stopping) return
 
     const statePath = this.statePath
-    const status = this.status()
-    const snapshot = {...status, events: this.eventLog.recent(), persistedAt: new Date().toISOString()}
+    const status = /** @type {Record<string, JsonValue>} */ (secretSafeStateValue(this.status()))
+    const events = secretSafeStateValue(this.eventLog.recent())
+    const snapshot = {...status, events, persistedAt: new Date().toISOString()}
 
     // Serialize writes (and track the tail) so shutdown can wait for an in-flight write before
     // clearing the file — otherwise a write started before shutdown could recreate it afterward.
@@ -849,6 +850,30 @@ function stringOrUndefined(value) {
   if (typeof value !== "string") throw new Error("Expected string value")
 
   return value
+}
+
+const SECRET_BEARING_STATE_KEYS = new Set(["children", "command", "cwd", "env", "environment", "logs", "output"])
+
+/**
+ * Removes process definitions and captured output from a value before it reaches statePath.
+ * The live status/events APIs retain those diagnostics in memory; persistent state is only a
+ * secret-safe recovery aid and must not become a second process log or configuration store.
+ * @param {JsonValue} value - JSON value to sanitize.
+ * @returns {JsonValue} A secret-safe copy.
+ */
+function secretSafeStateValue(value) {
+  if (Array.isArray(value)) return value.map((entry) => secretSafeStateValue(entry))
+  if (!value || typeof value !== "object") return value
+
+  /** @type {Record<string, JsonValue>} */
+  const safe = {}
+
+  for (const [key, entry] of Object.entries(value)) {
+    if (SECRET_BEARING_STATE_KEYS.has(key)) continue
+    safe[key] = secretSafeStateValue(entry)
+  }
+
+  return safe
 }
 
 /**
