@@ -61,6 +61,8 @@ export default class RollbridgeDaemon {
     this.statePath = config.statePath
     this.persistTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
     this.pendingWrite = /** @type {Promise<void> | undefined} */ (undefined)
+    this.shutdownPromise = /** @type {Promise<void> | undefined} */ (undefined)
+    this.controlClosePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.startingReleases = /** @type {Set<ReleaseGroup>} */ (new Set())
     // Still-alive managed processes left by a previous daemon (from statePath), captured at
     // startup and surfaced in status(). The daemon cannot re-manage them, only report them.
@@ -327,11 +329,10 @@ export default class RollbridgeDaemon {
     }
 
     if (commandName === "shutdown") {
-      setImmediate(() => {
-        this.shutdown().catch((error) => {
-          this.logger("shutdown failed", {error: error instanceof Error ? error.message : String(error)})
-        })
-      })
+      // Stop accepting new control connections before cleanup, but keep this requesting
+      // connection open as the completion channel. Waiting for all control connections here
+      // would deadlock: server.close() includes the socket awaiting this response.
+      await this.shutdown({waitForControlConnections: false})
 
       return {message: "shutdown"}
     }
@@ -763,11 +764,27 @@ export default class RollbridgeDaemon {
     }
   }
 
-  /** @returns {Promise<void>} Stops proxy, control socket, and child processes. */
-  async shutdown() {
-    if (this.stopping) return
+  /**
+   * Stops proxy, control socket, and child processes.
+   * @param {{waitForControlConnections?: boolean}} [options] - Whether to await all existing control connections.
+   * @returns {Promise<void>} Resolves when owned resources are stopped (and, by default, control connections close).
+   */
+  async shutdown({waitForControlConnections = true} = {}) {
+    if (!this.shutdownPromise) this.shutdownPromise = this.performShutdown()
 
+    await this.shutdownPromise
+    if (waitForControlConnections && this.controlClosePromise) await this.controlClosePromise
+  }
+
+  /** @returns {Promise<void>} Retires listeners and cleans up every daemon-owned resource. */
+  async performShutdown() {
     this.stopping = true
+
+    // server.close() stops new connections synchronously. Unlink immediately afterward so a
+    // replacement can bind as soon as cleanup completes; existing connections remain usable for
+    // the shutdown completion/error response.
+    this.controlClosePromise = this.closeServer(this.controlServer)
+    await fs.rm(this.config.control.path, {force: true})
 
     if (this.persistTimer) {
       clearInterval(this.persistTimer)
@@ -775,13 +792,13 @@ export default class RollbridgeDaemon {
     }
 
     this.proxy.close()
-    await Promise.allSettled([...this.services.values()].map((processInstance) => processInstance.stop()))
-    await Promise.allSettled([...this.singletons.values()].map((processInstance) => processInstance.stop()))
-    await Promise.allSettled([...this.startingReleases].map((release) => release.stop()))
-    await Promise.allSettled([...this.releases.values()].map((release) => release.stop()))
+    const stopResults = await Promise.allSettled([
+      ...[...this.services.values()].map((processInstance) => processInstance.stop()),
+      ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
+      ...[...this.startingReleases].map((release) => release.stop()),
+      ...[...this.releases.values()].map((release) => release.stop())
+    ])
     await this.closeServer(this.proxyServer)
-    await this.closeServer(this.controlServer)
-    await fs.rm(this.config.control.path, {force: true})
 
     // Wait for any in-flight write first so it can't recreate or overwrite the final state (no
     // new writes start: stopping is set and the persist timer is cleared above). Prior-daemon
@@ -795,6 +812,12 @@ export default class RollbridgeDaemon {
       } else {
         await clearState(this.statePath)
       }
+    }
+
+    const stopErrors = stopResults.filter((result) => result.status === "rejected").map((result) => result.reason)
+
+    if (stopErrors.length > 0) {
+      throw new AggregateError(stopErrors, `Shutdown failed to stop ${stopErrors.length} owned resource${stopErrors.length === 1 ? "" : "s"}.`)
     }
   }
 
