@@ -90,10 +90,13 @@ release records; the deploy tool still owns on-disk release directories.
 
 ## `statePath`
 
-When set, the daemon persists a state snapshot — the active and draining
-releases, each managed process's metadata (including pid), restart counters, and
-recent events — to this file (atomically, on changes and every few seconds). On a
-clean `shutdown` the file is removed.
+When set, the daemon persists a secret-safe state snapshot — the active and
+draining releases, each managed process's recovery metadata (including pid),
+restart counters, and recent structured events — to this file (atomically, on
+changes and every few seconds). Process commands, working directories,
+environment mappings, child command lines, and retained stdout/stderr are never
+persisted. They remain available from the live `status`, `logs`, and `events`
+APIs while the daemon is running. On a clean `shutdown` the file is removed.
 
 On the **next startup**, the daemon reads any leftover file and reports managed
 processes whose pids are still alive — likely orphans from a daemon that crashed
