@@ -509,6 +509,12 @@ Shut down the daemon and managed processes:
 rollbridge shutdown --config rollbridge.js
 ```
 
+A successful shutdown response is emitted only after the targeted control
+endpoint has stopped accepting connections and been removed, owned processes
+and the proxy have stopped, and persistent state cleanup has finished. It is
+therefore safe to start or ensure a replacement daemon immediately, without a
+delay or retry loop. Cleanup failure or an already-missing daemon exits non-zero.
+
 Prepare a first Rollbridge deploy by recovering Rollbridge-managed orphans and
 stopping configured legacy processes:
 

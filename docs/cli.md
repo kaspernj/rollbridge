@@ -292,7 +292,15 @@ rollbridge shutdown [--config <path>]
 
 Stops all managed processes (services, singletons, and releases), closes the
 proxy and control socket, removes the socket file, and prints
-`{"status": "success", "message": "shutdown"}`.
+`{"status": "success", "message": "shutdown"}`. The success response is a
+completion signal, not an early acknowledgement: before sending it, Rollbridge
+stops accepting new control connections, removes the targeted socket, finishes
+owned-process and proxy cleanup, and finalizes persistent state. A caller may
+immediately start or ensure a replacement daemon after the command returns.
+
+If cleanup fails, the command exits non-zero with the daemon's error instead of
+reporting success. Calling `shutdown` when no daemon owns the configured control
+socket also remains an explicit connection error.
 
 ## `validate`
 
