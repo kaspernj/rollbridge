@@ -17,19 +17,22 @@ const STATE_PERSIST_INTERVAL_MS = 5000
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
+ * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
- * @typedef {{activeReleaseId: string | null, application: string, control: import("./config.js").ControlConfig, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  */
 
 export default class RollbridgeDaemon {
   /**
    * @param {object} args - Options.
+   * @param {BootstrapIdentity} [args.bootstrap] - Immutable known-release foreground bootstrap identity.
    * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
    * @param {string} [args.configPath] - Config file path to reload before deploys.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} [args.logger] - Logger.
    * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} [args.runtime] - Immutable daemon runtime identity.
    */
-  constructor({config, configPath, logger, runtime}) {
+  constructor({bootstrap, config, configPath, logger, runtime}) {
+    this.bootstrap = bootstrap ? {...bootstrap} : undefined
     this.config = config
     this.configPath = configPath
     this.runtime = runtime
@@ -820,6 +823,7 @@ export default class RollbridgeDaemon {
     return {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,
       application: this.config.application,
+      bootstrap: this.bootstrap ? {...this.bootstrap} : undefined,
       control: {...this.config.control},
       daemonRuntime: this.runtime ? {...this.runtime} : undefined,
       orphans: [...this.orphans],

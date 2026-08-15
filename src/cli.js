@@ -35,12 +35,13 @@ export async function runCli(argv) {
     .option("--release-path <path>", "Bootstrap release path (requires --config, --release-id, and --revision)")
     .option("--release-id <id>", "Bootstrap release id (requires --config, --release-path, and --revision)")
     .option("--revision <sha>", "Bootstrap revision (requires --config, --release-path, and --release-id)")
+    .option("--boot-attestation <digest>", "Opaque bootstrap ownership attestation (requires the complete bootstrap release tuple)")
     .action(async (options) => {
       const bootstrap = await validateDaemonBootstrapOptions(options)
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const runtime = await loadDaemonRuntimeIdentity(process.env.ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST)
-      const daemon = new RollbridgeDaemon({config, configPath, runtime})
+      const daemon = new RollbridgeDaemon({bootstrap, config, configPath, runtime})
 
       await daemon.start({exposeControl: !bootstrap})
 
@@ -720,12 +721,16 @@ async function validateConfigFile(configPath) {
 /**
  * Validates the daemon's optional all-or-nothing bootstrap release interface before
  * config loading or listener startup.
- * @param {{config?: string, releaseId?: string, releasePath?: string, revision?: string}} options - Daemon CLI options.
- * @returns {Promise<{releaseId: string, releasePath: string, revision: string} | undefined>} Validated bootstrap metadata.
+ * @param {{bootAttestation?: string, config?: string, releaseId?: string, releasePath?: string, revision?: string}} options - Daemon CLI options.
+ * @returns {Promise<{attestation?: string, releaseId: string, releasePath: string, revision: string} | undefined>} Validated bootstrap metadata.
  */
 async function validateDaemonBootstrapOptions(options) {
   const bootstrapValues = [options.releasePath, options.releaseId, options.revision]
   const bootstrapRequested = bootstrapValues.some((value) => value !== undefined)
+
+  if (options.bootAttestation !== undefined && !bootstrapRequested) {
+    throw new Error("Daemon --boot-attestation is accepted only with --config, --release-path, --release-id, and --revision.")
+  }
 
   if (!bootstrapRequested) return undefined
 
@@ -744,6 +749,7 @@ async function validateDaemonBootstrapOptions(options) {
 
   if (!safeIdentifier.test(releaseId)) throw new Error("Daemon bootstrap --release-id must be a non-empty safe identifier containing only letters, numbers, dots, underscores, and hyphens.")
   if (!safeIdentifier.test(revision)) throw new Error("Daemon bootstrap --revision must be a non-empty safe identifier containing only letters, numbers, dots, underscores, and hyphens.")
+  if (options.bootAttestation !== undefined && !/^sha256:[a-f0-9]{64}$/.test(options.bootAttestation)) throw new Error("Daemon bootstrap --boot-attestation must use the canonical sha256:<64 lowercase hex> format.")
 
   let releaseStat
 
@@ -757,7 +763,7 @@ async function validateDaemonBootstrapOptions(options) {
 
   if (!releaseStat.isDirectory()) throw new Error("Daemon bootstrap --release-path must name a directory.")
 
-  return {releaseId, releasePath: /** @type {string} */ (options.releasePath), revision}
+  return {attestation: options.bootAttestation, releaseId, releasePath: /** @type {string} */ (options.releasePath), revision}
 }
 
 /**
