@@ -14,6 +14,8 @@ import {isProcessAlive, liveProcesses, readState, writeState} from "../src/state
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
 const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
+const firstAttestation = `sha256:${"a".repeat(64)}`
+const secondAttestation = `sha256:${"b".repeat(64)}`
 
 test("daemon bootstrap requires complete, safe, absolute inputs before binding listeners", async (t) => {
   const cases = [
@@ -23,7 +25,11 @@ test("daemon bootstrap requires complete, safe, absolute inputs before binding l
     {args: ["--config", "CONFIG", "--release-path", "RELEASE_UNNORMALIZED", "--release-id", "v1", "--revision", "abc123"], message: /--release-path must be normalized/},
     {args: ["--config", "CONFIG", "--release-path", "RELEASE_MISSING", "--release-id", "v1", "--revision", "abc123"], message: /--release-path is not accessible/},
     {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "unsafe id", "--revision", "abc123"], message: /--release-id/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "unsafe revision"], message: /--revision/}
+    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "unsafe revision"], message: /--revision/},
+    {args: ["--config", "CONFIG", "--boot-attestation", firstAttestation], message: /accepted only with/},
+    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha256:${"A".repeat(64)}`], message: /--boot-attestation/},
+    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha512:${"a".repeat(64)}`], message: /--boot-attestation/},
+    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha256:${"a".repeat(63)}`], message: /--boot-attestation/}
   ]
 
   for (const testCase of cases) {
@@ -43,6 +49,7 @@ test("daemon bootstrap requires complete, safe, absolute inputs before binding l
         assert.notEqual(result.code, 0)
         assert.match(result.stderr, testCase.message)
         await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+        await assert.rejects(() => fs.stat(fixture.startedPath), {code: "ENOENT"})
       } finally {
         await fs.rm(fixture.root, {force: true, recursive: true})
       }
@@ -52,7 +59,7 @@ test("daemon bootstrap requires complete, safe, absolute inputs before binding l
 
 test("daemon bootstrap activates the exact release through the foreground daemon", async () => {
   const fixture = await createFixture()
-  const child = spawnDaemon(fixture, {releaseId: "release-42", revision: "abc123"})
+  const child = spawnDaemon(fixture, {attestation: firstAttestation, releaseId: "release-42", revision: "abc123"})
 
   try {
     await waitForLog(child, "control socket listening")
@@ -61,6 +68,12 @@ test("daemon bootstrap activates the exact release through the foreground daemon
 
     assert.equal(activeRelease.releasePath, fixture.root)
     assert.equal(activeRelease.revision, "abc123")
+    assert.deepEqual(status.bootstrap, {
+      attestation: firstAttestation,
+      releaseId: "release-42",
+      releasePath: fixture.root,
+      revision: "abc123"
+    })
     assert.ok(status.proxy && typeof status.proxy === "object" && !Array.isArray(status.proxy) && typeof status.proxy.port === "number")
     assert.equal((await fetch(`http://127.0.0.1:${status.proxy.port}/release`).then((response) => response.text())).trim(), "release-42")
 
@@ -109,11 +122,53 @@ test("plain daemon startup remains listener-only with no active release", async 
 
     assert.equal(status.activeReleaseId, null)
     assert.deepEqual(status.releases, [])
+    assert.equal(status.bootstrap, undefined)
 
     child.kill("SIGTERM")
     assert.equal((await once(child, "exit"))[0], 0)
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL")
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("ensure-daemon rejects boot attestation instead of inheriting foreground identity", async () => {
+  const fixture = await createFixture()
+
+  try {
+    const result = await runRollbridge(["ensure-daemon", "--config", fixture.configPath, "--boot-attestation", firstAttestation])
+
+    assert.notEqual(result.code, 0)
+    assert.match(result.stderr, /unknown option '--boot-attestation'/)
+    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+    await assert.rejects(() => fs.stat(fixture.startedPath), {code: "ENOENT"})
+  } finally {
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("otherwise identical foreground boots remain distinguishable by attestation", async () => {
+  const fixture = await createFixture()
+
+  try {
+    const attestations = []
+
+    for (const attestation of [firstAttestation, secondAttestation]) {
+      const child = spawnDaemon(fixture, {attestation, releaseId: "same-release", revision: "same-revision"})
+
+      await waitForLog(child, "control socket listening")
+      const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
+
+      assert.equal(status.activeReleaseId, "same-release")
+      assert.ok(status.bootstrap && typeof status.bootstrap === "object" && !Array.isArray(status.bootstrap))
+      attestations.push(status.bootstrap.attestation)
+
+      child.kill("SIGTERM")
+      assert.equal((await once(child, "exit"))[0], 0)
+    }
+
+    assert.deepEqual(attestations, [firstAttestation, secondAttestation])
+  } finally {
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
 })
@@ -352,11 +407,15 @@ async function waitForFile(filePath) {
 
 /**
  * @param {{configPath: string, root: string}} fixture - Fixture paths.
- * @param {{releaseId: string, revision: string}} release - Bootstrap metadata.
+ * @param {{attestation?: string, releaseId: string, revision: string}} release - Bootstrap metadata.
  * @returns {import("node:child_process").ChildProcessWithoutNullStreams} Spawned daemon.
  */
 function spawnDaemon(fixture, release) {
-  return spawn(process.execPath, [binPath, "daemon", "--config", fixture.configPath, "--release-path", fixture.root, "--release-id", release.releaseId, "--revision", release.revision], {stdio: ["pipe", "pipe", "pipe"]})
+  const args = [binPath, "daemon", "--config", fixture.configPath, "--release-path", fixture.root, "--release-id", release.releaseId, "--revision", release.revision]
+
+  if (release.attestation) args.push("--boot-attestation", release.attestation)
+
+  return spawn(process.execPath, args, {stdio: ["pipe", "pipe", "pipe"]})
 }
 
 /**
@@ -364,7 +423,15 @@ function spawnDaemon(fixture, release) {
  * @returns {Promise<{code: number | null, output: string, stderr: string}>} Completed process result.
  */
 async function runDaemon(args) {
-  const child = spawn(process.execPath, [binPath, "daemon", ...args], {stdio: ["ignore", "pipe", "pipe"]})
+  return await runRollbridge(["daemon", ...args])
+}
+
+/**
+ * @param {string[]} args - Rollbridge command and arguments.
+ * @returns {Promise<{code: number | null, output: string, stderr: string}>} Completed process result.
+ */
+async function runRollbridge(args) {
+  const child = spawn(process.execPath, [binPath, ...args], {stdio: ["ignore", "pipe", "pipe"]})
   let output = ""
   let stderr = ""
 

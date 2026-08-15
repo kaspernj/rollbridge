@@ -1161,6 +1161,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
     const proxy = /** @type {{port: number}} */ (status.proxy)
 
     assert.equal(status.activeReleaseId, "ensured-v1")
+    assert.equal(status.bootstrap, undefined)
     assert.match(await fs.readFile(pidPath, "utf8"), /\d+/)
     assert.equal(await fetchTextFromPort(proxy.port, "/release"), "ensured-v1")
   } finally {

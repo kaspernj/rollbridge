@@ -408,7 +408,8 @@ the foreground (for example from a boot-time service manager):
 ```bash
 rollbridge daemon --config /srv/ticket-server/rollbridge.js \
   --release-path /srv/ticket-server/releases/20260813090000/ticket-server \
-  --release-id 20260813090000 --revision abc123
+  --release-id 20260813090000 --revision abc123 \
+  --boot-attestation sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 The four bootstrap inputs are all-or-nothing and use absolute config/release
@@ -418,6 +419,14 @@ activation stops only processes started by that attempt and exits non-zero;
 persisted processes from a previous daemon are reported as orphans and are never
 recovered or killed implicitly; their live PID records remain in `statePath` for
 explicit recovery.
+
+External supervisors may add `--boot-attestation` with exactly `sha256:` plus
+64 lowercase hexadecimal characters. After successful activation, `rollbridge
+status` echoes the opaque, non-secret value under `bootstrap.attestation`
+alongside the exact release id/path/revision. Listener-only and detached ensured
+daemons omit `bootstrap`, so a supervisor can distinguish a newly accepted
+foreground owner from a stale daemon without Rollbridge interpreting the token.
+See [`docs/cli.md`](docs/cli.md#daemon) for the complete contract.
 
 Start the daemon only when it is not already running:
 

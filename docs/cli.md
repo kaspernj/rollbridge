@@ -24,7 +24,8 @@ process-policy details.
 
 ```
 rollbridge daemon [--config <path>]
-                  [--release-path <path> --release-id <id> --revision <sha>]
+                  [--release-path <path> --release-id <id> --revision <sha>
+                   [--boot-attestation <sha256:digest>]]
 ```
 
 Runs the supervisor in the foreground: binds the stable proxy port and the
@@ -52,6 +53,13 @@ and exits non-zero without exposing the control socket or inventing an active
 release. `statePath` entries from a previous daemon remain advisory orphans:
 bootstrap never runs recovery and never signals those processes, and retains
 their live PID records in `statePath` for explicit recovery.
+
+`--boot-attestation` is an optional, non-secret opaque ownership token for an
+external supervisor. Its canonical format is exactly `sha256:` followed by 64
+lowercase hexadecimal characters. It is accepted only with the complete
+known-release bootstrap tuple above and is never accepted by `ensure-daemon`.
+After successful activation, `status` echoes it unchanged in the bootstrap
+identity. Rollbridge does not calculate or interpret the digest.
 
 With no release options, daemon behavior is unchanged: it starts listener-only
 and waits for control-socket deployments.
@@ -173,6 +181,24 @@ Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
 `daemonRuntime` identifies the immutable Rollbridge runtime serving the proxy:
 its runtime `format`, package `version`, content `digest`, and absolute `path`.
 `ensure-daemon` uses this attestation before reusing a responsive daemon.
+
+A foreground known-release daemon also reports the exact CLI bootstrap identity:
+
+```json
+{
+  "bootstrap": {
+    "releaseId": "20260813090000",
+    "releasePath": "/srv/app/releases/20260813090000/app",
+    "revision": "abc123",
+    "attestation": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}
+```
+
+`attestation` is omitted when the optional argument was not supplied. Ordinary
+listener-only daemons and detached daemons created by `ensure-daemon` omit the
+entire `bootstrap` object. External supervisors can therefore distinguish two
+otherwise identical foreground boots by comparing the opaque attestation.
 
 When [`statePath`](config.md#statepath) is configured, status also includes an
 `orphans` array: managed processes from a **previous** daemon that are still
