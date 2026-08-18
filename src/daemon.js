@@ -61,8 +61,10 @@ export default class RollbridgeDaemon {
     this.stopping = false
     this.statePath = config.statePath
     this.persistTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
+    this.persistenceEnabled = false
     this.pendingWrite = /** @type {Promise<void> | undefined} */ (undefined)
     this.shutdownPromise = /** @type {Promise<void> | undefined} */ (undefined)
+    this.retirementPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.controlClosePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.startingReleases = /** @type {Set<ReleaseGroup>} */ (new Set())
     // Still-alive managed processes left by a previous daemon (from statePath), captured at
@@ -74,11 +76,11 @@ export default class RollbridgeDaemon {
 
   /**
    * Starts daemon listeners.
-   * @param {{exposeControl?: boolean}} [options] - Whether to expose the control socket immediately.
+   * @param {{exposeControl?: boolean, reportOrphans?: boolean}} [options] - Listener startup options.
    * @returns {Promise<void>} Resolves when the requested listeners are ready.
    */
-  async start({exposeControl = true} = {}) {
-    await this.reportOrphans()
+  async start({exposeControl = true, reportOrphans = true} = {}) {
+    if (reportOrphans) await this.reportOrphans()
     await this.startProxy()
     if (exposeControl) await this.exposeControl()
   }
@@ -356,6 +358,13 @@ export default class RollbridgeDaemon {
       await this.shutdown({completionSocket: controlSocket, waitForControlConnections: false})
 
       return {message: "shutdown"}
+    }
+
+    if (commandName === "retire-owner") {
+      const attestation = requiredString(data.attestation, "attestation")
+      if (!/^sha256:[a-f0-9]{64}$/.test(attestation)) throw new Error("Owner retirement attestation must use the canonical sha256:<64 lowercase hex> format")
+      await this.retireOwner({attestation, completionSocket: controlSocket})
+      return {message: "owner retired"}
     }
 
     throw new Error(`Unknown command: ${String(commandName)}`)
@@ -732,6 +741,7 @@ export default class RollbridgeDaemon {
   startStatePersistence() {
     if (!this.statePath) return
 
+    this.persistenceEnabled = true
     this.persistState()
     this.persistTimer = setInterval(() => this.persistState(), STATE_PERSIST_INTERVAL_MS)
     this.persistTimer.unref?.()
@@ -743,7 +753,7 @@ export default class RollbridgeDaemon {
    * @returns {void}
    */
   persistState() {
-    if (!this.statePath || this.stopping) return
+    if (!this.statePath || !this.persistenceEnabled || this.stopping) return
 
     const statePath = this.statePath
     const status = /** @type {Record<string, JsonValue>} */ (secretSafeStateValue(this.status()))
@@ -795,6 +805,50 @@ export default class RollbridgeDaemon {
 
     await this.shutdownPromise
     if (waitForControlConnections && this.controlClosePromise) await this.controlClosePromise
+  }
+
+  /**
+   * Relinquishes stable listeners promptly while retaining draining children under
+   * this daemon until their normal stop contract completes.
+   * @param {{attestation: string, completionSocket?: net.Socket}} options - Attested handoff request.
+   * @returns {Promise<void>} Resolves once a replacement can exclusively bind listeners.
+   */
+  async retireOwner({attestation, completionSocket}) {
+    if (this.retirementPromise) return await this.retirementPromise
+    this.retirementPromise = this.performOwnerRetirement(attestation, completionSocket)
+    return await this.retirementPromise
+  }
+
+  /**
+   * @param {string} attestation - Replacement boot attestation.
+   * @param {net.Socket | undefined} completionSocket - Requesting handoff connection.
+   * @returns {Promise<void>} Resolves after quiesce and listener release.
+   */
+  async performOwnerRetirement(attestation, completionSocket) {
+    this.stopping = true
+    if (this.persistTimer) {
+      clearInterval(this.persistTimer)
+      this.persistTimer = undefined
+    }
+    this.persistenceEnabled = false
+    if (this.pendingWrite) await this.pendingWrite
+    this.controlClosePromise = this.closeServer(this.controlServer)
+    for (const socket of this.controlSockets) if (socket !== completionSocket) socket.destroy()
+    await Promise.all([
+      ...[...this.services.values()].map((processInstance) => processInstance.quiesce()),
+      ...[...this.singletons.values()].map((processInstance) => processInstance.quiesce()),
+      ...[...this.startingReleases].map((release) => release.quiesce()),
+      ...[...this.releases.values()].map((release) => release.quiesce())
+    ])
+    await this.removeControlSocket()
+    void this.closeServer(this.proxyServer)
+    void Promise.allSettled([
+      ...[...this.services.values()].map((processInstance) => processInstance.stop()),
+      ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
+      ...[...this.startingReleases].map((release) => release.stop()),
+      ...[...this.releases.values()].map((release) => release.stop())
+    ])
+    this.logger("external owner retired", {attestation, status: "draining"})
   }
 
   /**
@@ -925,7 +979,7 @@ function isShutdownControlLine(line) {
   try {
     const command = JSON.parse(line)
 
-    return Boolean(command && typeof command === "object" && command.command === "shutdown")
+    return Boolean(command && typeof command === "object" && ["retire-owner", "shutdown"].includes(command.command))
   } catch {
     return false
   }

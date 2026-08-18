@@ -412,6 +412,15 @@ rollbridge daemon --config /srv/ticket-server/rollbridge.js \
   --boot-attestation sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
+External supervisors that need to replace a foreground owner without waiting
+for its workers to drain add `--takeover-owner`. The candidate starts and
+health-checks the exact release first. Only then does it retire the accepted
+owner's proxy/control listeners; the retired daemon keeps its already-accepted
+workers until their ordinary drain completes while the attested replacement
+binds the stable listeners. Candidate bootstrap failure leaves the accepted
+owner untouched. This is opt-in; ordinary daemon bootstrap and `shutdown` keep
+their existing behavior.
+
 The four bootstrap inputs are all-or-nothing and use absolute config/release
 paths. Rollbridge binds its proxy, activates the release through the normal
 deploy path, then exposes the control socket and stays foreground. A failed

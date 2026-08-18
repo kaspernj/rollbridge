@@ -62,6 +62,7 @@ export default class ManagedProcess extends EventEmitter {
     this.memoryWarned = false
     this.startedAtMs = /** @type {number | undefined} */ (undefined)
     this.intentionalStop = false
+    this.quiescePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.restartTimer = undefined
     this.child = undefined
     this.exitPromise = undefined
@@ -78,6 +79,7 @@ export default class ManagedProcess extends EventEmitter {
     if (this.child) return
 
     this.intentionalStop = false
+    this.quiescePromise = undefined
     this.exitCode = undefined
     this.exitSignal = undefined
     this.state = "starting"
@@ -338,36 +340,22 @@ export default class ManagedProcess extends EventEmitter {
    * @returns {Promise<void>} Resolves when stopped.
    */
   async stop(options = {}) {
-    this.intentionalStop = true
-    this.clearMemoryMonitor()
+    const pgid = this.child?.pid ?? this.pid
+    const exitPromise = this.exitPromise
+    await this.quiesce()
 
-    if (this.restartTimer) {
-      clearTimeout(this.restartTimer)
-      this.restartTimer = undefined
-    }
-
-    const child = this.child
-
-    if (!child || !child.pid) {
+    if (!pgid) {
       this.state = "stopped"
       return
     }
 
-    const pgid = child.pid
-    const exitPromise = this.exitPromise
-
-    this.state = "stopping"
-
-    const {drainCommand, drainTimeoutMs, quietCommand, stopCommand} = this.lifecycle
+    const {drainCommand, drainTimeoutMs, stopCommand} = this.lifecycle
 
     const hookTimeoutMs = this.hookTimeoutMs()
 
-    // 1. Quiesce: tell the process to stop accepting new work.
-    if (quietCommand) await this.runHook(quietCommand, hookTimeoutMs, "quiet command")
-
     // 2. Drain: let in-flight work finish, bounded by drainTimeoutMs (0 skips the step). A
     //    drainCommand blocks until drained; otherwise wait for the process to exit on its own.
-    if (this.child && drainTimeoutMs > 0) {
+    if (this.processGroupExists(pgid) && drainTimeoutMs > 0) {
       if (drainCommand) await this.runHook(drainCommand, drainTimeoutMs, "drain command")
       else await this.waitForExit(drainTimeoutMs)
     }
@@ -389,6 +377,26 @@ export default class ManagedProcess extends EventEmitter {
     if (exitPromise) await exitPromise
 
     this.state = "stopped"
+  }
+
+  /** @returns {Promise<void>} Stops restarts and waits until the process has stopped accepting new work. */
+  async quiesce() {
+    if (this.quiescePromise) return await this.quiescePromise
+    this.quiescePromise = (async () => {
+      this.intentionalStop = true
+      this.clearMemoryMonitor()
+      if (this.restartTimer) {
+        clearTimeout(this.restartTimer)
+        this.restartTimer = undefined
+      }
+      if (!this.child?.pid) {
+        this.state = "stopped"
+        return
+      }
+      this.state = "stopping"
+      if (this.lifecycle.quietCommand) await this.runHook(this.lifecycle.quietCommand, this.hookTimeoutMs(), "quiet command")
+    })()
+    return await this.quiescePromise
   }
 
   /** @returns {number} Timeout used for lifecycle hooks. */

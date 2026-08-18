@@ -403,6 +403,11 @@ export default class ReleaseGroup extends EventEmitter {
     this.stoppedAt = new Date().toISOString()
   }
 
+  /** @returns {Promise<void>} Quiesces every release process without waiting for its drain. */
+  async quiesce() {
+    await Promise.all([...this.processes.values()].map((processInstance) => processInstance.quiesce()))
+  }
+
   /** @returns {ReleaseStatus} Status payload. */
   status() {
     return {

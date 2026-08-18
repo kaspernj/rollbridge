@@ -85,6 +85,38 @@ test("daemon bootstrap activates the exact release through the foreground daemon
   }
 })
 
+test("failed takeover bootstrap preserves the previously accepted owner", async () => {
+  const fixture = await createFixture()
+  const accepted = spawnDaemon(fixture, {attestation: firstAttestation, releaseId: "accepted", revision: "accepted123"})
+
+  try {
+    await waitForLog(accepted, "control socket listening")
+    const badConfig = JSON.parse((await fs.readFile(fixture.configPath, "utf8")).replace(/^module\.exports = /, ""))
+    badConfig.processes[0].health.path = "/never-ready"
+    badConfig.processes[0].health.timeoutMs = 100
+    await fs.writeFile(fixture.configPath, `module.exports = ${JSON.stringify(badConfig, null, 2)}\n`)
+
+    const result = await runDaemon([
+      "--config", fixture.configPath,
+      "--release-path", fixture.root,
+      "--release-id", "candidate",
+      "--revision", "candidate123",
+      "--boot-attestation", secondAttestation,
+      "--takeover-owner"
+    ])
+
+    assert.notEqual(result.code, 0)
+    const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
+    assert.equal(status.activeReleaseId, "accepted")
+    assert.ok(status.bootstrap && typeof status.bootstrap === "object" && !Array.isArray(status.bootstrap))
+    assert.equal(status.bootstrap.attestation, firstAttestation)
+  } finally {
+    accepted.kill("SIGTERM")
+    if (accepted.exitCode === null) await once(accepted, "exit")
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("daemon bootstrap does not expose control deploys until activation completes", async () => {
   const fixture = await createFixture({healthGate: true, healthTimeoutMs: 60000})
   const started = waitForFile(fixture.startedPath)

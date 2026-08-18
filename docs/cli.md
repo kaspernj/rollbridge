@@ -23,7 +23,7 @@ process-policy details.
 ## `daemon`
 
 ```
-rollbridge daemon [--config <path>]
+rollbridge daemon [--config <path>] [--takeover-owner]
                   [--release-path <path> --release-id <id> --revision <sha>
                    [--boot-attestation <sha256:digest>]]
 ```
@@ -63,6 +63,13 @@ identity. Rollbridge does not calculate or interpret the digest.
 
 With no release options, daemon behavior is unchanged: it starts listener-only
 and waits for control-socket deployments.
+
+`--takeover-owner` requires the complete bootstrap tuple. It bootstraps and
+health-checks the replacement before sending the current daemon the private
+retirement command. Retirement stops stable listeners and new work promptly,
+but does not wait for owned workers' normal drain before the replacement binds
+the proxy and control socket. A bootstrap failure occurs before retirement, so
+the previously accepted owner remains available.
 
 ## `ensure-daemon`
 

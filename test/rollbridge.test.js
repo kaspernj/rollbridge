@@ -855,6 +855,14 @@ test("a process over its memory limit is restarted with reason memory", {skip: p
     assert.equal(hog.lastStartReason, "memory")
     assert.equal(typeof hog.lastMemoryRestartAt, "string")
 
+    // Keep the replacement alive long enough to observe its next monitor sample. The fixture
+    // remains over the configured limit after every launch, otherwise it can restart again and
+    // clear rssBytes/children before this polling loop observes them on slower CI runners.
+    const hogProcess = daemon.activeRelease?.processes.get("hog")
+
+    assert.ok(hogProcess?.memory)
+    hogProcess.memory.limitBytes = Number.MAX_SAFE_INTEGER
+
     // rssBytes is sampled on the monitor's interval; wait for a measurement of the running process.
     await waitFor(() => {
       const rssBytes = activeProcessStatus(daemon, "hog")?.rssBytes

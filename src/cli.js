@@ -36,6 +36,7 @@ export async function runCli(argv) {
     .option("--release-id <id>", "Bootstrap release id (requires --config, --release-path, and --revision)")
     .option("--revision <sha>", "Bootstrap revision (requires --config, --release-path, and --release-id)")
     .option("--boot-attestation <digest>", "Opaque bootstrap ownership attestation (requires the complete bootstrap release tuple)")
+    .option("--takeover-owner", "Boot and health-check before retiring the current external owner")
     .action(async (options) => {
       const bootstrap = await validateDaemonBootstrapOptions(options)
       const configPath = await resolveConfigPath(options.config)
@@ -43,7 +44,9 @@ export async function runCli(argv) {
       const runtime = await loadDaemonRuntimeIdentity(process.env.ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST)
       const daemon = new RollbridgeDaemon({bootstrap, config, configPath, runtime})
 
-      await daemon.start({exposeControl: !bootstrap})
+      if (options.takeoverOwner && (!bootstrap || !bootstrap.attestation)) throw new Error("Daemon --takeover-owner requires the complete bootstrap release tuple and --boot-attestation.")
+
+      if (!options.takeoverOwner) await daemon.start({exposeControl: !bootstrap})
 
       const shutdown = async () => {
         await daemon.shutdown()
@@ -56,10 +59,15 @@ export async function runCli(argv) {
       if (bootstrap) {
         try {
           await daemon.deploy(bootstrap)
-          await daemon.exposeControl()
+          if (options.takeoverOwner) {
+            await sendControlCommand({command: {attestation: bootstrap.attestation, command: "retire-owner"}, path: config.control.path})
+            await daemon.start({reportOrphans: false})
+          } else {
+            await daemon.exposeControl()
+          }
         } catch {
           daemon.logger("bootstrap activation failed", {releaseId: bootstrap.releaseId, status: "error"})
-          await daemon.shutdown()
+          if (!options.takeoverOwner) await daemon.shutdown()
           process.exitCode = 1
           return
         }

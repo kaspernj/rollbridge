@@ -115,6 +115,43 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
   }
 })
 
+test("external-owner retirement releases listeners before a long-draining companion exits", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-retirement-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const gatePath = path.join(root, "retire.fifo")
+  const stoppingPath = path.join(root, "stopping")
+  const gate = spawn("mkfifo", [gatePath])
+  assert.equal((await once(gate, "exit"))[0], 0)
+  const config = buildConfig(socketPath, {companion: {
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    id: "worker",
+    lifecycle: {drainCommand: `read released < ${JSON.stringify(gatePath)}`, drainTimeoutMs: 60000, quietCommand: `printf stopping > ${JSON.stringify(stoppingPath)}`},
+    policy: "companion"
+  }})
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+  let replacement
+
+  try {
+    await daemon.start()
+    await daemon.deploy({releaseId: "old", releasePath: root, revision: "old"})
+    const retirement = sendControlCommand({command: {attestation: `sha256:${"a".repeat(64)}`, command: "retire-owner"}, path: socketPath})
+    const response = await retirement
+    assert.deepEqual(response, {message: "owner retired", status: "success"})
+    assert.equal(await fs.readFile(stoppingPath, "utf8"), "stopping", "old worker must stop accepting work before listener takeover")
+
+    replacement = new RollbridgeDaemon({config, logger: () => {}})
+    await replacement.start({reportOrphans: false})
+    assert.equal((await sendControlCommand({command: {command: "status"}, path: socketPath})).application, "shutdown-target")
+    assert.deepEqual(replacement.status().orphans, [], "intentional retired companions are not replacement orphans")
+    assert.equal(daemon.status().releases[0].processes[0].state, "stopping")
+  } finally {
+    await fs.writeFile(gatePath, "done\n").catch(() => {})
+    if (replacement) await replacement.shutdown()
+    await daemon.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("control socket unlink failure is reported only after owned cleanup completes", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-shutdown-unlink-failure-"))
   const socketPath = path.join(root, "control.sock")
