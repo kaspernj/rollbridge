@@ -12,7 +12,7 @@ import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon from "../src/daemon.js"
-import {isProcessAlive} from "../src/state-store.js"
+import {isProcessAlive, readState} from "../src/state-store.js"
 
 const dummyAppPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "dummy-app.js")
 
@@ -148,6 +148,41 @@ test("external-owner retirement releases listeners before a long-draining compan
     await fs.writeFile(gatePath, "done\n").catch(() => {})
     if (replacement) await replacement.shutdown()
     await daemon.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("a retired owner cannot clear replacement state during late shutdown", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-retired-owner-state-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const config = normalizeConfig({...rawConfig(socketPath), statePath})
+  const retired = new RollbridgeDaemon({config, logger: () => {}})
+  let replacement
+
+  try {
+    await retired.start()
+    await retired.deploy({releaseId: "retired", releasePath: root, revision: "retired"})
+    if (retired.pendingWrite) await retired.pendingWrite
+    await retired.retireOwner({attestation: `sha256:${"a".repeat(64)}`})
+
+    replacement = new RollbridgeDaemon({config, logger: () => {}})
+    await replacement.start({reportOrphans: false})
+    await replacement.deploy({releaseId: "replacement", releasePath: root, revision: "replacement"})
+    if (replacement.pendingWrite) await replacement.pendingWrite
+
+    const replacementState = /** @type {{activeReleaseId: string} | undefined} */ (await readState(statePath))
+
+    assert.equal(replacementState?.activeReleaseId, "replacement")
+
+    await retired.shutdown()
+
+    const stateAfterRetiredShutdown = /** @type {{activeReleaseId: string} | undefined} */ (await readState(statePath))
+
+    assert.equal(stateAfterRetiredShutdown?.activeReleaseId, "replacement", "late shutdown of the retired owner must preserve replacement state")
+  } finally {
+    if (replacement) await replacement.shutdown()
+    await retired.shutdown()
     await fs.rm(root, {force: true, recursive: true})
   }
 })

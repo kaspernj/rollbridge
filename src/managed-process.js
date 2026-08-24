@@ -364,18 +364,24 @@ export default class ManagedProcess extends EventEmitter {
 
     // 3. Stop whatever is still running, then SIGKILL if it outlasts the graceful window.
     if (this.processGroupExists(pgid)) {
-      if (stopCommand) await this.runHook(stopCommand, hookTimeoutMs, "stop command", pgid)
-      else {
+      const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
+      let gracefulDeadline
+
+      if (stopCommand) {
+        await this.runHook(stopCommand, hookTimeoutMs, "stop command", pgid)
+        gracefulDeadline = timeoutMs === "indefinite" ? undefined : Date.now() + timeoutMs
+      } else {
         this.intentionalStopSignal = /** @type {ProcessExitSignal} */ (this.stopSignal)
-        await this.signalProcessGroup(this.stopSignal, pgid, options.timeoutMs ?? this.stopTimeoutMs)
+        gracefulDeadline = timeoutMs === "indefinite" ? undefined : Date.now() + timeoutMs
+        await this.signalProcessGroup(this.stopSignal, pgid, gracefulDeadline)
       }
 
-      const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
-
-      if (!(await this.waitForProcessGroupExit(pgid, timeoutMs))) {
+      if (!(await this.waitForProcessGroupExit(pgid, gracefulDeadline))) {
         this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: pgid})
-        await this.signalProcessGroup("SIGKILL", pgid, 5000)
-        await this.waitForProcessGroupExit(pgid, 5000)
+        const killDeadline = Date.now() + 5000
+
+        await this.signalProcessGroup("SIGKILL", pgid, killDeadline)
+        await this.waitForProcessGroupExit(pgid, killDeadline)
       }
     }
 
@@ -499,10 +505,10 @@ export default class ManagedProcess extends EventEmitter {
    * Falls back to the portable group signal when procfs cannot identify group members.
    * @param {string} signal - Signal name.
    * @param {number} pgid - Process group id.
-   * @param {StopTimeoutMs} timeoutMs - Maximum time to wait for descendant reaping.
+   * @param {number | undefined} deadline - Absolute graceful deadline, or undefined to wait indefinitely.
    * @returns {Promise<void>} Resolves after the leader has been signalled.
    */
-  async signalProcessGroup(signal, pgid, timeoutMs) {
+  async signalProcessGroup(signal, pgid, deadline) {
     const members = processGroupMembers(pgid)
     const descendants = members.filter((member) => member.pid !== pgid)
 
@@ -512,11 +518,11 @@ export default class ManagedProcess extends EventEmitter {
     }
 
     for (const descendant of descendants) this.killProcess(descendant.pid, signal)
-    const deadline = timeoutMs === "indefinite" ? undefined : Date.now() + timeoutMs
-
     while (processGroupMembers(pgid).some((member) => member.pid !== pgid)) {
       if (deadline !== undefined && Date.now() >= deadline) break
-      await new Promise((resolve) => setTimeout(resolve, 25))
+      const waitMs = deadline === undefined ? 25 : Math.min(25, deadline - Date.now())
+
+      await new Promise((resolve) => setTimeout(resolve, waitMs))
     }
 
     this.killProcess(pgid, signal)
@@ -558,15 +564,15 @@ export default class ManagedProcess extends EventEmitter {
 
   /**
    * @param {number} pgid - Process group id.
-   * @param {StopTimeoutMs} timeoutMs - Timeout.
+   * @param {number | undefined} deadline - Absolute deadline, or undefined to wait indefinitely.
    * @returns {Promise<boolean>} True once the process group no longer exists.
    */
-  async waitForProcessGroupExit(pgid, timeoutMs) {
-    const deadline = timeoutMs === "indefinite" ? undefined : Date.now() + timeoutMs
-
+  async waitForProcessGroupExit(pgid, deadline) {
     while (this.processGroupExists(pgid)) {
       if (deadline !== undefined && Date.now() >= deadline) return false
-      await new Promise((resolve) => setTimeout(resolve, 10))
+      const waitMs = deadline === undefined ? 10 : Math.min(10, deadline - Date.now())
+
+      await new Promise((resolve) => setTimeout(resolve, waitMs))
     }
 
     return true

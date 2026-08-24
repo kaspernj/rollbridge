@@ -386,8 +386,10 @@ test("a hanging lifecycle hook is bounded so stop still completes", async () => 
 })
 
 test("sends the configured stopSignal as the graceful stop signal", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-stop-signal-"))
+  const readyPath = path.join(dir, "ready")
   const managed = new ManagedProcess({
-    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`require("node:fs").writeFileSync(${JSON.stringify(readyPath)}, "ready"); setInterval(() => {}, 1000)`)}`,
     cwd: undefined,
     env: {},
     id: "worker",
@@ -408,12 +410,18 @@ test("sends the configured stopSignal as the graceful stop signal", async () => 
     killProcess(pid, signal)
   }
 
-  await managed.start()
-  await managed.stop()
+  try {
+    await managed.start()
+    await waitFor(() => fs.existsSync(readyPath))
+    await managed.stop()
 
-  // The graceful stop uses the configured signal (a SIGKILL fallback, if any, comes after).
-  assert.deepEqual(signals, ["SIGINT", "SIGINT"])
-  assert.equal(managed.status().state, "stopped")
+    // The graceful stop reaches the ready descendant and its shell leader without SIGKILL.
+    assert.deepEqual(signals, ["SIGINT", "SIGINT"])
+    assert.equal(managed.status().state, "stopped")
+  } finally {
+    await managed.stop()
+    fs.rmSync(dir, {force: true, recursive: true})
+  }
 })
 
 test("indefinite stop waits for the process to exit without SIGKILL", async () => {
@@ -524,6 +532,39 @@ test("stop does not return while a gracefully stopped descendant remains unreape
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
+  }
+})
+
+test("descendant reaping and leader shutdown share one graceful deadline", async () => {
+  const managed = buildProcess(50)
+  const originalNow = Date.now
+  let now = 1000
+  /** @type {{deadline: number | undefined, signal?: string}[]} */
+  const calls = []
+
+  managed.pid = 123
+  managed.exitPromise = Promise.resolve()
+  managed.quiesce = async () => {}
+  managed.processGroupExists = () => true
+  managed.signalProcessGroup = async (signal, _pgid, deadline) => {
+    calls.push({deadline, signal})
+    now += signal === "SIGTERM" ? 100 : 0
+  }
+  managed.waitForProcessGroupExit = async (_pgid, deadline) => {
+    calls.push({deadline})
+    return calls.length > 2
+  }
+  Date.now = () => now
+
+  try {
+    await managed.stop({timeoutMs: 150})
+
+    assert.deepEqual(calls.slice(0, 2), [
+      {deadline: 1150, signal: "SIGTERM"},
+      {deadline: 1150}
+    ])
+  } finally {
+    Date.now = originalNow
   }
 })
 

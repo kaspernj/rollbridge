@@ -837,6 +837,7 @@ export default class RollbridgeDaemon {
     }
     this.persistenceEnabled = false
     if (this.pendingWrite) await this.pendingWrite
+    this.stateCleanupEnabled = false
     this.controlClosePromise = this.closeServer(this.controlServer)
     for (const socket of this.controlSockets) if (socket !== completionSocket) socket.destroy()
     await Promise.all([
