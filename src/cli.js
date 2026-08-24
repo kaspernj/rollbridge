@@ -65,9 +65,19 @@ export async function runCli(argv) {
           } else {
             await daemon.exposeControl()
           }
-        } catch {
-          daemon.logger("bootstrap activation failed", {releaseId: bootstrap.releaseId, status: "error"})
-          if (!options.takeoverOwner) await daemon.shutdown()
+        } catch (error) {
+          const failure = error instanceof Error ? error : String(error)
+
+          daemon.logger("bootstrap activation failed", {releaseId: bootstrap.releaseId, status: "error", ...errorLogData(failure)})
+
+          try {
+            await daemon.shutdown()
+          } catch (shutdownError) {
+            const shutdownFailure = shutdownError instanceof Error ? shutdownError : String(shutdownError)
+
+            daemon.logger("bootstrap shutdown failed", {releaseId: bootstrap.releaseId, status: "error", ...errorLogData(shutdownFailure)})
+          }
+
           process.exitCode = 1
           return
         }
@@ -959,4 +969,19 @@ function isMissingDaemonError(error) {
   if (!error || typeof error !== "object" || !("code" in error)) return false
 
   return error.code === "ENOENT" || error.code === "ECONNREFUSED"
+}
+
+/**
+ * Converts any thrown value into JSON-safe diagnostics without losing an Error stack.
+ * @param {Error | string} error - Thrown value.
+ * @returns {{error: string, stack: string}} Safe structured log fields.
+ */
+function errorLogData(error) {
+  if (error instanceof Error) {
+    return {error: error.message, stack: error.stack || `${error.name}: ${error.message}`}
+  }
+
+  const message = String(error)
+
+  return {error: message, stack: message}
 }

@@ -62,6 +62,7 @@ export default class ManagedProcess extends EventEmitter {
     this.memoryWarned = false
     this.startedAtMs = /** @type {number | undefined} */ (undefined)
     this.intentionalStop = false
+    this.intentionalStopSignal = /** @type {ProcessExitSignal | undefined} */ (undefined)
     this.quiescePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.restartTimer = undefined
     this.child = undefined
@@ -79,6 +80,7 @@ export default class ManagedProcess extends EventEmitter {
     if (this.child) return
 
     this.intentionalStop = false
+    this.intentionalStopSignal = undefined
     this.quiescePromise = undefined
     this.exitCode = undefined
     this.exitSignal = undefined
@@ -167,8 +169,8 @@ export default class ManagedProcess extends EventEmitter {
   onExit(code, signal) {
     const wasIntentional = this.intentionalStop
 
-    this.exitCode = code
-    this.exitSignal = signal
+    this.exitCode = this.intentionalStopSignal ? null : code
+    this.exitSignal = signal ?? this.intentionalStopSignal
     this.child = undefined
     this.pid = undefined
     this.exitPromise = undefined
@@ -363,13 +365,16 @@ export default class ManagedProcess extends EventEmitter {
     // 3. Stop whatever is still running, then SIGKILL if it outlasts the graceful window.
     if (this.processGroupExists(pgid)) {
       if (stopCommand) await this.runHook(stopCommand, hookTimeoutMs, "stop command", pgid)
-      else this.killProcessGroup(this.stopSignal, pgid)
+      else {
+        this.intentionalStopSignal = /** @type {ProcessExitSignal} */ (this.stopSignal)
+        await this.signalProcessGroup(this.stopSignal, pgid, options.timeoutMs ?? this.stopTimeoutMs)
+      }
 
       const timeoutMs = options.timeoutMs ?? this.stopTimeoutMs
 
       if (!(await this.waitForProcessGroupExit(pgid, timeoutMs))) {
         this.logger("process stop timed out; sending SIGKILL", {id: this.id, pid: pgid})
-        this.killProcessGroup("SIGKILL", pgid)
+        await this.signalProcessGroup("SIGKILL", pgid, 5000)
         await this.waitForProcessGroupExit(pgid, 5000)
       }
     }
@@ -483,6 +488,49 @@ export default class ManagedProcess extends EventEmitter {
 
     try {
       process.kill(-pgid, signal)
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
+      throw error
+    }
+  }
+
+  /**
+   * Signals descendants before their shell leader so the leader can reap them before it exits.
+   * Falls back to the portable group signal when procfs cannot identify group members.
+   * @param {string} signal - Signal name.
+   * @param {number} pgid - Process group id.
+   * @param {StopTimeoutMs} timeoutMs - Maximum time to wait for descendant reaping.
+   * @returns {Promise<void>} Resolves after the leader has been signalled.
+   */
+  async signalProcessGroup(signal, pgid, timeoutMs) {
+    const members = processGroupMembers(pgid)
+    const descendants = members.filter((member) => member.pid !== pgid)
+
+    if (descendants.length === 0) {
+      this.killProcessGroup(signal, pgid)
+      return
+    }
+
+    for (const descendant of descendants) this.killProcess(descendant.pid, signal)
+    const deadline = timeoutMs === "indefinite" ? undefined : Date.now() + timeoutMs
+
+    while (processGroupMembers(pgid).some((member) => member.pid !== pgid)) {
+      if (deadline !== undefined && Date.now() >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+
+    this.killProcess(pgid, signal)
+  }
+
+  /**
+   * Signals one verified member of the owned process group.
+   * @param {number} pid - Process id.
+   * @param {string} signal - Signal name.
+   * @returns {void}
+   */
+  killProcess(pid, signal) {
+    try {
+      process.kill(pid, signal)
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
       throw error
