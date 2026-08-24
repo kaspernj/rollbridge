@@ -401,18 +401,18 @@ test("sends the configured stopSignal as the graceful stop signal", async () => 
 
   /** @type {string[]} */
   const signals = []
-  const killProcessGroup = managed.killProcessGroup.bind(managed)
+  const killProcess = managed.killProcess.bind(managed)
 
-  managed.killProcessGroup = (signal) => {
+  managed.killProcess = (pid, signal) => {
     signals.push(signal)
-    killProcessGroup(signal)
+    killProcess(pid, signal)
   }
 
   await managed.start()
   await managed.stop()
 
   // The graceful stop uses the configured signal (a SIGKILL fallback, if any, comes after).
-  assert.equal(signals[0], "SIGINT")
+  assert.deepEqual(signals, ["SIGINT", "SIGINT"])
   assert.equal(managed.status().state, "stopped")
 })
 
@@ -431,11 +431,11 @@ test("indefinite stop waits for the process to exit without SIGKILL", async () =
   })
   /** @type {string[]} */
   const signals = []
-  const killProcessGroup = managed.killProcessGroup.bind(managed)
+  const killProcess = managed.killProcess.bind(managed)
 
-  managed.killProcessGroup = (signal) => {
+  managed.killProcess = (pid, signal) => {
     signals.push(signal)
-    killProcessGroup(signal)
+    killProcess(pid, signal)
   }
 
   try {
@@ -443,7 +443,7 @@ test("indefinite stop waits for the process to exit without SIGKILL", async () =
     await managed.stop()
 
     assert.equal(managed.status().state, "stopped")
-    assert.deepEqual(signals, ["SIGTERM"])
+    assert.deepEqual(signals, ["SIGTERM", "SIGTERM"])
   } finally {
     await managed.stop()
   }
@@ -485,6 +485,42 @@ test("stop waits for process group descendants after the detached shell exits", 
     assert.ok(elapsedMs >= 250, `stop resolved after only ${elapsedMs}ms`)
     assert.ok(elapsedMs < 1500, `stop took ${elapsedMs}ms`)
     assert.equal(fs.readFileSync(latePath, "utf8"), "late")
+  } finally {
+    await managed.stop()
+    fs.rmSync(dir, {force: true, recursive: true})
+  }
+})
+
+test("stop does not return while a gracefully stopped descendant remains unreaped", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-process-group-"))
+  const pidPath = path.join(dir, "child.pid")
+  const child = [
+    "const fs = require('node:fs')",
+    `fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid))`,
+    "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 50))",
+    "setInterval(() => {}, 1000)"
+  ].join("; ")
+  const managed = new ManagedProcess({
+    command: `trap 'exit 0' TERM; ${JSON.stringify(process.execPath)} -e ${JSON.stringify(child)} & wait`,
+    cwd: undefined,
+    env: {},
+    id: "worker",
+    logger: () => {},
+    outputLines: 50,
+    restartDelayMs: 10,
+    shouldRestart: () => false,
+    stopSignal: "SIGTERM",
+    stopTimeoutMs: 2000
+  })
+
+  try {
+    await managed.start()
+    await waitFor(() => fs.existsSync(pidPath))
+    const childPid = Number(fs.readFileSync(pidPath, "utf8"))
+
+    await managed.stop()
+
+    assert.throws(() => process.kill(childPid, 0), {code: "ESRCH"})
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
