@@ -882,12 +882,13 @@ export default class RollbridgeDaemon {
     }
 
     await captureShutdownError(cleanupErrors, "proxy close", async () => this.proxy.close())
-    const stopResults = await Promise.allSettled([
-      ...[...this.services.values()].map((processInstance) => processInstance.stop()),
+    const dependentStopResults = await Promise.allSettled([
       ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
       ...[...this.startingReleases].map((release) => release.stop()),
       ...[...this.releases.values()].map((release) => release.stop())
     ])
+    const serviceStopResults = await Promise.allSettled([...this.services.values()].map((processInstance) => processInstance.stop()))
+    const stopResults = [...dependentStopResults, ...serviceStopResults]
     await captureShutdownError(cleanupErrors, "proxy server close", () => this.closeServer(this.proxyServer))
 
     // Wait for any in-flight write first so it can't recreate or overwrite the final state (no
