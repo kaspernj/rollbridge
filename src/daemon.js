@@ -56,6 +56,7 @@ export default class RollbridgeDaemon {
     this.proxy = httpProxy.createProxyServer({ws: true, xfwd: true})
     this.proxyServer = /** @type {http.Server | undefined} */ (undefined)
     this.controlServer = /** @type {net.Server | undefined} */ (undefined)
+    this.controlSocketOwned = false
     this.controlSockets = /** @type {Set<net.Socket>} */ (new Set())
     this.proxyPort = /** @type {number | undefined} */ (undefined)
     this.stopping = false
@@ -63,6 +64,7 @@ export default class RollbridgeDaemon {
     this.persistTimer = /** @type {ReturnType<typeof setInterval> | undefined} */ (undefined)
     this.persistenceEnabled = false
     this.pendingWrite = /** @type {Promise<void> | undefined} */ (undefined)
+    this.stateCleanupEnabled = false
     this.shutdownPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.retirementPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.controlClosePromise = /** @type {Promise<void> | undefined} */ (undefined)
@@ -128,6 +130,7 @@ export default class RollbridgeDaemon {
     await new Promise((resolve, reject) => {
       server.once("error", reject)
       server.listen(this.config.control.path, () => {
+        this.controlSocketOwned = true
         this.logger("control socket listening", {path: this.config.control.path})
         resolve(undefined)
       })
@@ -741,6 +744,7 @@ export default class RollbridgeDaemon {
   startStatePersistence() {
     if (!this.statePath) return
 
+    this.stateCleanupEnabled = true
     this.persistenceEnabled = true
     this.persistState()
     this.persistTimer = setInterval(() => this.persistState(), STATE_PERSIST_INTERVAL_MS)
@@ -780,6 +784,7 @@ export default class RollbridgeDaemon {
   async reportOrphans() {
     if (!this.statePath) return
 
+    this.stateCleanupEnabled = true
     const orphans = liveProcesses(await readState(this.statePath))
 
     // Keep them for status() so `rollbridge status` reflects still-running children after a
@@ -888,7 +893,7 @@ export default class RollbridgeDaemon {
     // new writes start: stopping is set and the persist timer is cleared above). Prior-daemon
     // orphans are not owned by this daemon, so retain their records until they are confirmed gone.
     await captureShutdownError(cleanupErrors, "persistent state cleanup", async () => {
-      if (!this.statePath) return
+      if (!this.statePath || !this.stateCleanupEnabled) return
       if (this.pendingWrite) await this.pendingWrite
       const orphans = this.orphans.filter((orphan) => isProcessAlive(orphan.pid))
 
@@ -910,7 +915,10 @@ export default class RollbridgeDaemon {
 
   /** @returns {Promise<void>} Removes the configured control socket path. */
   async removeControlSocket() {
+    if (!this.controlSocketOwned) return
+
     await fs.rm(this.config.control.path, {force: true})
+    this.controlSocketOwned = false
   }
 
   /**
