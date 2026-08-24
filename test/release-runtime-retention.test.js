@@ -214,12 +214,15 @@ test("concurrent startup loser re-attests the winner before sending deploy", asy
       proxy: {drainTimeoutMs: 100, forceStopTimeoutMs: 100, host: "127.0.0.1", port: 0}
     }, null, 2)}\n`)
 
-    const loserDeploy = runReleaseCli(loserRelease, [
-      "deploy", "--ensure-daemon", "--config", configPath,
-      "--release-path", loserRelease, "--release-id", "loser",
-      "--daemon-log-path", path.join(root, "loser.log"), "--daemon-pid-path", loserPidPath,
-      "--daemon-runtime-path", path.join(root, "loser-runtime")
-    ])
+    const loserRejected = assert.rejects(
+      runReleaseCli(loserRelease, [
+        "deploy", "--ensure-daemon", "--config", configPath,
+        "--release-path", loserRelease, "--release-id", "loser",
+        "--daemon-log-path", path.join(root, "loser.log"), "--daemon-pid-path", loserPidPath,
+        "--daemon-runtime-path", path.join(root, "loser-runtime")
+      ]),
+      /legacy or mismatched runtime.*deploy was not sent/s
+    )
 
     await waitForFile(loserPausedPath)
     await runReleaseCli(winnerRelease, [
@@ -229,7 +232,7 @@ test("concurrent startup loser re-attests the winner before sending deploy", asy
       "--daemon-runtime-path", path.join(root, "winner-runtime")
     ])
 
-    await assert.rejects(loserDeploy, /legacy or mismatched runtime.*deploy was not sent/s)
+    await loserRejected
     const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
     assert.equal(status.activeReleaseId, "winner")
