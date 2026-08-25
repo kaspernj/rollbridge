@@ -115,6 +115,60 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
   }
 })
 
+test("shutdown keeps daemon services alive until release-owned dependents stop", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-shutdown-service-order-"))
+  const socketPath = path.join(root, "control.sock")
+  const processCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`
+  const config = buildConfig(socketPath, {
+    companion: {command: processCommand, gracefulStopMs: "indefinite", id: "worker", policy: "companion"},
+    service: {command: processCommand, id: "coordinator", policy: "service"}
+  })
+  const daemon = new RollbridgeDaemon({config, logger: () => {}})
+  /** @type {() => void} */
+  let releaseWorker = () => {}
+  const workerGate = new Promise((resolve) => { releaseWorker = () => resolve(undefined) })
+  let serviceStopStarted = false
+
+  try {
+    await daemon.start()
+    await daemon.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
+
+    const release = daemon.activeRelease
+    const coordinator = daemon.services.get("coordinator")
+
+    assert.ok(release)
+    assert.ok(coordinator)
+
+    const originalReleaseStop = release.stop.bind(release)
+    const originalCoordinatorStop = coordinator.stop.bind(coordinator)
+    let signalReleaseStopStarted = () => {}
+    const releaseStopStarted = new Promise((resolve) => { signalReleaseStopStarted = () => resolve(undefined) })
+
+    release.stop = async () => {
+      signalReleaseStopStarted()
+      await workerGate
+      await originalReleaseStop()
+    }
+    coordinator.stop = async () => {
+      serviceStopStarted = true
+      await originalCoordinatorStop()
+    }
+
+    const shutdown = daemon.shutdown()
+
+    await releaseStopStarted
+    const serviceStoppedWhileWorkerWasDraining = serviceStopStarted
+    releaseWorker()
+    await shutdown
+
+    assert.equal(serviceStoppedWhileWorkerWasDraining, false, "a worker must retain access to daemon services throughout its drain")
+  } finally {
+    releaseWorker()
+    await daemon.shutdown()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("external-owner retirement releases listeners before a long-draining companion exits", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-retirement-"))
   const socketPath = path.join(root, "rollbridge.sock")
@@ -314,13 +368,13 @@ test("shutdown of an already-stopped endpoint fails explicitly", async () => {
 
 /**
  * @param {string} socketPath - Control socket path.
- * @param {{companion?: Record<string, import("../src/json.js").JsonValue>}} [options] - Optional companion process.
+ * @param {{companion?: Record<string, import("../src/json.js").JsonValue>, service?: Record<string, import("../src/json.js").JsonValue>}} [options] - Optional dependent processes.
  * @returns {import("../src/config.js").RollbridgeConfig} Normalized config.
  */
-function buildConfig(socketPath, {companion} = {}) {
+function buildConfig(socketPath, {companion, service} = {}) {
   return normalizeConfig({
     ...rawConfig(socketPath),
-    ...(companion ? {processes: [companion, ...rawConfig(socketPath).processes]} : {})
+    ...((companion || service) ? {processes: [...(service ? [service] : []), ...(companion ? [companion] : []), ...rawConfig(socketPath).processes]} : {})
   })
 }
 
