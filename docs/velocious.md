@@ -15,8 +15,8 @@ retired-generation recovery; verify source and config before claiming compliance
 | Velocious process | Rollbridge policy | Lifecycle |
 | --- | --- | --- |
 | `beacon` | persistent `service` | Shared broker; it may remain daemon-wide on fixed port `7330`. |
-| `background-jobs-main` | `service` with `deployStrategy: "handoff"` | One instance and endpoint per release; owns the same release's workers and their handoffs. |
-| `background-jobs-worker` | `companion` with `nonBlockingDrain: true` | Release-scoped pool; stops accepting handoffs when its generation retires. |
+| `background-jobs-main` | `service` with `deployStrategy: "handoff"` | One endpoint per release; owns worker connections, lease fencing, report acceptance/acknowledgement, and durable store transitions. |
+| `background-jobs-worker` | `companion` with `nonBlockingDrain: true` | Release-scoped pool; executes accepted work, owns child runners and execution timeouts, and durably retries terminal reports while tracking their promises. |
 | `web` | `proxied` | Health-gated active HTTP/WebSocket target with a per-release port. |
 
 ## Example `rollbridge.js`
@@ -114,15 +114,18 @@ Retire jobs-main and its workers as one unit:
 - jobs-main relinquishes recurring schedule ownership and stops dispatching
   queued work or making new worker handoffs;
 - workers stop advertising or accepting new handoffs;
-- jobs-main remains running on the old endpoint and continues worker connections
-  and heartbeats, completion/failure acknowledgements, durable report retries,
-  per-job timeout handling, child reaping, and durable transitions for every
-  handoff it already owns;
+- jobs-main remains running on the old endpoint and owns worker connections and
+  heartbeats, lease fencing, terminal-report acceptance and acknowledgement, and
+  durable store transitions for its accepted handoffs;
+- the old worker/reporting side durably retries terminal reports, tracks
+  outstanding report promises, enforces per-job execution timeouts, and owns and
+  reaps child runners;
 - a job returned or retried to the shared queue becomes eligible for the new
   active generation, and the retired main never dispatches it again;
 - old workers never reconnect to or transfer their handoffs to the new jobs-main;
-- jobs-main exits only after all owned handoffs settle and all workers drain and
-  exit, after which Rollbridge may reap the generation.
+- old main and workers remain one release generation until all accepted work
+  settles; jobs-main exits only after that and after all workers drain and exit,
+  after which Rollbridge may reap the generation.
 
 HTTP/WebSocket and jobs drains are independent. `proxy.drainTimeoutMs` bounds the
 connection drain only; reaching it must not stop a still-draining jobs generation.
@@ -134,6 +137,11 @@ persist their ownership across later deploys and supervisor/host recovery, and
 report every referenced release directory so Rampway can pin it against cleanup.
 A runtime owner/version handoff preserves or transfers that supervision and
 returns after the replacement is healthy; it is not a full synchronous shutdown.
+
+These are target requirements. Current Rollbridge drains releases
+asynchronously only while the same daemon remains alive, cannot re-adopt
+surviving PIDs after restart, and stops rather than transfers all managed
+processes during `--takeover-owner`; see [`docs/cli.md`](cli.md#daemon).
 
 ## Timeouts
 

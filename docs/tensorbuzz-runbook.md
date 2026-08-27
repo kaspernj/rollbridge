@@ -32,15 +32,18 @@ while a newer generation is active.
    workers, jobs-main, HTTP/WebSocket connections, or other retained services.
 
 The retired jobs-main remains running on its old endpoint with its old workers.
-It supervises the handoffs it already made: connections and heartbeats,
-completion/failure acknowledgements, report retries, job timeouts, child reaping,
-and durable transitions. Returned or retried work becomes eligible for the new
-active generation and is never redispatched by the retired main. Old workers do
-not reconnect to or transfer their handoffs to the new main.
+For accepted handoffs it owns worker connections and heartbeats, lease fencing,
+terminal-report acceptance and acknowledgement, and durable store transitions.
+The old worker/reporting side durably retries terminal reports, tracks
+outstanding report promises, enforces per-job execution timeouts, and owns and
+reaps child runners. Returned or retried work becomes eligible for the new active
+generation and is never redispatched by the retired main. Old workers do not
+reconnect to or transfer their handoffs to the new main.
 
-Only after every owned handoff settles and every old worker exits may jobs-main
-exit and Rollbridge reap the generation. The referenced release directory stays
-pinned against Rampway cleanup until that point.
+Old main and workers remain one release generation until every accepted handoff
+settles. Only then, after every old worker exits, may jobs-main exit and
+Rollbridge reap the generation. The referenced release directory stays pinned
+against Rampway cleanup until that point.
 
 ## Independent drains
 
@@ -55,16 +58,23 @@ has already completed after candidate activation and health.
 
 ## Runtime-owner and recovery requirements
 
-Rollbridge durably supervises every retired generation after the deploy command
-returns, across later deploys and supervisor/host recovery. Runtime-owner or
-version handoff must preserve or transfer that supervision and return once the
-replacement is healthy. It must not perform full synchronous shutdown, kill
-retained generations, or make the new jobs-main adopt old workers.
+Required compliant behavior durably supervises every retired generation after
+the deploy command returns, across later deploys and supervisor/host recovery.
+Runtime-owner or version handoff must preserve or transfer that supervision and
+return once the replacement is healthy. It must not perform full synchronous
+shutdown, kill retained generations, or make the new jobs-main adopt old workers.
 
 Recovery must reconstruct retained generation ownership, endpoints, release
 paths, and process references. Do not treat them as generic orphans to force-stop
 merely because a supervisor restarted. Cleanup becomes eligible only after the
 last retained process exits.
+
+Current Rollbridge does not yet meet those recovery and owner-handoff
+requirements. Its non-blocking release drains last only for the current daemon's
+lifetime; after restart it reports surviving PIDs as advisory, non-adoptable
+orphans, and forced recovery stops them. `--takeover-owner` quiesces and starts
+asynchronous stops for every managed process instead of transferring retained
+generations.
 
 ## Operator checks
 

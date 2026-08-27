@@ -212,10 +212,20 @@ range** so old and new instances can run at the same time:
 
 Reference it from same-release processes with `{{ports.background-jobs-main}}`.
 During a deploy, old workers keep the old port and new workers get the new port.
-For background jobs this is mandatory: the handoff service and its workers form
-one release generation. Retirement stops new scheduling, dispatch, and worker
-handoffs but keeps the old service running until its owned handoffs settle and
-its workers exit. Workers are not adopted by the new service.
+For background jobs, the required compliant architecture makes the handoff
+service and its workers one release generation. Immediately after activation,
+retirement must quiesce the old jobs-main's scheduling, dispatch, and new worker
+handoffs while keeping it with its workers until their accepted work settles.
+Workers are not adopted by the new service.
+
+That immediate old-main quiescence is **required future compliance behavior**,
+not current `deployStrategy: "handoff"` behavior. Today the release group starts
+`stop()` for `nonBlockingDrain` companions at retirement but sends no retirement
+or quiescence notice to the handoff service. It waits for the connection drain,
+stops other dependent processes, waits for the non-blocking companion stops, and
+only then stops the handoff service. Consequently, old and new jobs-main
+instances can overlap scheduling and dispatch ownership. Do not treat the
+configuration above alone as compliance with the background-jobs contract.
 
 ### `processes[].lifecycle`
 
@@ -262,12 +272,13 @@ That keeps a worker alive in case the draining web process still depends on it â
 but it also holds a background worker open for the whole connection drain.
 
 Set `nonBlockingDrain: true` on a `companion` whose work is independent of the
-proxied process (a job worker on a shared queue). It stops accepting new handoffs
-**as soon as the release is retired**, in parallel with the connection drain,
-rather than after it. The new generation handles newly eligible queued work;
-the retired handoff service keeps supervising only the work it already handed
-off until the old workers exit. The deploy returns immediately. Closing or
-timing out the HTTP/WebSocket drain never stops that still-draining generation.
+proxied process (a job worker on a shared queue). Rollbridge starts that
+companion's configured stop sequence **as soon as the release is retired**, in
+parallel with the connection drain, rather than after it. Its quiet command or
+signal must make the worker stop accepting new handoffs. The asynchronous
+release drain continues after the deploy response. As described above, current
+Rollbridge does not simultaneously quiesce the handoff service, so this setting
+alone does not prevent overlapping jobs-main scheduling or dispatch ownership.
 
 ```js
 {id: "worker", policy: "companion", command: "â€¦", nonBlockingDrain: true, stopSignal: "SIGINT", gracefulStopMs: "indefinite"}

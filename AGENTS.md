@@ -12,8 +12,11 @@ process lifecycle, retained generations, ports, and recovery state.
 - After activation, retire the old generation as one unit. Its main stops
   schedules, new dispatch, and new ordinary worker handoffs; its workers stop
   accepting handoffs. The old main remains running with those workers and owns
-  their connections, heartbeats, acknowledgements, report retries, job timeouts,
-  child reaping, and durable transitions until every owned handoff settles.
+  their connections, lease fencing, report acceptance and acknowledgement, and
+  durable store transitions. The worker/reporting side durably retries terminal
+  reports, tracks outstanding report promises, enforces per-job execution
+  timeouts, and owns and reaps child runners. Main and workers remain one release
+  generation until every accepted handoff settles.
 - Returned or retried work may be dispatched by the new active generation. A
   retired main never dispatches it again. Old workers never reconnect or hand
   over to the new main during a normal deploy.
