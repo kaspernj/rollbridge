@@ -67,10 +67,11 @@ Related Rollbridge timeouts (configured in `rollbridge.js`, not Nginx):
 
 - `proxy.healthTimeoutMs` gates how long a new release has to become healthy
   before a deploy aborts — it does not affect request timeouts.
-- `proxy.drainTimeoutMs` is how long Rollbridge keeps an old release alive for
-  in-flight connections during a deploy. Keep Nginx's `proxy_read_timeout` for
-  WebSocket locations comfortably above it so the front end doesn't cut
-  connections Rollbridge is still draining.
+- `proxy.drainTimeoutMs` is how long Rollbridge keeps an old proxied web process
+  alive for in-flight connections during a deploy. Keep Nginx's
+  `proxy_read_timeout` for WebSocket locations comfortably above it so the front
+  end doesn't cut connections Rollbridge is still draining. Retained jobs
+  generations drain independently and are not stopped when this timeout expires.
 
 ## Forwarded headers
 

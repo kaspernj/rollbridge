@@ -75,7 +75,7 @@ to let a deploy group talk to the daemon.
 | `proxy.upstreamHost` | string | `proxy.host`, or `"127.0.0.1"` when `proxy.host` is `0.0.0.0`/`::` | Host Rollbridge uses for release health checks and proxy targets. |
 | `proxy.healthPath` | string | `"/ping"` | Default health-check path for proxied processes. |
 | `proxy.healthTimeoutMs` | number | `30000` | Default health-check timeout for proxied processes. |
-| `proxy.drainTimeoutMs` | number | `60000` | How long to drain open connections from a retired release before stopping it. |
+| `proxy.drainTimeoutMs` | number | `60000` | How long to drain HTTP/WebSocket connections before stopping the retired proxied process. Expiry never stops an independently draining jobs generation. |
 | `proxy.forceStopTimeoutMs` | number | `10000` | Default per-process graceful-stop timeout (`SIGTERM`, then `SIGKILL`). |
 
 ## `releaseRetention`
@@ -212,6 +212,10 @@ range** so old and new instances can run at the same time:
 
 Reference it from same-release processes with `{{ports.background-jobs-main}}`.
 During a deploy, old workers keep the old port and new workers get the new port.
+For background jobs this is mandatory: the handoff service and its workers form
+one release generation. Retirement stops new scheduling, dispatch, and worker
+handoffs but keeps the old service running until its owned handoffs settle and
+its workers exit. Workers are not adopted by the new service.
 
 ### `processes[].lifecycle`
 
@@ -219,6 +223,11 @@ Command hooks run when Rollbridge **gracefully stops** the process — during a
 deploy's drain, a `rollbridge restart`, a memory restart, or shutdown. They let a
 job worker quiesce and finish in-flight work before it is terminated. Omit
 `lifecycle` for the default behavior (just `stopSignal` then `SIGKILL`).
+
+These hooks describe an individual process stop. They do not define when a
+deploy completes and must not impose a short normal-drain deadline on a jobs
+generation. Per-job timeouts remain the correct bound for genuinely hung jobs;
+legitimate hours-long generation drains are valid.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -253,15 +262,15 @@ That keeps a worker alive in case the draining web process still depends on it �
 but it also holds a background worker open for the whole connection drain.
 
 Set `nonBlockingDrain: true` on a `companion` whose work is independent of the
-proxied process (a job worker on a shared queue). Its graceful stop — `lifecycle`
-hooks, or `stopSignal` then `SIGKILL` after `gracefulStopMs` — then starts **as
-soon as the release is retired**, in parallel with the connection drain, rather
-than after it. The new release's workers (started before traffic switches) handle
-new work while the retired release's workers finish their in-flight jobs. The
-whole drain stays non-blocking — the deploy returns immediately.
+proxied process (a job worker on a shared queue). It stops accepting new handoffs
+**as soon as the release is retired**, in parallel with the connection drain,
+rather than after it. The new generation handles newly eligible queued work;
+the retired handoff service keeps supervising only the work it already handed
+off until the old workers exit. The deploy returns immediately. Closing or
+timing out the HTTP/WebSocket drain never stops that still-draining generation.
 
 ```js
-{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, stopSignal: "SIGINT", gracefulStopMs: 60000}
+{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, stopSignal: "SIGINT", gracefulStopMs: "indefinite"}
 ```
 
 ### `processes[].restart`

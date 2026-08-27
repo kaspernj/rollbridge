@@ -30,11 +30,12 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Distinguish crash restarts, deploy replacements, manual restarts, and memory restarts in status/events. (Per-process `lastStartReason` + a `reason` on the `process started` event; the `memory` reason is wired and fires once memory supervision restarts a process.)
   - [x] Add a `restart` CLI command for a single process, a policy group, or all non-proxied workers.
   - [x] Keep restart behavior safe for job workers by using lifecycle hooks before termination. (Manual restart, memory restart, and deploy-drain stops all run the `lifecycle` hooks via `stop()`.)
-- [x] Graceful job-worker lifecycle.
+- [x] Graceful process-stop controls for job workers.
   - [x] Add generic lifecycle hooks such as `quietCommand`, `drainCommand`, `drainTimeoutMs`, and `stopCommand` (per-process `lifecycle`).
   - [x] Support signal-only lifecycle steps for workers that can quiet on a Unix signal. (Per-process `stopSignal`; sent before the `SIGKILL`-after-`gracefulStopMs` fallback.)
-  - [x] Add a non-blocking drain mode so new workers can start while old workers finish running jobs (per-process `nonBlockingDrain`; drains the worker in parallel with the connection drain).
-  - [x] Document a Velocious background-jobs-worker recipe once the lifecycle contract is implemented (`docs/velocious.md` → Worker recipe).
+  - [x] Add a non-blocking drain mode so a worker can quiesce at release retirement independently of the HTTP/WebSocket connection drain (`nonBlockingDrain`). This control alone does not provide durable retired-generation supervision.
+  - [x] Document the required Velocious release-generation contract (`docs/velocious.md` and `docs/workers.md`) without treating documentation as proof that the runtime implements it.
+  - [ ] Implement and verify durable release-scoped jobs-main retirement: owned-handoff supervision, recovery across daemon/host replacement, multiple concurrent retired generations, and release-reference reporting for cleanup pins.
 - [x] Replicas and stable worker indexes. (Supported on port-less `companion` processes; `proxied`/`singleton`/ported processes stay single.)
   - [x] Allow one process config to start multiple replicas (`replicas`, companion-only for now).
   - [x] Expose `ROLLBRIDGE_REPLICA_INDEX`, replica count, and per-replica template context (`{{replicaIndex}}`/`{{replicaCount}}`).
@@ -91,7 +92,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
 - [x] Write a CLI reference for `daemon`, `ensure-daemon`, `deploy`, `status`, `stop`, `shutdown`, and future commands (`docs/cli.md`).
 - [x] Expand process policy docs with deployment examples for `proxied`, `companion`, `singleton`, and `service`.
 - [x] Document memory checks and auto-restart behavior after the feature lands (`docs/config.md` → `processes[].memory`).
-- [x] Document safe background-job deployment patterns (`docs/workers.md`: companion + `replicas` + `stopSignal` + `gracefulStopMs`, old/new worker overlap).
+- [x] Document the required background-job generation pattern (`docs/workers.md`: release-scoped jobs-main + worker pool, independent quiescence, durable retained supervision, and deploy completion that does not wait for drains).
 - [x] Document worker lifecycle hooks (`docs/config.md` → `processes[].lifecycle`, `docs/workers.md`).
 - [x] Add a Velocious deployment guide with Beacon, background-jobs-main, background-jobs-worker, and web process examples (`docs/velocious.md`).
 - [x] Add an Nginx guide with WebSocket headers, timeouts, and common failure modes (`docs/nginx.md`).

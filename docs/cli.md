@@ -66,10 +66,12 @@ and waits for control-socket deployments.
 
 `--takeover-owner` requires the complete bootstrap tuple. It bootstraps and
 health-checks the replacement before sending the current daemon the private
-retirement command. Retirement stops stable listeners and new work promptly,
-but does not wait for owned workers' normal drain before the replacement binds
-the proxy and control socket. A bootstrap failure occurs before retirement, so
-the previously accepted owner remains available.
+retirement command. Retirement stops stable listener ownership promptly and
+preserves or transfers durable supervision of retained release generations. It
+does not wait for their normal drain before the replacement binds the proxy and
+control socket, and it must not hand old workers to a new jobs-main. A bootstrap
+failure occurs before retirement, so the previously accepted owner remains
+available.
 
 ## `ensure-daemon`
 
@@ -120,8 +122,10 @@ rollbridge deploy --release-path <path>
                   [--daemon-start-timeout-ms <ms>]
 ```
 
-Starts the prepared release, health-checks the proxied process, switches new
-traffic to it, then drains and stops the previous release. Prints
+Starts the complete prepared release generation, health-checks the proxied
+process, and switches new traffic to it. Retirement of the previous release then
+continues under durable background supervision; the command does not wait for
+old jobs generations or HTTP/WebSocket connections to finish. Prints
 `{"status": "success", "activeReleaseId": "...", "previousReleaseId": "..."}`.
 If the new release fails to start or health-check, the previous release stays
 active and the command errors.

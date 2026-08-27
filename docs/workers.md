@@ -1,117 +1,89 @@
-# Background-job worker deployment
+# Background-job generation deployment
 
-This guide covers deploying background-job workers (or any non-HTTP worker pool)
-with Rollbridge so that in-flight jobs finish across a deploy. It uses features
-that exist today; the command-based lifecycle hooks mentioned at the end are
-still on the roadmap.
+This is the required Rollbridge lifecycle for a background-jobs runtime. A
+generation is release-scoped and contains its own `background-jobs-main` plus
+its worker pool. It is not just a set of workers attached to one persistent
+coordinator.
 
-## Run workers as a `companion`
+## Process topology
 
-Give each worker the `companion` policy. Companions are **release-scoped**: every
-release starts its own workers running that release's code, and a release's
-workers are stopped only when that release is retired (drained) after a newer
-release takes over. They start **before** the `proxied` web process, so they're
-ready before traffic switches.
+Configure jobs-main as a handoff `service` on a multi-port range and the workers
+as same-release `companion`s. Beacon may remain a shared persistent service on a
+fixed port such as `7330`.
 
 ```js
 {
-  id: "worker",
-  policy: "companion",
-  cwd: "{{releasePath}}",
-  command: "npx velocious background-jobs-worker"
-}
-```
-
-## Scale the pool with `replicas`
-
-Set `replicas` to run several identical workers (a port-less companion only).
-Each instance runs as `worker#0`, `worker#1`, … and gets
-`ROLLBRIDGE_REPLICA_INDEX` / `ROLLBRIDGE_REPLICA_COUNT` (and `{{replicaIndex}}` /
-`{{replicaCount}}`), so an instance can claim a distinct shard, queue, or lock:
-
-```js
-{id: "worker", policy: "companion", command: "npx velocious background-jobs-worker", replicas: 4}
-```
-
-Restart the pool with `rollbridge restart --process worker` (all replicas) or a
-single instance with `rollbridge restart --process worker#0`.
-
-## Finish in-flight jobs on stop (`stopSignal` + `gracefulStopMs`)
-
-When Rollbridge stops a worker — during a deploy's drain, a `rollbridge restart`,
-or shutdown — it sends the worker's **`stopSignal`** (default `SIGTERM`), waits up
-to **`gracefulStopMs`**, then `SIGKILL`s it if it hasn't exited. That window is
-the worker's chance to finish its current job and exit cleanly.
-
-- Set `stopSignal` to the signal your worker quiets/drains on. Many job runners
-  finish the current job and exit on `SIGTERM` (the default); some use `SIGINT`
-  or `SIGQUIT`. Use the one your worker treats as "drain and exit".
-- Set `gracefulStopMs` to at least your longest job's duration, so a job in
-  progress is not cut off by the `SIGKILL` fallback. Use `"indefinite"` only for
-  workers that are safe to leave draining until they exit on their own.
-
-```js
+  id: "background-jobs-main",
+  policy: "service",
+  deployStrategy: "handoff",
+  command: "npx velocious background-jobs-main",
+  port: {from: 7331, to: 7399}
+},
 {
-  id: "worker",
+  id: "background-jobs-worker",
   policy: "companion",
+  env: {VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"},
   command: "npx velocious background-jobs-worker",
   replicas: 4,
-  stopSignal: "SIGTERM",
+  nonBlockingDrain: true,
   gracefulStopMs: "indefinite"
 }
 ```
 
-## What happens across a deploy
+Each worker receives its generation's jobs-main port. Old workers keep that port
+for their entire lifetime; normal deploy draining never hands them to, or lets
+them reconnect to, the new jobs-main. `replicas` scales the pool as
+`background-jobs-worker#0`, `#1`, and so on.
 
-1. The new release's workers start (running the **new** code) before traffic
-   switches to the new web process.
-2. Both old and new workers run while the previous release drains, so **both
-   code versions consume the shared queue at once.** Keep job code
-   backwards-compatible across a deploy — the same rule as database migrations.
-3. When the previous release is retired (its HTTP/WebSocket connections close or
-   `proxy.drainTimeoutMs` elapses), its workers are stopped: `stopSignal`, then
-   `SIGKILL` after `gracefulStopMs`.
+## Deploy and retirement sequence
 
-Because old workers are retired on the release's **connection** drain (not on
-their own job queue draining), a job still running when the release is retired
-gets only the `gracefulStopMs` window to finish, unless `gracefulStopMs` is
-`"indefinite"`. Keep jobs **idempotent and safe to retry** so a job interrupted
-at a finite `SIGKILL` fallback can run again.
+1. Before activation, Rollbridge starts the candidate release's jobs-main and
+   complete worker pool, then starts and health-checks the candidate web process.
+2. Activation switches new web traffic and makes the candidate jobs generation
+   active.
+3. The previous jobs generation retires as one unit. Its jobs-main stops schedule
+   ownership, new queue dispatch, and new ordinary worker handoffs. Its workers
+   stop accepting handoffs.
+4. The old jobs-main stays running with its old workers. It continues owning
+   their connections and heartbeats, completion/failure acknowledgements, report
+   retries, job timeouts, child reaping, and durable state transitions for every
+   handoff it made before retirement.
+5. Work returned or retried to the shared queue becomes eligible for the new
+   active generation. The retired main never dispatches it again.
+6. Only after every old handoff settles and every old worker drains and exits may
+   the old jobs-main exit. Rollbridge then reaps the generation and reports that
+   its release reference ended so Rampway can release the retention pin.
 
-## Command-based lifecycle hooks
+Old and new generations may overlap for hours, each running its own release code
+and jobs-main endpoint. Multiple retired generations may drain concurrently.
 
-For workers that quiesce or drain via a command rather than a single signal, set
-a `lifecycle` block. When Rollbridge gracefully stops the worker it runs
-`quietCommand` (stop accepting new work), then drains (`drainCommand`, or waits up
-to `drainTimeoutMs` for the worker to exit), then `stopCommand` or `stopSignal`,
-then `SIGKILL` after `gracefulStopMs`. Each hook gets `ROLLBRIDGE_PID` and is
-bounded by a timeout, so a slow hook can't wedge a deploy.
+## Deploy completion is independent
 
-```js
-{
-  id: "worker",
-  policy: "companion",
-  command: "npx velocious background-jobs-worker",
-  replicas: 4,
-  lifecycle: {quietCommand: "kill -TSTP -$ROLLBRIDGE_PID", drainTimeoutMs: 60000}
-}
-```
+The deploy succeeds when the candidate release is activated and healthy. The
+command and deploy lock do not wait for old jobs generations, workers, jobs,
+HTTP/WebSocket connections, or other retained services to finish. Rollbridge
+durably supervises retained generations after the command returns and across
+later deploys and supervisor/host recovery. Every referenced release directory
+must be reported to Rampway and stays pinned against cleanup until the last
+retained process exits.
 
-See [`docs/config.md`](config.md#processeslifecycle) for the hook reference.
+HTTP/WebSocket drain and jobs drain are independent. Set `nonBlockingDrain: true`
+so workers stop accepting new handoffs when retirement starts rather than after
+the connection drain. Closing or timing out HTTP connections must never kill a
+still-draining jobs-main or worker pool.
 
-## Non-blocking drain
+## Timeouts and failures
 
-By default a retired release's workers are stopped only after the proxied
-process's connections have drained. Set `nonBlockingDrain: true` on a worker
-companion whose work is independent of the web process (a job worker on a shared
-queue) to start its graceful stop **immediately** when the release is retired —
-in parallel with the connection drain. The new release's workers handle new work
-while the old workers finish their in-flight jobs:
+`stopSignal`, `lifecycle`, and `gracefulStopMs` remain useful process-stop tools,
+and the jobs framework should enforce per-job timeouts for genuinely hung work.
+They are not the primary deployment solution. A legitimate multi-hour job makes
+a multi-hour generation drain valid; do not turn a normal worker-shutdown timeout
+into the deploy deadline.
 
-```js
-{id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, gracefulStopMs: "indefinite"}
-```
+If a worker connection is actually lost, its old jobs-main applies the framework's
+lease fencing and durable retry/return rules. Returned work may then run in the
+active generation. Normal retirement does not simulate a disconnect and does not
+make a new jobs-main adopt the old worker's handoffs.
 
-See [`docs/config.md`](config.md) for `stopSignal`, `replicas`, and
-`gracefulStopMs`, and [`docs/velocious.md`](velocious.md) for a full Velocious
-deployment (Beacon, jobs-main, workers, web) example.
+See [`docs/velocious.md`](velocious.md) for the complete topology and
+[`docs/config.md`](config.md#processesdeploystrategy) for handoff-service fields.

@@ -109,12 +109,15 @@ stays active.
 in `state: "draining"` with non-zero `connections` (often `websocket`).
 
 **Diagnose.** Long-lived connections (WebSockets, SSE, streaming responses) keep
-the retired release alive until they close or `proxy.drainTimeoutMs` elapses.
-`status` shows the release's `connections.http`/`connections.websocket` and
-`drainStartedAt`.
+the retired proxied web process alive until they close or
+`proxy.drainTimeoutMs` elapses. `status` shows the release's
+`connections.http`/`connections.websocket` and `drainStartedAt`. A retained jobs
+generation has an independent lifecycle and may remain after the web drain ends.
 
-**Fix.** Draining ends automatically when those connections close, or after
-`proxy.drainTimeoutMs` (then the release is stopped regardless). Lower
-`proxy.drainTimeoutMs` to force-stop sooner, or make clients reconnect (for
-example, have the front end close idle WebSockets on deploy). Once stopped, the
-release is pruned per `releaseRetention`.
+**Fix.** The connection drain ends automatically when those connections close,
+or after `proxy.drainTimeoutMs`, when only the retired proxied web process may be
+stopped. Lower the timeout only to shorten HTTP/WebSocket retention, or make
+clients reconnect (for example, have the front end close idle WebSockets on
+deploy). Timeout expiry must not stop a still-draining jobs generation or make
+its release cleanup-eligible; it remains retained until its jobs-main and worker
+pool finish and Rollbridge reports that its release reference ended.
