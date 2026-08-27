@@ -66,10 +66,16 @@ and waits for control-socket deployments.
 
 `--takeover-owner` requires the complete bootstrap tuple. It bootstraps and
 health-checks the replacement before sending the current daemon the private
-retirement command. Retirement stops stable listeners and new work promptly,
-but does not wait for owned workers' normal drain before the replacement binds
-the proxy and control socket. A bootstrap failure occurs before retirement, so
-the previously accepted owner remains available.
+retirement command. The current `performOwnerRetirement` path quiesces every
+service, singleton, starting release, and retained release, releases the stable
+listeners, and starts asynchronous `stop()` calls for all of them. It neither
+preserves nor transfers retained-generation supervision to the replacement.
+The replacement can bind before those stops finish. A bootstrap failure occurs
+before retirement, so the previously accepted owner remains available.
+
+A compliant future owner handoff must instead preserve or transfer durable
+supervision of retained generations without handing old workers to a new
+jobs-main. Current `--takeover-owner` does not provide that behavior.
 
 ## `ensure-daemon`
 
@@ -120,11 +126,25 @@ rollbridge deploy --release-path <path>
                   [--daemon-start-timeout-ms <ms>]
 ```
 
-Starts the prepared release, health-checks the proxied process, switches new
-traffic to it, then drains and stops the previous release. Prints
+Starts the complete prepared release generation, health-checks the proxied
+process, and switches new traffic to it. The current daemon then starts
+retirement of the previous release asynchronously, so the command does not wait
+for old workers, jobs, or HTTP/WebSocket connections to finish. Prints
 `{"status": "success", "activeReleaseId": "...", "previousReleaseId": "..."}`.
 If the new release fails to start or health-check, the previous release stays
 active and the command errors.
+
+After candidate activation, `Daemon.deploy()` synchronously waits for singleton
+replacement before starting `drainAndPrune` and returning. A replacement failure
+can therefore return a non-zero result while the candidate remains active, and a
+slow replacement delays both the response and retirement of the old release.
+
+This is a process-lifetime non-blocking drain, not durable supervision across a
+daemon or host restart. It continues across later deploys only while the same
+daemon remains alive. After a restart, surviving PIDs from persisted state are
+advisory orphans that Rollbridge cannot re-adopt; explicit `recover --force`
+stops them. Restart-surviving retained-generation ownership and recovery remain
+required future behavior.
 
 Before each deploy, the daemon reloads the config path it was started with.
 Compatible process and lifecycle changes apply to the new release and govern

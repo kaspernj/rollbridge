@@ -2,7 +2,22 @@
 
 Rollbridge is a Node.js process supervisor and local traffic switcher for zero-downtime deploys.
 
-Nginx points at one stable Rollbridge proxy port. Deploy tooling asks Rollbridge to start a new release, health-check it, switch new traffic to it, and drain old HTTP/WebSocket connections before stopping the previous release.
+Nginx points at one stable Rollbridge proxy port. Deploy tooling asks Rollbridge to start a new release, health-check it, and switch new traffic to it. Retirement then continues asynchronously: HTTP/WebSocket connections and retained process generations drain independently after the deploy command returns.
+
+> **Required jobs-generation contract:** a release-scoped background-jobs
+> runtime is its own `background-jobs-main` plus worker pool. Rollbridge starts a
+> complete candidate generation before activation. After activation the retired
+> main stops schedules, new dispatch, and new worker handoffs, but remains with
+> its old workers to supervise every handoff it already made until all jobs and
+> workers settle. Old workers never move to the new main. Generations may overlap
+> for hours on separate ports, and neither deploy completion nor HTTP drain
+> completion waits for or kills them. See [Background-job worker
+> deployment](docs/workers.md) and the [Velocious deployment
+> guide](docs/velocious.md).
+
+This is the required architecture, not evidence that every released runtime or
+consumer config already implements durable recovery and release-reference
+reporting; verify source and config before claiming compliance.
 
 ## Install
 
@@ -47,23 +62,28 @@ export default {
   processes: [
     {
       id: "beacon",
-      policy: "companion",
+      policy: "service",
       cwd: "{{releasePath}}",
       command: "env VELOCIOUS_BEACON_PORT={{port}} npx velocious beacon",
-      port: {from: 17330, to: 17399}
+      port: 7330
     },
     {
       id: "background-jobs-worker",
       policy: "companion",
       cwd: "{{releasePath}}",
+      env: {VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"},
       command: "npx velocious background-jobs-worker",
+      nonBlockingDrain: true,
+      gracefulStopMs: "indefinite",
       outputLines: 200
     },
     {
       id: "background-jobs-main",
       policy: "service",
+      deployStrategy: "handoff",
       cwd: "{{releasePath}}",
-      command: "npx velocious background-jobs-main"
+      command: "env VELOCIOUS_BACKGROUND_JOBS_PORT={{port}} npx velocious background-jobs-main",
+      port: {from: 7331, to: 7399}
     },
     {
       id: "web",
@@ -118,10 +138,11 @@ See [`docs/config.md`](docs/config.md#processesmemory).
 memory: {limitBytes: 536870912, warnBytes: 402653184, checkIntervalMs: 5000}
 ```
 
-Set a process's `stopSignal` (default `"SIGTERM"`) to the signal it quiets on, so
-a worker finishes its in-flight work before exiting. Rollbridge sends `stopSignal`
-to gracefully stop the process and `SIGKILL`s it only if it hasn't exited within
-`gracefulStopMs`. For example, a job worker that drains on `SIGINT`:
+Set a process's `stopSignal` (default `"SIGTERM"`) to the signal it quiets on.
+This is a process-level stop mechanism, not the primary deploy-completion
+mechanism for a release-scoped jobs generation. A retired generation may remain
+for hours, and its old jobs-main must stay available until its workers finish.
+For example, a generic worker that drains on `SIGINT`:
 
 ```js
 {id: "worker", policy: "companion", command: "…", stopSignal: "SIGINT", gracefulStopMs: 60000}
@@ -138,18 +159,19 @@ queue. See [`docs/config.md`](docs/config.md#processesreplicas).
 {id: "worker", policy: "companion", command: "npx velocious background-jobs-worker", replicas: 4}
 ```
 
-For workers that quiesce or drain via a command, set a `lifecycle` block —
+For generic workers that quiesce or drain via a command, set a `lifecycle` block —
 Rollbridge runs `quietCommand`, then drains (`drainCommand`/`drainTimeoutMs`),
 then `stopCommand`/`stopSignal`, then `SIGKILL` after `gracefulStopMs` when
 gracefully stopping the process. Each hook is bounded so it can't wedge a stop.
 
-Set `nonBlockingDrain: true` on a worker companion to start its graceful stop the
-moment its release is retired — in parallel with the proxied connection drain,
-not after it — so new workers handle new work while the old workers finish theirs.
+Set `nonBlockingDrain: true` on a jobs worker companion so it stops accepting new
+handoffs as soon as its release retires, independently of the proxied connection
+drain. Its release-scoped handoff jobs-main remains running to supervise existing
+handoffs and exits only after the worker pool has drained.
 
-See [`docs/workers.md`](docs/workers.md) for the full safe background-job worker
-deployment pattern — companion policy, `replicas`, and finishing in-flight jobs
-on deploy with `stopSignal`/`lifecycle` + `gracefulStopMs`.
+See [`docs/workers.md`](docs/workers.md) for the full release-generation
+deployment pattern: a handoff `background-jobs-main`, its companion worker pool,
+independent quiescence, and durable supervision while retained generations drain.
 
 Set `releaseRetention` to bound how many stopped (drained) releases the daemon
 keeps in memory and reports in `status`. `keep` (default `10`) retains the most
@@ -270,8 +292,9 @@ A release-scoped helper (for example a background worker bound to one release).
 It starts **before** the proxied process in the same release, so release-local
 dependencies are ready before the health check, and it is auto-restarted while
 its release is active. Each release gets its own companions; a release's
-companions stop when that release is drained and retired after a newer release
-takes over.
+companions normally stop when that release is drained and retired after a newer
+release takes over. A jobs worker configured with `nonBlockingDrain` instead
+quiesces at retirement and drains independently of HTTP/WebSocket connections.
 
 ```js
 {
@@ -279,7 +302,8 @@ takes over.
   policy: "companion",
   cwd: "{{releasePath}}",
   command: "npx velocious background-jobs-worker",
-  gracefulStopMs: 60000
+  nonBlockingDrain: true,
+  gracefulStopMs: "indefinite"
 }
 ```
 
@@ -301,36 +325,36 @@ new copies simultaneously during a deploy would be unsafe.
 
 ### `service`
 
-A daemon-wide broker that should outlive individual releases — for example
-Velocious Beacon or `background-jobs-main`. Rollbridge starts it once (before
-release processes that depend on it), keeps it running across deploys, and gives
-it a stable port that does not change between releases. After each successful
-deploy its restart template is refreshed to the latest release, so if it crashes
-it restarts from the newest good release. It keeps restarting until the daemon
-shuts down.
+A service can be daemon-wide and persistent, or release-scoped with
+`deployStrategy: "handoff"`. Velocious Beacon is normally persistent on a stable
+port. `background-jobs-main` is not: it must be a handoff service with one port
+per release so old workers keep their old coordinator while new workers use the
+candidate coordinator.
 
 ```js
 {
   id: "background-jobs-main",
   policy: "service",
+  deployStrategy: "handoff",
   cwd: "{{releasePath}}",
   command: "npx velocious background-jobs-main",
-  port: 7331
+  port: {from: 7331, to: 7399}
 }
 ```
 
 ### Deploy ordering
 
-On `rollbridge deploy`, Rollbridge:
+On `rollbridge deploy`, the required ordering is:
 
-1. starts any `service` that is not already running;
+1. starts any missing persistent service and the candidate's handoff services;
 2. starts the new release's `companion`s, then its `proxied` process, and
    health-checks the proxied process;
 3. switches new traffic to the new release;
-4. refreshes each `service`'s restart template to the new release;
+4. marks the previous jobs-main and worker pool retired as one generation;
 5. replaces `singleton`s (stops the old one, then starts the new one);
-6. drains the previous release's connections, then stops its `proxied` and
-   `companion` processes.
+6. returns success without waiting for the previous generation or its independent
+   HTTP/WebSocket drain; Rollbridge supervises all retained drains in the
+   background and reaps each generation only after its handoffs and workers end.
 
 If the new release fails to start or health-check, the previous release stays
 active and any service started during this deploy is rolled back.
@@ -413,13 +437,13 @@ rollbridge daemon --config /srv/ticket-server/rollbridge.js \
 ```
 
 External supervisors that need to replace a foreground owner without waiting
-for its workers to drain add `--takeover-owner`. The candidate starts and
-health-checks the exact release first. Only then does it retire the accepted
-owner's proxy/control listeners; the retired daemon keeps its already-accepted
-workers until their ordinary drain completes while the attested replacement
-binds the stable listeners. Candidate bootstrap failure leaves the accepted
-owner untouched. This is opt-in; ordinary daemon bootstrap and `shutdown` keep
-their existing behavior.
+for retained generations to drain add `--takeover-owner`. The candidate starts
+and health-checks the exact release first. Only then does it retire the accepted
+owner's proxy/control listeners. Durable supervision of old jobs-main/worker
+generations must be preserved or transferred while the attested replacement
+binds the stable listeners; replacement does not mean full synchronous shutdown.
+Candidate bootstrap failure leaves the accepted owner untouched. This is opt-in;
+ordinary daemon bootstrap and `shutdown` keep their existing behavior.
 
 The four bootstrap inputs are all-or-nothing and use absolute config/release
 paths. Rollbridge binds its proxy, activates the release through the normal
@@ -600,7 +624,7 @@ daemon holds its log file open, so logrotate needs `copytruncate`.
 
 ## Deployment Notes
 
-Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web releases overlap. For stable local brokers such as Velocious Beacon or `background-jobs-main`, use `service` when the process should survive deploys and restart from the latest successful release if it crashes.
+Run migrations before `rollbridge deploy`, and keep migrations backwards-compatible while old and new web and jobs generations overlap. Velocious Beacon may be a persistent fixed-port `service`; configure `background-jobs-main` as a release-scoped handoff service on a port range. A normal deploy may leave several retired generations draining concurrently.
 
 See [`docs/deploy-recipes.md`](docs/deploy-recipes.md) for ready-to-use shell, CI, and Capistrano recipes that drive Rollbridge through its CLI, and [`docs/troubleshooting.md`](docs/troubleshooting.md) for diagnosing health-check failures, port conflicts, stale sockets, crash loops, and stuck draining releases.
 

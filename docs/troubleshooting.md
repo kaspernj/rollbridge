@@ -109,12 +109,21 @@ stays active.
 in `state: "draining"` with non-zero `connections` (often `websocket`).
 
 **Diagnose.** Long-lived connections (WebSockets, SSE, streaming responses) keep
-the retired release alive until they close or `proxy.drainTimeoutMs` elapses.
-`status` shows the release's `connections.http`/`connections.websocket` and
-`drainStartedAt`.
+the retired proxied web process alive until they close or
+`proxy.drainTimeoutMs` elapses. `status` shows the release's
+`connections.http`/`connections.websocket` and `drainStartedAt`. A retained jobs
+generation has an independent lifecycle and may remain after the web drain ends.
 
-**Fix.** Draining ends automatically when those connections close, or after
-`proxy.drainTimeoutMs` (then the release is stopped regardless). Lower
-`proxy.drainTimeoutMs` to force-stop sooner, or make clients reconnect (for
-example, have the front end close idle WebSockets on deploy). Once stopped, the
-release is pruned per `releaseRetention`.
+**Fix.** The connection drain ends automatically when those connections close,
+or after `proxy.drainTimeoutMs`. Rollbridge then stops the retired proxied web
+process and other connection-dependent processes, including ordinary companions
+with `nonBlockingDrain: false`. Lower the timeout only to shorten
+HTTP/WebSocket retention, or make clients reconnect (for example, have the front
+end close idle WebSockets on deploy). In the documented compliant jobs topology,
+jobs companions use `nonBlockingDrain: true`, so timeout expiry affects only the
+web side and must not stop a still-draining jobs generation.
+
+Reporting release references to Rampway and pinning release directories against
+on-disk cleanup are required future behavior, not implemented today. Current
+Rollbridge `status` and `releaseRetention` govern only its in-memory release
+records and do not fence Rampway cleanup.
