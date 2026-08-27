@@ -134,6 +134,11 @@ for old workers, jobs, or HTTP/WebSocket connections to finish. Prints
 If the new release fails to start or health-check, the previous release stays
 active and the command errors.
 
+After candidate activation, `Daemon.deploy()` synchronously waits for singleton
+replacement before starting `drainAndPrune` and returning. A replacement failure
+can therefore return a non-zero result while the candidate remains active, and a
+slow replacement delays both the response and retirement of the old release.
+
 This is a process-lifetime non-blocking drain, not durable supervision across a
 daemon or host restart. It continues across later deploys only while the same
 daemon remains alive. After a restart, surviving PIDs from persisted state are
