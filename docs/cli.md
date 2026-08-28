@@ -50,9 +50,9 @@ or number). Supplying only some bootstrap options, or an invalid value, exits
 non-zero before listeners start. Activation failure emits a structured
 `bootstrap activation failed` event, cleans up processes owned by that attempt,
 and exits non-zero without exposing the control socket or inventing an active
-release. `statePath` entries from a previous daemon remain advisory orphans:
-bootstrap never runs recovery and never signals those processes, and retains
-their live PID records in `statePath` for explicit recovery.
+release. With `ownerRecovery`, daemon startup first claims the matching guardian
+and reconstructs its active/draining generations. Without it, `statePath`
+entries remain advisory orphans for explicit recovery.
 
 `--boot-attestation` is an optional, non-secret opaque ownership token for an
 external supervisor. Its canonical format is exactly `sha256:` followed by 64
@@ -73,9 +73,10 @@ preserves nor transfers retained-generation supervision to the replacement.
 The replacement can bind before those stops finish. A bootstrap failure occurs
 before retirement, so the previously accepted owner remains available.
 
-A compliant future owner handoff must instead preserve or transfer durable
-supervision of retained generations without handing old workers to a new
-jobs-main. Current `--takeover-owner` does not provide that behavior.
+`ownerRecovery` covers unexpected process exit under the exact same authority.
+A compliant incompatible config/package/socket handoff must still preserve or
+transfer supervision without handing old workers to a new jobs-main. Current
+`--takeover-owner` does not provide that split-3 behavior.
 
 ## `ensure-daemon`
 
@@ -143,17 +144,15 @@ mistake the retirement failure for an unqualified transition.
 `status.releaseReferences` lists `{releaseId, releasePath}` for every active or
 draining release and excludes fully stopped history.
 
-After candidate activation, `Daemon.deploy()` synchronously waits for singleton
-replacement before starting `drainAndPrune` and returning. A replacement failure
-can therefore return a non-zero result while the candidate remains active, and a
-slow replacement delays both the response and retirement of the old release.
+After candidate activation, `Daemon.deploy()` begins old-generation retirement
+and asynchronous drain before awaiting singleton replacement. A singleton
+replacement failure can therefore return non-zero while the candidate remains
+active, but it cannot leave the old jobs generation dispatching.
 
-This is a same-owner non-blocking drain, not durable supervision across a
-daemon or host restart. It continues across later deploys only while the same
-daemon remains alive. After a restart, surviving PIDs from persisted state are
-advisory orphans that Rollbridge cannot re-adopt; explicit `recover --force`
-stops them. Restart-surviving retained-generation ownership and recovery remain
-required future behavior.
+With `ownerRecovery`, active and draining generations remain guardian-supervised
+across unexpected same-authority daemon exit and reconstruct on replacement.
+Without it, surviving PIDs remain advisory orphans for `recover --force`.
+Incompatible runtime/config/socket replacement is still outside this contract.
 
 Before each deploy, the daemon reloads the config path it was started with.
 Compatible process and lifecycle changes apply to the new release and govern

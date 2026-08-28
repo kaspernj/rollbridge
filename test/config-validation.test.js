@@ -571,6 +571,28 @@ test("validateConfig leaves statePath unset by default, accepts a string, and re
   assert.ok(validateStatePath(123).issues.some((issue) => issue.message === "statePath must be a string"))
 })
 
+test("ownerRecovery requires durable state and a non-negative integer reconnection grace", () => {
+  const raw = {
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    ownerRecovery: {reconnectGraceMs: 45000},
+    processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}],
+    proxy: {host: "127.0.0.1", port: 8182}
+  }
+  const missingState = validateConfig(raw)
+
+  assert.ok(missingState.issues.some((issue) => issue.message === "ownerRecovery requires statePath"))
+
+  const valid = validateConfig({...raw, statePath: "/var/lib/rollbridge/demo.state.json"})
+
+  assert.deepEqual(valid.issues, [])
+  assert.deepEqual(valid.config.ownerRecovery, {reconnectGraceMs: 45000})
+
+  const invalidGrace = validateConfig({...raw, ownerRecovery: {reconnectGraceMs: -1}, statePath: "/var/lib/rollbridge/demo.state.json"})
+
+  assert.ok(invalidGrace.issues.some((issue) => issue.message === "ownerRecovery.reconnectGraceMs must be a non-negative integer"))
+})
+
 test("normalizeConfig throws an aggregated error listing every issue", () => {
   assert.throws(
     () => normalizeConfig({

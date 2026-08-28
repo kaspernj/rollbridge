@@ -46,6 +46,7 @@ restart.
 | `application` | string | basename of the config file's directory | Names the app; used in the default control-socket path and the `ROLLBRIDGE_APPLICATION` env var. |
 | `control` | object | — | Control-socket settings (see below). |
 | `legacyTakeover` | object | unset | Optional matchers for `rollbridge predeploy-cleanup` to stop pre-Rollbridge supervisors during first handover (see below). |
+| `ownerRecovery` | object | unset | Durable guardian recovery for exact same-authority daemon replacement; requires `statePath` (see below). |
 | `proxy` | object | **required** | Proxy listener and shared defaults (see below). |
 | `processes` | array | **required** | Managed processes (see below). Exactly one must be `proxied`. |
 | `releaseRetention` | object | — | How many stopped releases the daemon retains (see below). |
@@ -90,7 +91,7 @@ release records; the deploy tool still owns on-disk release directories.
 
 ## `statePath`
 
-When set, the daemon persists a secret-safe state snapshot — the active and
+When set, the daemon persists a sanitized operational state snapshot — the active and
 draining releases, each managed process's recovery metadata (including pid),
 restart counters, and recent structured events — to this file (atomically, on
 changes and every few seconds). Process commands, working directories,
@@ -98,13 +99,13 @@ environment mappings, child command lines, and retained stdout/stderr are never
 persisted. They remain available from the live `status`, `logs`, and `events`
 APIs while the daemon is running. On a clean `shutdown` the file is removed.
 
-On the **next startup**, the daemon reads any leftover file and reports managed
-processes whose pids are still alive — likely orphans from a daemon that crashed
-without shutting down cleanly — in its log and event history, and in the
+Without `ownerRecovery`, the **next startup** reads any leftover file and reports
+managed processes whose pids are still alive — likely orphans from a daemon that
+crashed without shutting down cleanly — in its log/event history and the
 `orphans` array of [`rollbridge status`](cli.md#status). This is **advisory**:
-Rollbridge cannot re-adopt detached children, so it does not stop them
-automatically; the operator verifies and stops the leftovers. A recycled pid can
-be a false positive, so treat a report as a prompt to investigate. Use
+that mode cannot re-adopt detached children, so it does not stop them
+automatically. A recycled pid can be a false positive, so treat a report as a
+prompt to investigate. Use
 [`rollbridge recover`](cli.md#recover) to list and (with `--force`) stop those
 orphans after a crash.
 
@@ -113,6 +114,31 @@ statePath: "/var/lib/rollbridge/ticket-server.state.json"
 ```
 
 Leave `statePath` unset to disable persistence (the default).
+
+Set `ownerRecovery` to opt into same-authority process-exit recovery:
+
+```js
+statePath: "/var/lib/rollbridge/ticket-server.state.json",
+ownerRecovery: {reconnectGraceMs: 30000}
+```
+
+The private guardian socket is derived from `statePath`; the atomic state file is
+written mode `0600` and contains its authentication capability. The guardian
+owns managed child processes, restart policy, lifecycle hooks, and exit events.
+After an unexpected daemon exit, an exact config/runtime replacement claims the
+guardian during `reconnectGraceMs`, restores active and draining releases with
+their allocated ports, and resumes proxy/control ownership. Concurrent matching
+starts are fenced: one claims ownership and losers attest that winner. A config
+identity mismatch or partial state fails closed without rewriting the snapshot.
+Owner disconnection alone never reclaims accepted work or transfers workers:
+guardian-owned processes and their generation-local connections continue during
+the grace, so the replacement reconnects to supervision rather than duplicating
+execution.
+
+This contract is deliberately same-authority. Changing application identity,
+process topology, proxy/control/state paths, or runtime/package identity is not
+an atomic upgrade mechanism; that remains a separate owner-transfer requirement.
+Without `ownerRecovery`, `statePath` retains the advisory orphan behavior above.
 
 ## `legacyTakeover`
 
@@ -227,7 +253,8 @@ dispatch, and new handoffs without exiting. Immediately after activation,
 Rollbridge quiesces it with `nonBlockingDrain` companions, then returns without
 waiting for their drain. A failed hook leaves the generation alive, records
 `retirementError`, and emits `release retirement quiescence failed`. Durable
-recovery and atomic owner/config/socket/package replacement remain unimplemented.
+same-authority recovery is available with `ownerRecovery`; atomic incompatible
+config/socket/package replacement remains unimplemented.
 
 ### `processes[].lifecycle`
 

@@ -46,7 +46,23 @@ export async function runCli(argv) {
 
       if (options.takeoverOwner && (!bootstrap || !bootstrap.attestation)) throw new Error("Daemon --takeover-owner requires the complete bootstrap release tuple and --boot-attestation.")
 
-      if (!options.takeoverOwner) await daemon.start({exposeControl: !bootstrap})
+      if (!options.takeoverOwner) {
+        try {
+          await daemon.start({exposeControl: !bootstrap})
+        } catch (error) {
+          if (!config.ownerRecovery) throw error
+
+          const winner = await sendControlCommand({command: {command: "status"}, path: config.control.path}).catch(() => undefined)
+          const matchingWinner = winner?.application === config.application &&
+            winner.ownerRecovery && typeof winner.ownerRecovery === "object" && !Array.isArray(winner.ownerRecovery) &&
+            winner.ownerRecovery.configDigest === daemon.ownerRecoveryConfigDigest() &&
+            ((!runtime && !winner.daemonRuntime) || (runtime && winner.daemonRuntime && typeof winner.daemonRuntime === "object" && !Array.isArray(winner.daemonRuntime) && winner.daemonRuntime.digest === runtime.digest))
+
+          if (!matchingWinner) throw error
+          await daemon.abandonOwnerRecoveryAttempt()
+          return
+        }
+      }
 
       const shutdown = async () => {
         await daemon.shutdown()
@@ -69,6 +85,11 @@ export async function runCli(argv) {
           const failure = error instanceof Error ? error : String(error)
 
           daemon.logger("bootstrap activation failed", {releaseId: bootstrap.releaseId, status: "error", ...errorLogData(failure)})
+
+          if (config.ownerRecovery && daemon.activeRelease) {
+            await daemon.exposeControl()
+            return
+          }
 
           try {
             await daemon.shutdown()

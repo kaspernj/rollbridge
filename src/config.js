@@ -23,7 +23,8 @@ import {pathToFileURL} from "node:url"
  * @typedef {{includes: string[], name: string}} LegacyTakeoverProcessConfig
  * @typedef {{forceStopTimeoutMs: number, processes: LegacyTakeoverProcessConfig[], screens: string[]}} LegacyTakeoverConfig
  * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
- * @typedef {{application: string, control: ControlConfig, legacyTakeover?: LegacyTakeoverConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig, statePath?: string}} RollbridgeConfig
+ * @typedef {{reconnectGraceMs: number}} OwnerRecoveryConfig
+ * @typedef {{application: string, control: ControlConfig, legacyTakeover?: LegacyTakeoverConfig, ownerRecovery?: OwnerRecoveryConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig, statePath?: string}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
  */
 
@@ -150,10 +151,15 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
   const legacyTakeover = normalizeLegacyTakeover(source.legacyTakeover, proxy, issues)
   const releaseRetention = normalizeReleaseRetention(objectAt(source.releaseRetention, "releaseRetention", issues, {}), issues)
   const statePath = source.statePath === undefined || source.statePath === null ? undefined : normalizeString(source.statePath, "statePath", issues)
+  const ownerRecoverySource = source.ownerRecovery === undefined || source.ownerRecovery === null ? undefined : objectAt(source.ownerRecovery, "ownerRecovery", issues)
+  const reconnectGraceMs = ownerRecoverySource ? normalizeNumber(ownerRecoverySource.reconnectGraceMs, "ownerRecovery.reconnectGraceMs", issues, {default: 30000}) : 30000
+  const ownerRecovery = ownerRecoverySource ? {reconnectGraceMs: nonNegativeOrDefault(reconnectGraceMs, "ownerRecovery.reconnectGraceMs", issues, 30000, true)} : undefined
+
+  if (ownerRecovery && !statePath) issues.push({fix: "Configure statePath when ownerRecovery is enabled.", message: "ownerRecovery requires statePath"})
 
   validateProcessSet(processes, issues)
 
-  return {config: {application, control, legacyTakeover, processes, proxy, releaseRetention, statePath}, issues}
+  return {config: {application, control, legacyTakeover, ownerRecovery, processes, proxy, releaseRetention, statePath}, issues}
 }
 
 /**

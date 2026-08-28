@@ -71,9 +71,9 @@ HTTP/WebSocket connections, or other retained services to finish. The required
 supervisor contract durably retains generations after the command returns and
 across later deploys and supervisor/host recovery. Every referenced release
 directory must be reported to Rampway and stays pinned against cleanup until the
-last retained process exits. Current Rollbridge exposes same-owner references as
-`status.releaseReferences` and supports concurrent retired generations, but
-supervision lasts only for the lifetime of the current daemon; see the notes in
+last retained process exits. Rollbridge exposes references as
+`status.releaseReferences`, supports concurrent retired generations, and with
+`ownerRecovery` preserves them across same-authority daemon replacement; see
 [`docs/config.md`](config.md#processesdeploystrategy) and
 [`docs/cli.md`](cli.md#deploy).
 

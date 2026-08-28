@@ -40,10 +40,12 @@ implemented. Do not claim production compliance when source/config still uses a
 fixed jobs-main, worker adoption by a new main, destructive orphan recovery, or
 synchronous cleanup.
 
-Current same-owner behavior quiesces configured handoff services after candidate
-activation, retains concurrent generations, and reports live release references.
-Durable guardian recovery and atomic owner/config/socket/package replacement are
-still unimplemented follow-up requirements.
+Current same-authority behavior quiesces configured handoff services after
+candidate activation, retains concurrent generations, reports live release
+references, and can opt into `ownerRecovery` so a durable process guardian
+preserves and reconstructs active/draining generations after daemon process
+exit. Atomic incompatible config/socket/package owner replacement remains an
+unimplemented follow-up requirement.
 
 ## Validation and publication
 
