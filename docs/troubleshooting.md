@@ -124,7 +124,8 @@ jobs companions use `nonBlockingDrain: true`, so timeout expiry affects only the
 web side and must not stop a still-draining jobs generation.
 
 `status.releaseReferences` reports active and draining releases until full stop;
-Rampway still owns enforcement against on-disk cleanup. References do not yet
-transfer across daemon-owner recovery or takeover. If `retirementError` is set,
+Rampway still owns enforcement against on-disk cleanup. With `ownerRecovery`,
+references reconstruct across same-authority daemon process replacement; they do
+not yet transfer across incompatible takeover. If `retirementError` is set,
 inspect the quiet-hook events. Rollbridge deliberately leaves that generation
 alive rather than signaling arbitrary PIDs or continuing its stop sequence.

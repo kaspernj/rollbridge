@@ -3,10 +3,12 @@
 import fs from "node:fs/promises"
 import http from "node:http"
 import net from "node:net"
+import crypto from "node:crypto"
 import {isDeepStrictEqual} from "node:util"
 import httpProxy from "http-proxy"
 import {loadConfig} from "./config.js"
 import EventLog from "./event-log.js"
+import GuardianClient from "./guardian-client.js"
 import ReleaseGroup from "./release-group.js"
 import {clearState, isProcessAlive, liveProcesses, readState, writeState} from "./state-store.js"
 import {resolveGroupId, resolveUserId} from "./system-ids.js"
@@ -19,7 +21,9 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
- * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, ownerRecovery: {configDigest: string} | undefined, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
+ * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata}} OwnerRecoverySnapshot
  */
 
 export default class RollbridgeDaemon {
@@ -69,6 +73,8 @@ export default class RollbridgeDaemon {
     this.retirementPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.controlClosePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.startingReleases = /** @type {Set<ReleaseGroup>} */ (new Set())
+    this.guardian = /** @type {GuardianClient | undefined} */ (undefined)
+    this.guardianIdentity = /** @type {{pid?: number, socketPath: string, token: string} | undefined} */ (undefined)
     // Still-alive managed processes left by a previous daemon (from statePath), captured at
     // startup and surfaced in status(). The daemon cannot re-manage them, only report them.
     this.orphans = /** @type {{id: string, pid: number, releaseId: string | null}[]} */ ([])
@@ -82,9 +88,127 @@ export default class RollbridgeDaemon {
    * @returns {Promise<void>} Resolves when the requested listeners are ready.
    */
   async start({exposeControl = true, reportOrphans = true} = {}) {
-    if (reportOrphans) await this.reportOrphans()
+    if (this.config.ownerRecovery) await this.initializeOwnerRecovery()
+    else if (reportOrphans) await this.reportOrphans()
     await this.startProxy()
     if (exposeControl) await this.exposeControl()
+  }
+
+  /** Connects to the durable process guardian and reconstructs a matching persisted owner snapshot. */
+  async initializeOwnerRecovery() {
+    if (!this.statePath) throw new Error("ownerRecovery requires statePath")
+    const state = await readState(this.statePath)
+    const snapshot = state && typeof state === "object" && !Array.isArray(state) ? /** @type {OwnerRecoverySnapshot} */ (state) : undefined
+    const recovery = snapshot?.recovery
+    const configDigest = this.ownerRecoveryConfigDigest()
+
+    if (snapshot && !recovery) throw new Error(`Owner recovery state ${this.statePath} is missing durable guardian identity; refusing to overwrite it.`)
+    if (recovery && recovery.configDigest !== configDigest) throw new Error("Owner recovery config identity does not match the persisted owner; refusing cross-authority adoption.")
+    if (snapshot && ((this.runtime?.digest ?? null) !== (snapshot.daemonRuntime?.digest ?? null))) {
+      throw new Error("Owner recovery runtime identity does not match the persisted owner; use the exact same Rollbridge runtime.")
+    }
+
+    const guardianIdentity = recovery?.guardian || {
+      socketPath: `${this.statePath}.guardian.sock`,
+      token: crypto.randomBytes(32).toString("hex")
+    }
+    this.guardianIdentity = guardianIdentity
+    this.guardian = new GuardianClient(guardianIdentity)
+    if (recovery) await this.guardian.connect()
+    else {
+      await this.guardian.launch()
+      guardianIdentity.pid = this.guardian.pid
+    }
+    await this.guardian.claimOwner(this.config.ownerRecovery?.reconnectGraceMs ?? 30000)
+
+    if (snapshot) await this.restoreOwnerState(snapshot)
+    else {
+      this.persistenceEnabled = true
+      await this.persistState({throwOnError: true})
+    }
+    this.stateCleanupEnabled = true
+  }
+
+  /** @returns {string} Stable identity for same-authority recovery. */
+  ownerRecoveryConfigDigest() {
+    return crypto.createHash("sha256").update(JSON.stringify(this.config)).digest("hex")
+  }
+
+  /** @param {OwnerRecoverySnapshot} snapshot - Validated persisted owner state. */
+  async restoreOwnerState(snapshot) {
+    if (!Array.isArray(snapshot.releases) || (snapshot.activeReleaseId !== null && typeof snapshot.activeReleaseId !== "string")) {
+      throw new Error("Owner recovery state is partial or corrupt; active release metadata is required.")
+    }
+    if (snapshot.activeReleaseId === null && snapshot.releases.length === 0) return
+    this.bootstrap = snapshot.bootstrap ? {...snapshot.bootstrap} : undefined
+
+    for (const releaseStatus of snapshot.releases) {
+      if (releaseStatus.state !== "active" && releaseStatus.state !== "draining") continue
+      const release = new ReleaseGroup({
+        config: this.config,
+        logger: this.logger,
+        processFactory: (key, definition) => this.guardianProcess(key, definition),
+        releaseId: releaseStatus.releaseId,
+        releasePath: releaseStatus.releasePath,
+        revision: releaseStatus.revision,
+        servicePorts: this.servicePorts,
+        shouldStart: () => !this.stopping
+      })
+
+      await release.restore(releaseStatus)
+      this.releases.set(release.releaseId, release)
+      if (release.releaseId === snapshot.activeReleaseId) this.activeRelease = release
+    }
+
+    if (snapshot.activeReleaseId !== null && !this.activeRelease) throw new Error(`Owner recovery state does not contain active release ${snapshot.activeReleaseId}.`)
+    const definitionRelease = this.activeRelease || [...this.releases.values()].at(-1)
+    if (!definitionRelease) throw new Error("Owner recovery state has no release definition for owned processes.")
+    if (!this.activeRelease && snapshot.singletons.length > 0) throw new Error("Owner recovery state has release-owned singletons without an active release identity.")
+    for (const serviceStatus of snapshot.services) {
+      const processConfig = this.config.processes.find((candidate) => candidate.id === serviceStatus.id && candidate.policy === "service" && candidate.deployStrategy !== "handoff")
+
+      if (!processConfig) throw new Error(`Owner recovery state contains unknown service ${serviceStatus.id}.`)
+      const service = definitionRelease.buildProcess(processConfig, {guardianKey: `service:${serviceStatus.id}`, shouldRestart: () => !this.stopping})
+
+      await this.recoverGuardianProcess(service)
+      this.services.set(serviceStatus.id, service)
+      if (definitionRelease.ports[serviceStatus.id] !== undefined) this.servicePorts[serviceStatus.id] = definitionRelease.ports[serviceStatus.id]
+    }
+    for (const singletonStatus of snapshot.singletons) {
+      const processConfig = this.config.processes.find((candidate) => candidate.id === singletonStatus.id && candidate.policy === "singleton")
+
+      if (!processConfig) throw new Error(`Owner recovery state contains unknown singleton ${singletonStatus.id}.`)
+      const singleton = definitionRelease.buildProcess(processConfig, {guardianKey: `singleton:${definitionRelease.releaseId}:${singletonStatus.id}`})
+
+      await this.recoverGuardianProcess(singleton)
+      this.singletons.set(singletonStatus.id, singleton)
+    }
+    for (const release of this.releases.values()) {
+      if (release.state === "draining") void this.drainAndPrune(release, this.config)
+    }
+    this.logger("owner state recovered", {activeReleaseId: this.activeRelease?.releaseId ?? null, releases: this.releases.size})
+  }
+
+  /**
+   * @param {string} key - Guardian key.
+   * @param {Parameters<GuardianClient["process"]>[1]} definition - Process definition.
+   * @returns {import("./managed-process.js").default} Guardian-backed managed process.
+   */
+  guardianProcess(key, definition) {
+    if (!this.guardian) throw new Error("Process guardian is not initialized")
+    return this.guardian.process(key, definition)
+  }
+
+  /** @param {import("./managed-process.js").default} processInstance - Guardian-backed process. */
+  async recoverGuardianProcess(processInstance) {
+    if (!("recover" in processInstance) || typeof processInstance.recover !== "function") throw new Error(`Managed process ${processInstance.id} is not guardian-backed`)
+    await processInstance.recover()
+  }
+
+  /** Releases only resources created by a fenced startup loser. */
+  async abandonOwnerRecoveryAttempt() {
+    this.guardian?.disconnect()
+    await this.closeServer(this.proxyServer)
   }
 
   /** @returns {Promise<void>} Exposes control commands and begins periodic state persistence. */
@@ -389,6 +513,7 @@ export default class RollbridgeDaemon {
     const release = new ReleaseGroup({
       config: nextConfig,
       logger: this.logger,
+      ...(this.guardian ? {processFactory: (key, definition) => this.guardianProcess(key, definition)} : {}),
       releaseId: newReleaseId,
       releasePath,
       revision,
@@ -437,7 +562,7 @@ export default class RollbridgeDaemon {
 
     await this.replaceSingletons(release)
 
-    this.persistState()
+    await this.persistState()
 
     return {
       activeReleaseId: release.releaseId,
@@ -458,6 +583,7 @@ export default class RollbridgeDaemon {
     if (nextConfig.application !== this.config.application) restartRequired.push("application")
     if (!isDeepStrictEqual(nextConfig.control, this.config.control)) restartRequired.push("control")
     if (nextConfig.statePath !== this.config.statePath) restartRequired.push("statePath")
+    if (!isDeepStrictEqual(nextConfig.ownerRecovery, this.config.ownerRecovery)) restartRequired.push("ownerRecovery")
 
     if (nextConfig.proxy.host !== this.config.proxy.host) restartRequired.push("proxy.host")
     if (nextConfig.proxy.port !== this.config.proxy.port) restartRequired.push("proxy.port")
@@ -545,7 +671,7 @@ export default class RollbridgeDaemon {
       if (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff") continue
       if (this.services.has(processConfig.id)) continue
 
-      const service = release.buildProcess(processConfig, {shouldRestart: () => !this.stopping})
+      const service = release.buildProcess(processConfig, {guardianKey: `service:${processConfig.id}`, shouldRestart: () => !this.stopping})
 
       this.services.set(processConfig.id, service)
 
@@ -619,7 +745,7 @@ export default class RollbridgeDaemon {
         if (this.stopping) throw new Error("Rollbridge is shutting down")
       }
 
-      const singleton = release.buildProcess(processConfig)
+      const singleton = release.buildProcess(processConfig, {guardianKey: `singleton:${release.releaseId}:${processConfig.id}`})
 
       this.singletons.set(processConfig.id, singleton)
       await singleton.start("deploy")
@@ -762,16 +888,27 @@ export default class RollbridgeDaemon {
 
   /**
    * Persists a state snapshot (status plus recent events) to statePath, atomically and
-   * fire-and-forget. A failed write is logged but never blocks daemon operation.
-   * @returns {void}
+   * fire-and-forget unless the caller awaits the returned write. A failed write is logged.
+   * @param {{throwOnError?: boolean}} [options] - Whether a write failure rejects the returned promise.
+   * @returns {Promise<void> | undefined} The queued write, or undefined when persistence is disabled.
    */
-  persistState() {
+  persistState({throwOnError = false} = {}) {
     if (!this.statePath || !this.persistenceEnabled || this.stopping) return
 
     const statePath = this.statePath
     const status = /** @type {Record<string, JsonValue>} */ (secretSafeStateValue(this.status()))
     const events = secretSafeStateValue(this.eventLog.recent())
-    const snapshot = {...status, events, persistedAt: new Date().toISOString()}
+    const snapshot = {
+      ...status,
+      events,
+      persistedAt: new Date().toISOString(),
+      ...(this.guardianIdentity ? {recovery: {
+        configDigest: this.ownerRecoveryConfigDigest(),
+        format: 1,
+        guardian: this.guardianIdentity,
+        reconnectGraceMs: this.config.ownerRecovery?.reconnectGraceMs
+      }} : {})
+    }
 
     // Serialize writes (and track the tail) so shutdown can wait for an in-flight write before
     // clearing the file — otherwise a write started before shutdown could recreate it afterward.
@@ -780,7 +917,10 @@ export default class RollbridgeDaemon {
       .then(() => writeState(statePath, snapshot))
       .catch((error) => {
         this.logger("state persist failed", {error: error instanceof Error ? error.message : String(error)})
+        if (throwOnError) throw error
       })
+
+    return this.pendingWrite
   }
 
   /**
@@ -898,6 +1038,8 @@ export default class RollbridgeDaemon {
     ])
     const serviceStopResults = await Promise.allSettled([...this.services.values()].map((processInstance) => processInstance.stop()))
     const stopResults = [...dependentStopResults, ...serviceStopResults]
+    const guardian = this.guardian
+    if (guardian) await captureShutdownError(cleanupErrors, "process guardian shutdown", () => guardian.shutdown())
     await captureShutdownError(cleanupErrors, "proxy server close", () => this.closeServer(this.proxyServer))
 
     // Wait for any in-flight write first so it can't recreate or overwrite the final state (no
@@ -960,6 +1102,7 @@ export default class RollbridgeDaemon {
       bootstrap: this.bootstrap ? {...this.bootstrap} : undefined,
       control: {...this.config.control},
       daemonRuntime: this.runtime ? {...this.runtime} : undefined,
+      ownerRecovery: this.guardian ? {configDigest: this.ownerRecoveryConfigDigest()} : undefined,
       orphans: [...this.orphans],
       proxy: {
         host: this.config.proxy.host,

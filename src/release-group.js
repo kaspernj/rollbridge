@@ -11,7 +11,7 @@ import {waitForHealth} from "./health.js"
  * @typedef {"starting" | "active" | "draining" | "stopped" | "failed"} ReleaseState
  * @typedef {{http: number, websocket: number}} ReleaseConnections
  * @typedef {{activatedAt: string | undefined, connectionCount: number, connections: ReleaseConnections, drainStartedAt: string | undefined, ports: Record<string, number>, processes: import("./managed-process.js").ManagedProcessStatus[], releaseId: string, releasePath: string, retirementError: string | undefined, revision: string, state: ReleaseState, stoppedAt: string | undefined}} ReleaseStatus
- * @typedef {{count?: number, index?: number, instanceId?: string, shouldRestart?: () => boolean}} BuildProcessOptions
+ * @typedef {{count?: number, guardianKey?: string, index?: number, instanceId?: string, shouldRestart?: () => boolean}} BuildProcessOptions
  */
 
 /**
@@ -41,8 +41,9 @@ export default class ReleaseGroup extends EventEmitter {
    * @param {string | undefined} args.revision - Revision.
    * @param {Record<string, number>} [args.servicePorts] - Ports already owned by daemon-wide services.
    * @param {() => boolean} [args.shouldStart] - Whether bootstrap may create another process.
+   * @param {(key: string, definition: ConstructorParameters<typeof ManagedProcess>[0]) => ManagedProcess} [args.processFactory] - Durable process factory.
    */
-  constructor({config, logger, releaseId, releasePath, revision, servicePorts = {}, shouldStart = () => true}) {
+  constructor({config, logger, processFactory, releaseId, releasePath, revision, servicePorts = {}, shouldStart = () => true}) {
     super()
 
     this.config = config
@@ -59,6 +60,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.ports = /** @type {Record<string, number>} */ ({})
     this.servicePorts = servicePorts
     this.shouldStart = shouldStart
+    this.processFactory = processFactory
     this.portsAllocated = false
     this.drainStartedAt = /** @type {string | undefined} */ (undefined)
     this.activatedAt = /** @type {string | undefined} */ (undefined)
@@ -102,6 +104,55 @@ export default class ReleaseGroup extends EventEmitter {
       await this.stop()
       this.logStartupFailure(error instanceof Error ? error : String(error), {phase: "after cleanup"})
       throw error
+    }
+  }
+
+  /**
+   * Reconstructs this release around processes still owned by the durable guardian.
+   * @param {ReleaseStatus} snapshot - Persisted release snapshot.
+   */
+  async restore(snapshot) {
+    if (!snapshot || snapshot.releaseId !== this.releaseId || snapshot.releasePath !== this.releasePath || snapshot.revision !== this.revision) {
+      throw new Error(`Persisted release identity mismatch for ${this.releaseId}`)
+    }
+    if (!snapshot.ports || !Array.isArray(snapshot.processes)) throw new Error(`Persisted release ${this.releaseId} is missing ports or processes`)
+
+    const expectedProcessIds = this.config.processes
+      .filter((processConfig) => processConfig.policy !== "singleton" && (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff"))
+      .flatMap((processConfig) => Array.from({length: processConfig.replicas}, (_, index) => replicaInstanceId(processConfig, index)))
+      .sort()
+    const persistedProcessIds = snapshot.processes.map((processStatus) => processStatus.id).sort()
+
+    if (JSON.stringify(persistedProcessIds) !== JSON.stringify(expectedProcessIds)) {
+      throw new Error(`Persisted release ${this.releaseId} process set does not match the configured generation`)
+    }
+    for (const processConfig of this.config.processes) {
+      if (processConfig.port && typeof snapshot.ports[processConfig.id] !== "number") throw new Error(`Persisted release ${this.releaseId} is missing port ${processConfig.id}`)
+    }
+
+    this.ports = {...snapshot.ports}
+    this.portsAllocated = true
+    this.state = snapshot.state
+    this.activatedAt = snapshot.activatedAt
+    this.drainStartedAt = snapshot.drainStartedAt
+    this.retirementError = snapshot.retirementError
+    this.stoppedAt = snapshot.stoppedAt
+
+    for (const processStatus of snapshot.processes) {
+      const baseId = processStatus.id.replace(/#\d+$/, "")
+      const processConfig = this.config.processes.find((candidate) => candidate.id === baseId)
+
+      if (!processConfig || processConfig.policy === "singleton" || (processConfig.policy === "service" && processConfig.deployStrategy !== "handoff")) {
+        throw new Error(`Persisted release ${this.releaseId} contains unknown process ${processStatus.id}`)
+      }
+      const replicaMatch = processStatus.id.match(/#(\d+)$/)
+      const index = replicaMatch ? Number(replicaMatch[1]) : 0
+      const processInstance = this.buildProcess(processConfig, {count: processConfig.replicas, index, instanceId: processStatus.id})
+
+      this.processes.set(processStatus.id, processInstance)
+      if (processConfig.policy === "service" && processConfig.deployStrategy === "handoff") this.handoffServiceIds.add(processStatus.id)
+      if (processConfig.nonBlockingDrain) this.nonBlockingDrainIds.add(processStatus.id)
+      if ("recover" in processInstance && typeof processInstance.recover === "function") await processInstance.recover()
     }
   }
 
@@ -222,7 +273,7 @@ export default class ReleaseGroup extends EventEmitter {
       ...renderedEnv
     }
 
-    return new ManagedProcess({
+    const definition = /** @type {ConstructorParameters<typeof ManagedProcess>[0]} */ ({
       command: renderTemplate(processConfig.command, context),
       cwd: processConfig.cwd ? renderTemplate(processConfig.cwd, context) : this.releasePath,
       env: processEnv,
@@ -237,6 +288,10 @@ export default class ReleaseGroup extends EventEmitter {
       stopSignal: processConfig.stopSignal,
       stopTimeoutMs: processConfig.gracefulStopMs
     })
+
+    return this.processFactory
+      ? this.processFactory(options.guardianKey || `release:${this.releaseId}:${instanceId}`, definition)
+      : new ManagedProcess(definition)
   }
 
   /**

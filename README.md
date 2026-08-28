@@ -195,19 +195,32 @@ owns cleaning up on-disk release directories.
 releaseRetention: {keep: 5, maxAgeMs: 86400000}
 ```
 
-Set `statePath` to have the daemon persist secret-safe recovery state to a file
+Set `statePath` to have the daemon persist sanitized recovery state to a file
 (active/draining releases, process pids, counters, sanitized recent events).
 Commands, environment mappings, child command lines, and captured process output
 are deliberately excluded; those diagnostics remain available through the live
-status/log/event APIs. On the next startup Rollbridge reads any leftover file and
-reports managed processes still alive from a daemon that didn't shut down cleanly
-— advisory orphan detection. After a crash, run
+status/log/event APIs. Without `ownerRecovery`, the next startup reads any
+leftover file and reports managed processes still alive from a daemon that
+didn't shut down cleanly — advisory orphan detection. In that mode, after a crash run
 `rollbridge recover` to list those leftovers and `rollbridge recover --force` to
 stop them before restarting the daemon. A clean `shutdown` removes the file. See
 [`docs/config.md`](docs/config.md#statepath).
 
 ```js
 statePath: "/var/lib/rollbridge/ticket-server.state.json"
+```
+
+For same-authority daemon process recovery, opt into `ownerRecovery`. Rollbridge
+then runs a private local process guardian which remains the OS supervisor for
+managed processes if the control daemon exits unexpectedly. A replacement using
+the exact same normalized config/runtime reconnects within `reconnectGraceMs`,
+reconstructs active and draining generations and their ports, and fences
+concurrent replacements. The `0600` state file contains the guardian capability;
+protect its directory accordingly.
+
+```js
+statePath: "/var/lib/rollbridge/ticket-server.state.json",
+ownerRecovery: {reconnectGraceMs: 30000}
 ```
 
 During the first migration from an old supervisor, set `legacyTakeover` and run
@@ -372,9 +385,10 @@ If the new release fails to start or health-check, the previous release stays
 active and any service started during this deploy is rolled back.
 
 `status.releaseReferences` lists the id and path of every active or draining
-release in the current daemon. A reference disappears only when that release is
-fully stopped. Durable guardian recovery and atomic owner/config/socket/package
-replacement remain unimplemented follow-ups.
+release. A reference disappears only when that release is fully stopped. With
+`ownerRecovery`, those references and generations survive a same-authority
+daemon process replacement. Atomic incompatible config/socket/package owner
+replacement remains a separate follow-up.
 
 ## Commands
 
@@ -466,9 +480,10 @@ The four bootstrap inputs are all-or-nothing and use absolute config/release
 paths. Rollbridge binds its proxy, activates the release through the normal
 deploy path, then exposes the control socket and stays foreground. A failed
 activation stops only processes started by that attempt and exits non-zero;
-persisted processes from a previous daemon are reported as orphans and are never
-recovered or killed implicitly; their live PID records remain in `statePath` for
-explicit recovery.
+without `ownerRecovery`, persisted processes from a previous daemon are reported
+as advisory orphans and are never recovered or killed implicitly. With
+`ownerRecovery`, bootstrap reconnects only to the matching guardian and
+reconstructs its provenanced generations before exposing control.
 
 External supervisors may add `--boot-attestation` with exactly `sha256:` plus
 64 lowercase hexadecimal characters. After successful activation, `rollbridge

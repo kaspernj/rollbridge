@@ -40,9 +40,14 @@ When `statePath` is configured, its recovery snapshot is intentionally not a
 log archive: process commands, environment mappings, child command lines, and
 captured stdout/stderr are excluded. Use the live APIs above or the configured
 daemon log for those diagnostics, and protect that log according to the
-sensitivity of application output.
+sensitivity of application output. With `ownerRecovery`, the mode-`0600`
+snapshot also contains the private guardian capability and its directory must be
+protected accordingly.
 
-Both are cleared when the daemon restarts; the log file persists.
+Without `ownerRecovery`, both in-memory views clear when the daemon restarts.
+With it, guardian-held process output remains available after reconnection while
+the replacement daemon begins a new event history. The configured log file
+persists in either mode.
 
 ## Rotation
 

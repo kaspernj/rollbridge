@@ -13,6 +13,9 @@ export default {
     path: "/tmp/rollbridge-tensorbuzz.sock"
   },
 
+  statePath: "/var/lib/rollbridge/tensorbuzz.json",
+  ownerRecovery: {reconnectGraceMs: 30000},
+
   proxy: {
     host: "127.0.0.1",
     port: 4500,

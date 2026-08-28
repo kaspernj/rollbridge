@@ -21,7 +21,7 @@ export async function writeState(path, state) {
 
   const tempPath = `${path}.${process.pid}.${tempCounter}.tmp`
 
-  await fs.writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`)
+  await fs.writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, {mode: 0o600})
   await fs.rename(tempPath, path)
 }
 

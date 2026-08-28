@@ -69,13 +69,12 @@ paths, and process references. Do not treat them as generic orphans to force-sto
 merely because a supervisor restarted. Cleanup becomes eligible only after the
 last retained process exits.
 
-Current Rollbridge does not yet meet those recovery and owner-handoff
-requirements. Within one daemon it quiesces configured handoff services, retains
-concurrent generations, and reports `releaseReferences`. After restart it
-reports surviving PIDs as advisory, non-adoptable
-orphans, and forced recovery stops them. `--takeover-owner` quiesces and starts
-asynchronous stops for every managed process instead of transferring retained
-generations; listener replacement is not atomic.
+Rollbridge meets the same-authority daemon-exit portion when `ownerRecovery` is
+configured: its guardian retains provenanced processes and a replacement
+reconstructs concurrent generations, endpoints, and `releaseReferences`.
+Without that opt-in, surviving PIDs remain advisory orphans. `--takeover-owner`
+still does not provide an atomic incompatible config/package/socket upgrade;
+that separate handoff remains non-compliant.
 
 ## Operator checks
 

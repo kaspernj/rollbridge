@@ -22,6 +22,18 @@ test("writeState then readState round-trips a snapshot", async () => {
   }
 })
 
+test("writeState keeps durable guardian capabilities private", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-state-mode-"))
+  const statePath = path.join(dir, "state.json")
+
+  try {
+    await writeState(statePath, {recovery: {guardian: {token: "private"}}})
+    assert.equal((await fs.stat(statePath)).mode & 0o777, 0o600)
+  } finally {
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
 test("readState returns undefined for a missing or unparseable file", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-state-"))
   const statePath = path.join(dir, "state.json")

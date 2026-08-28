@@ -26,6 +26,7 @@ export default {
   application: "tensorbuzz",
   control: {path: "/tmp/rollbridge-tensorbuzz.sock"},
   statePath: "/var/lib/rollbridge/tensorbuzz.json",
+  ownerRecovery: {reconnectGraceMs: 30000},
 
   proxy: {
     host: "127.0.0.1",
@@ -142,11 +143,11 @@ report every referenced release directory so Rampway can pin it against cleanup.
 A runtime owner/version handoff preserves or transfers that supervision and
 returns after the replacement is healthy; it is not a full synchronous shutdown.
 
-Current Rollbridge implements the same-owner portion when jobs-main has a
-successful `quietCommand`: post-activation quiescence, concurrent endpoints,
-asynchronous generation drain, and `status.releaseReferences`. It cannot
-re-adopt surviving PIDs or transfer them during `--takeover-owner`; durable
-guardian recovery and atomic owner upgrades remain required follow-ups.
+Rollbridge implements post-activation quiescence, concurrent endpoints,
+asynchronous generation drain, and `status.releaseReferences`. With
+`ownerRecovery`, a same-authority replacement reconnects to the guardian rather
+than adopting arbitrary PIDs. Atomic incompatible owner/config/socket/package
+upgrades through `--takeover-owner` remain a required follow-up.
 
 ## Timeouts
 
