@@ -122,6 +122,10 @@ export default class RollbridgeDaemon {
     await this.guardian.claimOwner(this.config.ownerRecovery?.reconnectGraceMs ?? 30000)
 
     if (snapshot) await this.restoreOwnerState(snapshot)
+    else {
+      this.persistenceEnabled = true
+      await this.persistState({throwOnError: true})
+    }
     this.stateCleanupEnabled = true
   }
 
@@ -156,22 +160,25 @@ export default class RollbridgeDaemon {
       if (release.releaseId === snapshot.activeReleaseId) this.activeRelease = release
     }
 
-    if (!this.activeRelease) throw new Error(`Owner recovery state does not contain active release ${snapshot.activeReleaseId}.`)
+    if (snapshot.activeReleaseId !== null && !this.activeRelease) throw new Error(`Owner recovery state does not contain active release ${snapshot.activeReleaseId}.`)
+    const definitionRelease = this.activeRelease || [...this.releases.values()].at(-1)
+    if (!definitionRelease) throw new Error("Owner recovery state has no release definition for owned processes.")
+    if (!this.activeRelease && snapshot.singletons.length > 0) throw new Error("Owner recovery state has release-owned singletons without an active release identity.")
     for (const serviceStatus of snapshot.services) {
       const processConfig = this.config.processes.find((candidate) => candidate.id === serviceStatus.id && candidate.policy === "service" && candidate.deployStrategy !== "handoff")
 
       if (!processConfig) throw new Error(`Owner recovery state contains unknown service ${serviceStatus.id}.`)
-      const service = this.activeRelease.buildProcess(processConfig, {guardianKey: `service:${serviceStatus.id}`, shouldRestart: () => !this.stopping})
+      const service = definitionRelease.buildProcess(processConfig, {guardianKey: `service:${serviceStatus.id}`, shouldRestart: () => !this.stopping})
 
       await this.recoverGuardianProcess(service)
       this.services.set(serviceStatus.id, service)
-      if (this.activeRelease.ports[serviceStatus.id] !== undefined) this.servicePorts[serviceStatus.id] = this.activeRelease.ports[serviceStatus.id]
+      if (definitionRelease.ports[serviceStatus.id] !== undefined) this.servicePorts[serviceStatus.id] = definitionRelease.ports[serviceStatus.id]
     }
     for (const singletonStatus of snapshot.singletons) {
       const processConfig = this.config.processes.find((candidate) => candidate.id === singletonStatus.id && candidate.policy === "singleton")
 
       if (!processConfig) throw new Error(`Owner recovery state contains unknown singleton ${singletonStatus.id}.`)
-      const singleton = this.activeRelease.buildProcess(processConfig, {guardianKey: `singleton:${this.activeRelease.releaseId}:${singletonStatus.id}`})
+      const singleton = definitionRelease.buildProcess(processConfig, {guardianKey: `singleton:${definitionRelease.releaseId}:${singletonStatus.id}`})
 
       await this.recoverGuardianProcess(singleton)
       this.singletons.set(singletonStatus.id, singleton)
@@ -179,7 +186,7 @@ export default class RollbridgeDaemon {
     for (const release of this.releases.values()) {
       if (release.state === "draining") void this.drainAndPrune(release, this.config)
     }
-    this.logger("owner state recovered", {activeReleaseId: this.activeRelease.releaseId, releases: this.releases.size})
+    this.logger("owner state recovered", {activeReleaseId: this.activeRelease?.releaseId ?? null, releases: this.releases.size})
   }
 
   /**
@@ -576,6 +583,7 @@ export default class RollbridgeDaemon {
     if (nextConfig.application !== this.config.application) restartRequired.push("application")
     if (!isDeepStrictEqual(nextConfig.control, this.config.control)) restartRequired.push("control")
     if (nextConfig.statePath !== this.config.statePath) restartRequired.push("statePath")
+    if (!isDeepStrictEqual(nextConfig.ownerRecovery, this.config.ownerRecovery)) restartRequired.push("ownerRecovery")
 
     if (nextConfig.proxy.host !== this.config.proxy.host) restartRequired.push("proxy.host")
     if (nextConfig.proxy.port !== this.config.proxy.port) restartRequired.push("proxy.port")
@@ -881,9 +889,10 @@ export default class RollbridgeDaemon {
   /**
    * Persists a state snapshot (status plus recent events) to statePath, atomically and
    * fire-and-forget unless the caller awaits the returned write. A failed write is logged.
+   * @param {{throwOnError?: boolean}} [options] - Whether a write failure rejects the returned promise.
    * @returns {Promise<void> | undefined} The queued write, or undefined when persistence is disabled.
    */
-  persistState() {
+  persistState({throwOnError = false} = {}) {
     if (!this.statePath || !this.persistenceEnabled || this.stopping) return
 
     const statePath = this.statePath
@@ -908,6 +917,7 @@ export default class RollbridgeDaemon {
       .then(() => writeState(statePath, snapshot))
       .catch((error) => {
         this.logger("state persist failed", {error: error instanceof Error ? error.message : String(error)})
+        if (throwOnError) throw error
       })
 
     return this.pendingWrite

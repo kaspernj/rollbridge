@@ -4,11 +4,13 @@ import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
 import {sendControlCommand} from "../src/control-client.js"
+import RollbridgeDaemon from "../src/daemon.js"
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
@@ -254,6 +256,109 @@ test("concurrent same-authority replacements converge on one fenced owner", asyn
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact group already exited. */ }
     }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("fresh guardian identity remains recoverable when proxy startup fails", async () => {
+  const fixture = await createFixture()
+  const blocker = net.createServer()
+  const config = /** @type {import("../src/config.js").RollbridgeConfig} */ (fixture.config)
+  /** @type {RollbridgeDaemon | undefined} */
+  let failedOwner
+  /** @type {RollbridgeDaemon | undefined} */
+  let replacement
+
+  try {
+    await new Promise((resolve, reject) => blocker.listen(0, "127.0.0.1", () => resolve(undefined)).once("error", reject))
+    const address = blocker.address()
+    assert.ok(address && typeof address === "object")
+    config.proxy.port = address.port
+    const startupAttempt = new RollbridgeDaemon({config, logger: () => {}})
+    failedOwner = startupAttempt
+    await assert.rejects(() => startupAttempt.start(), /EADDRINUSE/)
+
+    const state = JSON.parse(await fs.readFile(fixture.statePath, "utf8"))
+    assert.equal(typeof state.recovery?.guardian?.token, "string")
+    failedOwner.abandonOwnerRecoveryAttempt()
+    await new Promise((resolve) => blocker.close(() => resolve(undefined)))
+
+    replacement = new RollbridgeDaemon({config, logger: () => {}})
+    await replacement.start()
+    assert.equal(replacement.status().activeReleaseId, null)
+    await replacement.shutdown()
+  } finally {
+    if (blocker.listening) await new Promise((resolve) => blocker.close(() => resolve(undefined)))
+    if (!replacement && failedOwner?.guardian) await failedOwner.guardian.shutdown()
+    else failedOwner?.guardian?.disconnect()
+    replacement?.guardian?.disconnect()
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("replacement reconstructs retained draining generations without an active release", async () => {
+  const fixture = await createFixture()
+  const config = /** @type {import("../src/config.js").RollbridgeConfig} */ (fixture.config)
+  config.processes = config.processes.filter((processConfig) => processConfig.id !== "beacon" && processConfig.id !== "singleton")
+  await writeConfig(fixture.configPath, config)
+  let owner = spawnDaemon(fixture.configPath)
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const v1Path = await prepareRelease(fixture.root, "v1")
+    const v2Path = await prepareRelease(fixture.root, "v2")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
+
+    const stopActive = sendControlCommand({command: {command: "stop", releaseId: "v2"}, path: fixture.socketPath})
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    await stopActive
+    const drainOnly = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+    assert.equal(drainOnly.activeReleaseId, null)
+    assert.deepEqual(drainOnly.releaseReferences, [{releaseId: "v1", releasePath: v1Path}])
+
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+    owner = spawnDaemon(fixture.configPath)
+    await waitForLog(owner, "control socket listening")
+    const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+    assert.equal(recovered.activeReleaseId, null)
+    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath: v1Path}])
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await shutdown
+    await once(owner, "exit")
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("deploy rejects a live ownerRecovery mode change", async () => {
+  const fixture = await createFixture()
+  const owner = spawnDaemon(fixture.configPath)
+  const releasePath = await prepareRelease(fixture.root, "v1")
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const changedConfig = {...fixture.config}
+    delete changedConfig.ownerRecovery
+    await writeConfig(fixture.configPath, changedConfig)
+
+    await assert.rejects(
+      sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: fixture.socketPath}),
+      /ownerRecovery.*cannot be applied live/
+    )
+
+    await writeConfig(fixture.configPath, fixture.config)
+    await sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+    await once(owner, "exit")
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
