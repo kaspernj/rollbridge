@@ -11,6 +11,7 @@ import test from "node:test"
 import {fileURLToPath} from "node:url"
 import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon from "../src/daemon.js"
+import GuardianClient from "../src/guardian-client.js"
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
@@ -364,6 +365,67 @@ test("deploy rejects a live ownerRecovery mode change", async () => {
   }
 })
 
+test("replacement removes only guardian-owned candidate inventory left before deploy commit", async () => {
+  const fixture = await createFixture()
+  let owner = spawnDaemon(fixture.configPath)
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  let candidatePid
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    const committedState = JSON.parse(await fs.readFile(fixture.statePath, "utf8"))
+    const candidateConfig = /** @type {import("../src/config.js").RollbridgeConfig} */ (structuredClone(fixture.config))
+    const worker = candidateConfig.processes.find((processConfig) => processConfig.id === "worker")
+    const web = candidateConfig.processes.find((processConfig) => processConfig.id === "web")
+
+    assert.ok(worker && web)
+    worker.command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("const fs = require('node:fs'); const target = process.env.ROLLBRIDGE_RELEASE_PATH + '/candidate.pid'; fs.writeFileSync(target + '.tmp', String(process.pid)); fs.renameSync(target + '.tmp', target); setInterval(() => {}, 1000)")}`
+    worker.lifecycle = {drainTimeoutMs: 0}
+    web.command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`
+    await writeConfig(fixture.configPath, candidateConfig)
+    const interruptedDeploy = sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
+    void interruptedDeploy.catch(() => {})
+    const candidatePidPath = path.join(v2Path, "candidate.pid")
+
+    await waitForFile(candidatePidPath)
+    candidatePid = Number(await fs.readFile(candidatePidPath, "utf8"))
+    assert.ok(Number.isInteger(candidatePid) && candidatePid > 0)
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+    const stateAfterDeath = JSON.parse(await fs.readFile(fixture.statePath, "utf8"))
+
+    assert.equal(stateAfterDeath.activeReleaseId, committedState.activeReleaseId, "owner death must preserve the last committed active release")
+    assert.deepEqual(stateAfterDeath.releaseReferences, committedState.releaseReferences, "owner death must preserve committed release references")
+    assert.deepEqual(stateAfterDeath.releases, committedState.releases, "owner death must not commit candidate release metadata")
+
+    await writeConfig(fixture.configPath, fixture.config)
+    owner = spawnDaemon(fixture.configPath)
+    await waitForLog(owner, "control socket listening")
+    const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath: v1Path}])
+    assert.equal(isAlive(candidatePid), false, "uncommitted candidate must be stopped before replacement becomes healthy")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
+    assert.equal((await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})).activeReleaseId, "v2", "removed candidate keys must be reusable by a later valid deploy")
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
+    await shutdown
+    await once(owner, "exit")
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    if (candidatePid && isAlive(candidatePid)) {
+      try { process.kill(-candidatePid, "SIGKILL") } catch (_error) { /* Exact candidate group already exited. */ }
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 /** @returns {Promise<{config: Record<string, import("../src/json.js").JsonValue>, configPath: string, root: string, socketPath: string, statePath: string}>} Fixture paths. */
 async function createFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-recovery-"))
@@ -451,13 +513,22 @@ async function writeConfig(configPath, config) {
 async function stopFixtureGuardian(statePath) {
   try {
     const state = JSON.parse(await fs.readFile(statePath, "utf8"))
-    const pid = state.recovery?.guardian?.pid
+    const identity = state.recovery?.guardian
 
-    if (typeof pid !== "number") return
-    const command = (await fs.readFile(`/proc/${pid}/cmdline`)).toString().replaceAll("\0", " ")
+    if (!identity || typeof identity.pid !== "number" || typeof identity.socketPath !== "string" || typeof identity.token !== "string") return
+    const command = (await fs.readFile(`/proc/${identity.pid}/cmdline`)).toString().replaceAll("\0", " ")
 
-    if (!command.includes("process-guardian.js") || !command.includes(statePath)) throw new Error(`Refusing to stop unverified fixture guardian pid ${pid}`)
-    process.kill(pid, "SIGKILL")
+    if (!command.includes("process-guardian.js") || !command.includes(statePath)) throw new Error(`Refusing to stop unverified fixture guardian pid ${identity.pid}`)
+    const client = new GuardianClient(identity)
+
+    await client.connect()
+    for (const entry of await client.inventory()) {
+      if (!entry.status.pid) continue
+      try { process.kill(-entry.status.pid, "SIGKILL") } catch (error) {
+        if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error
+      }
+    }
+    await client.shutdown()
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && (error.code === "ENOENT" || error.code === "ESRCH")) return
     throw error
@@ -487,6 +558,48 @@ async function waitForState(statePath, predicate) {
   }
 
   throw new Error("State watcher ended before the expected snapshot")
+}
+
+/**
+ * @param {string} filePath - File whose creation is the transaction-boundary signal.
+ * @returns {Promise<void>} Resolves when the file exists.
+ */
+async function waitForFile(filePath) {
+  try {
+    await fs.access(filePath)
+    return
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+  }
+  const watcher = fs.watch(path.dirname(filePath))
+
+  try {
+    for await (const change of watcher) {
+      if (change.filename !== path.basename(filePath)) continue
+      try {
+        await fs.access(filePath)
+        return
+      } catch (error) {
+        if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+      }
+    }
+  } finally {
+    await watcher.return?.()
+  }
+}
+
+/**
+ * @param {number} pid - Exact fixture pid.
+ * @returns {boolean} Whether the exact fixture process is alive.
+ */
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return false
+    throw error
+  }
 }
 
 /**
