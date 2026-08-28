@@ -46,7 +46,7 @@ restart.
 | `application` | string | basename of the config file's directory | Names the app; used in the default control-socket path and the `ROLLBRIDGE_APPLICATION` env var. |
 | `control` | object | — | Control-socket settings (see below). |
 | `legacyTakeover` | object | unset | Optional matchers for `rollbridge predeploy-cleanup` to stop pre-Rollbridge supervisors during first handover (see below). |
-| `ownerRecovery` | object | unset | Durable guardian recovery for exact same-authority daemon replacement; requires `statePath` (see below). |
+| `ownerRecovery` | object | unset | Durable guardian recovery and atomic incompatible owner replacement; requires `statePath` (see below). |
 | `proxy` | object | **required** | Proxy listener and shared defaults (see below). |
 | `processes` | array | **required** | Managed processes (see below). Exactly one must be `proxied`. |
 | `releaseRetention` | object | — | How many stopped releases the daemon retains (see below). |
@@ -115,7 +115,8 @@ statePath: "/var/lib/rollbridge/ticket-server.state.json"
 
 Leave `statePath` unset to disable persistence (the default).
 
-Set `ownerRecovery` to opt into same-authority process-exit recovery:
+Set `ownerRecovery` to opt into same-authority process-exit recovery and atomic
+incompatible owner replacement:
 
 ```js
 statePath: "/var/lib/rollbridge/ticket-server.state.json",
@@ -135,9 +136,31 @@ guardian-owned processes and their generation-local connections continue during
 the grace, so the replacement reconnects to supervision rather than duplicating
 execution.
 
-This contract is deliberately same-authority. Changing application identity,
-process topology, proxy/control/state paths, or runtime/package identity is not
-an atomic upgrade mechanism; that remains a separate owner-transfer requirement.
+For a responsive incompatible owner, `ensure-daemon` prepares the requested
+durable runtime, restores exact active and draining generation definitions from
+the authenticated guardian, starts the candidate listeners, and then commits a
+single fenced guardian/control-socket handoff. Config identity, process topology,
+control path, and package/runtime identity may change; `statePath` remains the
+unchanged transaction anchor. Failures before commit leave the old owner serving.
+After commit, drains resume under their original release configs and never block
+the command. A monotonic guardian revision rejects a stale candidate if owner
+state changes after prepare. Listener-owned HTTP/WebSocket counts remain fenced
+to their releases until the retired listener reports them drained, preventing a
+later deploy from stopping the connected process early. Compatible per-deploy
+config reloads remain unchanged.
+
+The first upgrade from an authenticated pre-replacement Rollbridge guardian and
+daemon uses an explicitly disruptive compatibility bridge because that legacy
+owner cannot transfer listeners on Node 20. Rollbridge attests the exact guardian
+and daemon processes, sockets, runtime/config authority, and durable process
+registrations before retiring the legacy listeners. Managed process PIDs and
+release state remain supervised, but live proxy/control connections may close.
+The resulting status includes `ownerTransition: {disruptive: true, mode:
+"legacy-first-upgrade", ...}`. The bridge only accepts the incumbent config
+identity; retry config or socket changes after the protocol upgrade, when the
+normal atomic handoff applies. Other guardian/auth/transport/identity failures
+remain fail-closed.
+
 Without `ownerRecovery`, `statePath` retains the advisory orphan behavior above.
 
 ## `legacyTakeover`
@@ -253,8 +276,9 @@ dispatch, and new handoffs without exiting. Immediately after activation,
 Rollbridge quiesces it with `nonBlockingDrain` companions, then returns without
 waiting for their drain. A failed hook leaves the generation alive, records
 `retirementError`, and emits `release retirement quiescence failed`. Durable
-same-authority recovery is available with `ownerRecovery`; atomic incompatible
-config/socket/package replacement remains unimplemented.
+same-authority recovery and guardian-fenced incompatible
+config/control-socket/package/runtime replacement are available with
+`ownerRecovery`.
 
 ### `processes[].lifecycle`
 

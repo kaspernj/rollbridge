@@ -210,13 +210,35 @@ stop them before restarting the daemon. A clean `shutdown` removes the file. See
 statePath: "/var/lib/rollbridge/ticket-server.state.json"
 ```
 
-For same-authority daemon process recovery, opt into `ownerRecovery`. Rollbridge
+For durable daemon process recovery and atomic owner replacement, opt into
+`ownerRecovery`. Rollbridge
 then runs a private local process guardian which remains the OS supervisor for
 managed processes if the control daemon exits unexpectedly. A replacement using
 the exact same normalized config/runtime reconnects within `reconnectGraceMs`,
 reconstructs active and draining generations and their ports, and fences
-concurrent replacements. The `0600` state file contains the guardian capability;
-protect its directory accordingly.
+concurrent replacements. `ensure-daemon` can also prepare a requested
+config/control-socket/package/runtime owner, prove it healthy, and atomically
+transfer guardian authority while every retained generation keeps its exact
+release reference and drains asynchronously. The old `statePath` is the durable
+transaction anchor and cannot change during this handoff. The `0600` state file
+contains the guardian capability; protect its directory accordingly.
+Prepared transactions fence owner mutations and compare a monotonic guardian
+state revision at staging. Existing HTTP/WebSocket connections remain owned by
+the retired listener process, while their counts transfer to the new daemon so
+later deploys continue to honor the original drain boundary.
+
+There is one explicit compatibility boundary: the first upgrade from a genuine
+pre-owner-replacement Rollbridge guardian and daemon cannot share its listeners
+on supported Node 20. After authenticating the guardian, exact daemon PID/socket,
+runtime authority, and durable owned-process state, `ensure-daemon` performs a
+one-time **disruptive** bridge. Existing proxy/control connections may close,
+the retained processes keep their exact PIDs under guardian supervision, and
+`status.ownerTransition` reports `mode: "legacy-first-upgrade"` with
+`disruptive: true`. The bridge requires the existing config identity unchanged;
+apply config/socket changes in a subsequent invocation, which uses the atomic
+protocol. Unknown commands, auth/transport failures, malformed responses, and
+identity mismatches fail closed without entering this bridge. Every replacement
+after this protocol upgrade remains candidate-first and atomic.
 
 ```js
 statePath: "/var/lib/rollbridge/ticket-server.state.json",
@@ -386,9 +408,9 @@ active and any service started during this deploy is rolled back.
 
 `status.releaseReferences` lists the id and path of every active or draining
 release. A reference disappears only when that release is fully stopped. With
-`ownerRecovery`, those references and generations survive a same-authority
-daemon process replacement. Atomic incompatible config/socket/package owner
-replacement remains a separate follow-up.
+`ownerRecovery`, those references and generations survive both same-authority
+daemon recovery and guardian-fenced incompatible config/control-socket/package/
+runtime replacement through `ensure-daemon`.
 
 ## Commands
 
@@ -473,8 +495,9 @@ and health-checks the exact release first. Only then does it retire the accepted
 owner's proxy/control listeners. Candidate bootstrap failure leaves the accepted
 owner untouched. Current takeover does not preserve retained jobs generations
 or transfer listeners atomically, so it is not a zero-downtime package, config,
-or socket upgrade mechanism. This is opt-in; ordinary daemon bootstrap and
-`shutdown` keep their existing behavior.
+or socket upgrade mechanism. Use `ownerRecovery` plus `ensure-daemon` for the
+guardian-fenced atomic replacement contract. This is opt-in; ordinary daemon
+bootstrap and `shutdown` keep their existing behavior.
 
 The four bootstrap inputs are all-or-nothing and use absolute config/release
 paths. Rollbridge binds its proxy, activates the release through the normal

@@ -29,24 +29,30 @@ test("replacement owner reconstructs one active and two draining generations aft
   try {
     await waitForLog(owner, "control socket listening")
     for (const releaseId of ["v1", "v2", "v3"]) {
-      const releasePath = path.join(fixture.root, releaseId)
+      const releasePath = await prepareRelease(fixture.root, releaseId, {holdJobsBind: releaseId === "v2"})
 
-      await fs.mkdir(releasePath)
-      const gate = spawn("mkfifo", [path.join(releasePath, "worker.fifo")])
-      assert.equal((await once(gate, "exit"))[0], 0)
       await sendControlCommand({command: {command: "deploy", releaseId, releasePath, revision: releaseId}, path: fixture.socketPath})
+      if (releaseId === "v2") await waitForFile(path.join(releasePath, "jobs.bind-waiting"))
+      const deployed = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+      for (const retained of deployed.releases) {
+        for (const processStatus of retained.processes) if (processStatus.pid) managedProcessGroups.add(processStatus.pid)
+      }
+      for (const entry of [...deployed.services, ...deployed.singletons]) if (entry.process.pid) managedProcessGroups.add(entry.process.pid)
     }
 
     const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
 
     assert.equal(before.activeReleaseId, "v3")
     assert.deepEqual(before.releaseReferences.map((/** @type {{releaseId: string}} */ reference) => reference.releaseId), ["v1", "v2", "v3"])
-    assert.equal(new Set(before.releases.map((release) => release.ports.jobs)).size, 3)
-    for (const release of before.releases) {
-      for (const processStatus of release.processes) if (processStatus.pid) managedProcessGroups.add(processStatus.pid)
-    }
-    for (const entry of [...before.services, ...before.singletons]) if (entry.process.pid) managedProcessGroups.add(entry.process.pid)
+    const generationEndpoints = before.releases.map((release) => ({
+      jobsPort: release.ports.jobs,
+      jobsState: release.processes.find((processStatus) => processStatus.id === "jobs")?.state,
+      releaseId: release.releaseId,
+      state: release.state
+    }))
 
+    assert.equal(new Set(generationEndpoints.map(({jobsPort}) => jobsPort)).size, 3, JSON.stringify(generationEndpoints))
     owner.kill("SIGKILL")
     await once(owner, "exit")
 
@@ -427,6 +433,107 @@ test("replacement removes only guardian-owned candidate inventory left before de
   }
 })
 
+test("ensure-daemon atomically replaces an incompatible owner without losing retained generations", async () => {
+  const fixture = await createFixture()
+  const oldControlPath = fixture.socketPath
+  const newControlPath = path.join(fixture.root, "rollbridge-v2.sock")
+  const runtimePath = path.join(fixture.root, "runtime")
+  const daemonLogPath = path.join(fixture.root, "replacement.log")
+  const daemonPidPath = path.join(fixture.root, "replacement.pid")
+  let owner = spawnDaemon(fixture.configPath)
+  const processGroups = new Set()
+  let cleanupControlPath = oldControlPath
+  let retainedConnection
+  let retainedConnectionClose
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const v1Path = await prepareRelease(fixture.root, "v1")
+    const v2Path = await prepareRelease(fixture.root, "v2")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldControlPath})
+    const activeV1 = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: oldControlPath}))
+    retainedConnection = await openWebSocket(/** @type {{port: number}} */ (activeV1.proxy).port)
+    retainedConnectionClose = once(retainedConnection, "close")
+    let retainedConnectionClosed = false
+
+    retainedConnection.once("close", () => { retainedConnectionClosed = true })
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldControlPath})
+    const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: oldControlPath}))
+
+    for (const release of before.releases) for (const processStatus of release.processes) if (processStatus.pid) processGroups.add(processStatus.pid)
+    for (const entry of [...before.services, ...before.singletons]) if (entry.process.pid) processGroups.add(entry.process.pid)
+
+    const nextConfig = /** @type {import("../src/config.js").RollbridgeConfig} */ (structuredClone(fixture.config))
+    nextConfig.control = {path: newControlPath}
+    const companionTemplate = nextConfig.processes.find((processConfig) => processConfig.policy === "companion")
+
+    assert.ok(companionTemplate)
+    nextConfig.processes.splice(2, 0, {
+      ...structuredClone(companionTemplate),
+      id: "new-topology-process",
+      lifecycle: {drainTimeoutMs: 0},
+      nonBlockingDrain: false
+    })
+    await writeConfig(fixture.configPath, nextConfig)
+
+    const replacement = await runCli([
+      "ensure-daemon", "--config", fixture.configPath,
+      "--daemon-log-path", daemonLogPath,
+      "--daemon-pid-path", daemonPidPath,
+      "--daemon-runtime-path", runtimePath,
+      "--daemon-start-timeout-ms", "5000"
+    ])
+    assert.equal(replacement.code, 0, `${replacement.output}\n${await fs.readFile(daemonLogPath, "utf8")}`)
+    cleanupControlPath = newControlPath
+
+    const after = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: newControlPath}))
+
+    assert.equal(after.activeReleaseId, "v2")
+    assert.deepEqual(after.releaseReferences, before.releaseReferences)
+    assert.deepEqual(after.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)), before.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)))
+    assert.equal(after.services[0]?.process.pid, before.services[0]?.process.pid)
+    assert.equal(after.singletons[0]?.process.pid, before.singletons[0]?.process.pid)
+    assert.equal(retainedConnectionClosed, false, "listener-owned WebSocket must remain supervised across replacement")
+
+    const v3Path = await prepareRelease(fixture.root, "v3")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v3", releasePath: v3Path, revision: "v3"}, path: newControlPath})
+    const deployed = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: newControlPath}))
+
+    assert.equal(deployed.activeReleaseId, "v3")
+    assert.deepEqual(deployed.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2", "v3"])
+    assert.equal(releaseProcessPid(deployed, "v1", "web"), releaseProcessPid(before, "v1", "web"))
+    assert.equal(retainedConnectionClosed, false, "a later deploy must not stop a process with a transferred live connection")
+
+    retainedConnection.destroy()
+    await retainedConnectionClose
+    await Promise.all(["v1", "v2"].map((releaseId) => fs.writeFile(path.join(fixture.root, releaseId, "worker.fifo"), "drained\n")))
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newControlPath})
+    await fs.writeFile(path.join(v3Path, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    retainedConnection?.destroy()
+    await retainedConnectionClose?.catch(() => undefined)
+    try {
+      const status = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: cleanupControlPath}))
+      const shutdown = sendControlCommand({command: {command: "shutdown"}, path: cleanupControlPath})
+
+      await Promise.all([
+        ...status.releaseReferences.map(({releaseId}) => fs.writeFile(path.join(fixture.root, releaseId, "worker.fifo"), "drained\n").catch(() => undefined)),
+        shutdown
+      ])
+    } catch (_error) {
+      // Exact process and guardian cleanup below handles a daemon that failed before control publication.
+    }
+    await killChild(owner)
+    for (const pid of processGroups) {
+      try { process.kill(-pid, "SIGKILL") } catch (_error) { /* Exact managed group already exited. */ }
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 /** @returns {Promise<{config: Record<string, import("../src/json.js").JsonValue>, configPath: string, root: string, socketPath: string, statePath: string}>} Fixture paths. */
 async function createFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-recovery-"))
@@ -449,7 +556,11 @@ async function createFixture() {
       {
         command: `${JSON.stringify(process.execPath)} ${JSON.stringify(serviceAppPath)}`,
         deployStrategy: "handoff",
-        env: {ROLLBRIDGE_SERVICE_LOG: serviceLogPath},
+        env: {
+          ROLLBRIDGE_SERVICE_BIND_GATE: "{{releasePath}}/jobs.bind",
+          ROLLBRIDGE_SERVICE_BIND_WAITING: "{{releasePath}}/jobs.bind-waiting",
+          ROLLBRIDGE_SERVICE_LOG: serviceLogPath
+        },
         id: "jobs",
         lifecycle: {quietCommand: "exit 0"},
         policy: "service",
@@ -487,12 +598,14 @@ async function createFixture() {
 /**
  * @param {string} root - Fixture root.
  * @param {string} releaseId - Release id.
+ * @param {{holdJobsBind?: boolean}} [options] - Whether the handoff service must remain unbound.
  * @returns {Promise<string>} Prepared release path.
  */
-async function prepareRelease(root, releaseId) {
+async function prepareRelease(root, releaseId, {holdJobsBind = false} = {}) {
   const releasePath = path.join(root, releaseId)
 
   await fs.mkdir(releasePath)
+  if (!holdJobsBind) await fs.writeFile(path.join(releasePath, "jobs.bind"), "ready\n")
   const gate = spawn("mkfifo", [path.join(releasePath, "worker.fifo")])
   assert.equal((await once(gate, "exit"))[0], 0)
   return releasePath
@@ -523,13 +636,24 @@ async function stopFixtureGuardian(statePath) {
     const client = new GuardianClient(identity)
 
     await client.connect()
-    for (const entry of await client.inventory()) {
+    const inventory = await client.inventory()
+
+    try {
+      await client.shutdown()
+      return
+    } catch (error) {
+      if (!(error instanceof Error) || !/requires the committed owner/.test(error.message)) throw error
+      client.disconnect()
+      try { process.kill(-identity.pid, "SIGKILL") } catch (killError) {
+        if (!killError || typeof killError !== "object" || !("code" in killError) || killError.code !== "ESRCH") throw killError
+      }
+    }
+    for (const entry of inventory) {
       if (!entry.status.pid) continue
       try { process.kill(-entry.status.pid, "SIGKILL") } catch (error) {
         if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error
       }
     }
-    await client.shutdown()
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && (error.code === "ENOENT" || error.code === "ESRCH")) return
     throw error
@@ -590,6 +714,43 @@ async function waitForFile(filePath) {
 }
 
 /**
+ * Opens a live WebSocket through the fixture proxy.
+ * @param {number} port - Proxy port.
+ * @returns {Promise<net.Socket>} Upgraded socket.
+ */
+async function openWebSocket(port) {
+  const socket = net.createConnection({host: "127.0.0.1", port})
+
+  await once(socket, "connect")
+  socket.write([
+    "GET /socket HTTP/1.1",
+    "Host: 127.0.0.1",
+    "Connection: Upgrade",
+    "Upgrade: websocket",
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+    "Sec-WebSocket-Version: 13",
+    "\r\n"
+  ].join("\r\n"))
+  const [response] = await once(socket, "data")
+
+  assert.match(String(response), /^HTTP\/1\.1 101 /)
+  return socket
+}
+
+/**
+ * @param {DaemonStatus} status - Daemon status.
+ * @param {string} releaseId - Release id.
+ * @param {string} processId - Process id.
+ * @returns {number} Managed process PID.
+ */
+function releaseProcessPid(status, releaseId, processId) {
+  const pid = status.releases.find((release) => release.releaseId === releaseId)?.processes.find((entry) => entry.id === processId)?.pid
+
+  if (typeof pid !== "number") throw new Error(`Missing ${processId} PID for release ${releaseId}`)
+  return pid
+}
+
+/**
  * @param {number} pid - Exact fixture pid.
  * @returns {boolean} Whether the exact fixture process is alive.
  */
@@ -633,6 +794,20 @@ async function killChild(child) {
  */
 async function runDaemon(configPath) {
   const child = spawnDaemon(configPath)
+  let output = ""
+
+  child.stdout?.setEncoding("utf8").on("data", (chunk) => { output += chunk })
+  child.stderr?.setEncoding("utf8").on("data", (chunk) => { output += chunk })
+  const [code] = await once(child, "exit")
+  return {code, output}
+}
+
+/**
+ * @param {string[]} args - CLI arguments.
+ * @returns {Promise<{code: number, output: string}>} Exit result.
+ */
+async function runCli(args) {
+  const child = spawn(process.execPath, [binPath, ...args], {stdio: ["ignore", "pipe", "pipe"]})
   let output = ""
 
   child.stdout?.setEncoding("utf8").on("data", (chunk) => { output += chunk })

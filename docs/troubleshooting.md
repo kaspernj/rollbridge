@@ -6,17 +6,29 @@
 running daemon has a legacy or mismatched runtime and confirms that the deploy
 was not sent.
 
-**Cause.** A daemon already owns the stable proxy/control socket, but it cannot
-attest to the same immutable Rollbridge runtime as the CLI preparing the deploy.
-Rollbridge does not silently restart it because rebinding the proxy could cause
-downtime or abandon managed processes.
+**Cause.** A daemon already owns the stable proxy/control socket, but Rollbridge
+cannot authenticate and attest an allowed owner transition.
 
-**Fix.** Keep the current release active, explicitly stop and restart the daemon
-with the intended Rollbridge installation during a safe handoff, then retry the
-deploy. If durable runtime preparation itself fails, check permissions for
+**Fix.** With `ownerRecovery`, a genuine pre-owner-replacement Rollbridge daemon
+and guardian can cross the documented one-time disruptive bridge automatically.
+Its existing proxy/control connections may close; successful status reports
+`ownerTransition.mode: "legacy-first-upgrade"`. Keep the incumbent config
+identity unchanged for that first invocation, then apply config/socket changes
+through the now-atomic replacement protocol. Do not treat arbitrary `Unknown
+command`, authentication, transport, malformed-response, or identity errors as
+legacy evidence: those intentionally fail closed and require repairing the
+reported authority or local socket/state problem. Without `ownerRecovery`, plan
+an explicit supervised restart during a safe handoff. If durable runtime
+preparation itself fails, check permissions for
 `--daemon-runtime-path` (default
 `/tmp/rollbridge-<user-id>-<application-hash>-runtime`) before retrying. The directory
 must be private to the invoking user.
+
+If startup instead reports `Rollbridge daemon candidate <pid> exited before
+readiness`, the ensuring CLI observed that exact child exit before it could
+attest status. The diagnostic includes the exit code or signal and spawned
+arguments. Inspect the configured `--daemon-log-path` for that PID's startup
+failure; this is distinct from a control-socket readiness timeout.
 
 Start with these three commands — they diagnose most problems without guessing:
 
@@ -125,7 +137,9 @@ web side and must not stop a still-draining jobs generation.
 
 `status.releaseReferences` reports active and draining releases until full stop;
 Rampway still owns enforcement against on-disk cleanup. With `ownerRecovery`,
-references reconstruct across same-authority daemon process replacement; they do
-not yet transfer across incompatible takeover. If `retirementError` is set,
+references reconstruct across same-authority daemon process replacement and
+transfer across an incompatible `ensure-daemon` owner handoff. They do not
+transfer through the separate destructive `--takeover-owner` path. If
+`retirementError` is set,
 inspect the quiet-hook events. Rollbridge deliberately leaves that generation
 alive rather than signaling arbitrary PIDs or continuing its stop sequence.

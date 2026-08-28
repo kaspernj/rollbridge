@@ -1,12 +1,12 @@
-// @ts-check
+// @ts-nocheck
 
 import crypto from "node:crypto"
 import {spawn} from "node:child_process"
 import net from "node:net"
 import {fileURLToPath} from "node:url"
-import ManagedProcess from "./managed-process.js"
+import ManagedProcess from "../../src/managed-process.js"
 
-const guardianPath = fileURLToPath(new URL("./process-guardian.js", import.meta.url))
+const guardianPath = fileURLToPath(new URL("./pre-split3-process-guardian.js", import.meta.url))
 
 export default class GuardianClient {
   /** @param {{pid?: number, socketPath: string, token: string}} identity - Durable guardian identity. */
@@ -21,15 +21,10 @@ export default class GuardianClient {
     this.idleWaiters = /** @type {(() => void)[]} */ ([])
     this.guardianExitPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.processes = /** @type {Map<string, GuardianProcess>} */ (new Map())
-    this.events = /** @type {Map<string, {reject: (error: Error) => void, resolve: (value: Record<string, import("./json.js").JsonValue>) => void}[]>} */ (new Map())
-    this.eventHandlers = /** @type {Map<string, ((event: Record<string, import("./json.js").JsonValue>) => void)[]>} */ (new Map())
   }
 
   /** Launches a new detached guardian and connects to it after its bind acknowledgement. */
-  /**
-   * @param {{legacyGuardian?: {pid?: number, socketPath: string, token: string}, ownerState?: import("./json.js").JsonValue}} [options] - Optional authenticated legacy backend migration.
-   */
-  async launch(options = {}) {
+  async launch() {
     const child = spawn(process.execPath, [guardianPath, this.socketPath], {detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"]})
 
     this.pid = child.pid
@@ -42,40 +37,13 @@ export default class GuardianClient {
         if (message && typeof message === "object" && "error" in message) reject(new Error(String(message.error)))
         else resolve(undefined)
       })
-      child.send({...options, token: this.token}, (error) => {
+      child.send({token: this.token}, (error) => {
         if (error) reject(error)
       })
     })
     if (child.connected) await new Promise((resolve) => child.once("disconnect", () => resolve(undefined)))
     child.unref()
     await this.connect()
-  }
-
-  /**
-   * Starts a current transaction guardian in front of this authenticated pre-split guardian.
-   * @param {{ownerState: import("./json.js").JsonValue, socketPath: string, token: string}} options - Upgrade identity and exact committed state.
-   * @returns {Promise<GuardianClient>} Current guardian client backed by the legacy supervisor.
-   */
-  async upgradeLegacyGuardian({ownerState, socketPath, token}) {
-    const upgraded = new GuardianClient({socketPath, token})
-
-    await upgraded.launch({
-      legacyGuardian: {pid: this.pid, socketPath: this.socketPath, token: this.token},
-      ownerState
-    })
-    return upgraded
-  }
-
-  /** Abandons an uncommitted upgrade coordinator without touching legacy-owned processes. */
-  async abandonLegacyUpgrade() {
-    await this.request({command: "abandon-legacy-upgrade"})
-    const socket = this.socket
-
-    if (!socket || socket.destroyed) throw new Error("Legacy guardian upgrade disconnected before abandon acknowledgement")
-    const closed = new Promise((resolve) => socket.once("close", resolve))
-
-    socket.end()
-    await closed
   }
 
   /** Connects to an existing guardian. */
@@ -92,8 +60,6 @@ export default class GuardianClient {
     socket.once("close", () => {
       for (const {command, reject} of this.pending.values()) reject(new Error(`Process guardian connection closed while awaiting ${command}`))
       this.pending.clear()
-      for (const waiters of this.events.values()) for (const {reject} of waiters) reject(new Error("Process guardian connection closed"))
-      this.events.clear()
       this.resolveIdleWaiters()
     })
     this.socket = socket
@@ -148,108 +114,9 @@ export default class GuardianClient {
     await this.guardianExitPromise
   }
 
-  /**
-   * @param {number} graceMs - Event-driven handoff grace while the prior owner disconnects.
-   * @param {import("./json.js").JsonValue} authority - Exact owner authority.
-   */
-  async claimOwner(graceMs, authority) {
-    await this.request({authority, command: "claim-owner", graceMs})
-  }
-
-  /** @param {import("./json.js").JsonValue} ownerState - Private transferable owner state. */
-  async publishOwnerState(ownerState) {
-    await this.request({command: "publish-owner-state", ownerState})
-  }
-
-  /**
-   * @param {import("./json.js").JsonValue} authority - Persisted current authority.
-   * @param {import("./json.js").JsonValue} nextAuthority - Requested authority.
-   * @returns {Promise<{ownerState: import("./json.js").JsonValue, replacementId: string}>} Prepared transaction.
-   */
-  async prepareOwnerReplacement(authority, nextAuthority) {
-    return /** @type {{ownerState: import("./json.js").JsonValue, replacementId: string}} */ (await this.request({authority, command: "prepare-owner-replacement", nextAuthority}))
-  }
-
-  /**
-   * @param {string} replacementId - Prepared transaction.
-   * @param {import("./json.js").JsonValue} ownerState - Complete candidate state.
-   * @returns {Promise<{committed: boolean}>} Whether staging completed an ownerless transaction.
-   */
-  async stageOwnerReplacement(replacementId, ownerState) {
-    return /** @type {{committed: boolean}} */ (await this.request({command: "stage-owner-replacement", ownerState, replacementId}))
-  }
-
-  /** @param {string} replacementId - Prepared transaction to abort before staging. */
-  async abortOwnerReplacement(replacementId) {
-    await this.request({command: "abort-owner-replacement", replacementId})
-  }
-
-  /** @param {string} replacementId - Prepared transaction id. */
-  async commitOwnerReplacement(replacementId) {
-    await this.request({command: "commit-owner-replacement", replacementId})
-  }
-
-  /** @param {string} replacementId - Committed transaction awaiting incumbent retirement. */
-  async finalizeOwnerReplacement(replacementId) {
-    await this.request({command: "finalize-owner-replacement", replacementId})
-  }
-
-  /** @param {string} replacementId - Prepared transaction to validate for listener yield. */
-  async validateOwnerReplacement(replacementId) {
-    await this.request({command: "validate-owner-replacement", replacementId})
-  }
-
-  /**
-   * Acquires the committed owner's mutation fence.
-   * @param {string} operation - Control mutation name.
-   * @returns {Promise<string>} Mutation lease id.
-   */
-  async beginOwnerMutation(operation) {
-    const result = /** @type {{mutationId: string}} */ (await this.request({command: "begin-owner-mutation", operation}))
-
-    return result.mutationId
-  }
-
-  /** @param {string} mutationId - Mutation lease id. */
-  async endOwnerMutation(mutationId) {
-    await this.request({command: "end-owner-mutation", mutationId})
-  }
-
-  /** @returns {Promise<{committedReplacementId: string | null, ownerClaimed: boolean}>} Transaction status. */
-  async replacementStatus() {
-    return /** @type {{committedReplacementId: string | null, ownerClaimed: boolean}} */ (await this.request({command: "replacement-status"}))
-  }
-
-  /** @returns {Promise<import("./json.js").JsonValue>} Current private transfer state. */
-  async ownerState() {
-    const result = /** @type {{ownerState: import("./json.js").JsonValue}} */ (await this.request({command: "owner-state"}))
-
-    return result.ownerState
-  }
-
-  /**
-   * @param {string} event - Guardian event name.
-   * @returns {Promise<Record<string, import("./json.js").JsonValue>>} Next event payload.
-   */
-  waitForEvent(event) {
-    return new Promise((resolve, reject) => {
-      const waiters = this.events.get(event) || []
-
-      waiters.push({reject, resolve})
-      this.events.set(event, waiters)
-    })
-  }
-
-  /**
-   * Subscribes to authenticated guardian transaction events.
-   * @param {string} event - Event name.
-   * @param {(event: Record<string, import("./json.js").JsonValue>) => void} handler - Event handler.
-   */
-  onEvent(event, handler) {
-    const handlers = this.eventHandlers.get(event) || []
-
-    handlers.push(handler)
-    this.eventHandlers.set(event, handlers)
+  /** @param {number} graceMs - Event-driven handoff grace while the prior owner disconnects. */
+  async claimOwner(graceMs) {
+    await this.request({command: "claim-owner", graceMs})
   }
 
   /** @returns {Promise<{key: string, provenance: string, status: import("./managed-process.js").ManagedProcessStatus}[]>} Exact guardian-owned inventory. */
@@ -300,11 +167,7 @@ export default class GuardianClient {
 
       this.buffer = this.buffer.slice(newline + 1)
       if (message.event) {
-        if (message.event === "process" || message.event === "status") this.processes.get(message.key)?.onGuardianEvent(message)
-        for (const handler of this.eventHandlers.get(message.event) || []) handler(message)
-        const waiter = this.events.get(message.event)?.shift()
-
-        if (waiter) waiter.resolve(message)
+        this.processes.get(message.key)?.onGuardianEvent(message)
       } else {
         const pending = this.pending.get(message.id)
 
@@ -427,3 +290,4 @@ function asProcessStatus(value) {
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
 }
+

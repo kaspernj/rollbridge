@@ -300,7 +300,7 @@ async function prepareRelease(releasePath, deferredImport) {
 async function installStartupPause(releasePath, pausedPath) {
   const cliPath = path.join(releasePath, "node_modules", "rollbridge", "src", "cli.js")
   const source = await fs.readFile(cliPath, "utf8")
-  const marker = "  await startDaemonProcess({\n"
+  const marker = "  const candidate = await startDaemonProcess({\n"
   const pause = `  await fsPromises.writeFile(${JSON.stringify(pausedPath)}, "paused\\n")\n  await new Promise((resolve) => setTimeout(resolve, 750))\n\n${marker}`
 
   assert.ok(source.includes(marker))

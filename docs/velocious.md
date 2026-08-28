@@ -146,8 +146,9 @@ returns after the replacement is healthy; it is not a full synchronous shutdown.
 Rollbridge implements post-activation quiescence, concurrent endpoints,
 asynchronous generation drain, and `status.releaseReferences`. With
 `ownerRecovery`, a same-authority replacement reconnects to the guardian rather
-than adopting arbitrary PIDs. Atomic incompatible owner/config/socket/package
-upgrades through `--takeover-owner` remain a required follow-up.
+than adopting arbitrary PIDs, and `ensure-daemon` can atomically transfer
+incompatible owner/config/control-socket/package/runtime authority while the
+guardian retains every generation. `--takeover-owner` is not this handoff.
 
 ## Timeouts
 
