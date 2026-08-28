@@ -506,14 +506,18 @@ test("candidate activation retires jobs-main with its workers without waiting fo
 })
 
 test("multiple retired jobs generations keep distinct endpoints and live references until completion", async () => {
-  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerStopDelayMs: 1000})
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
+  /** @type {WebSocket[]} */
+  const sockets = []
 
   try {
     await Promise.all(["v1", "v2", "v3"].map((releaseId) => fs.mkdir(path.join(fixture.root, releaseId))))
-    for (const releaseId of ["v1", "v2", "v3"]) {
-      await daemon.deploy({releaseId, releasePath: path.join(fixture.root, releaseId), revision: releaseId})
-    }
+    await daemon.deploy({releaseId: "v1", releasePath: path.join(fixture.root, "v1"), revision: "v1"})
+    sockets.push(await openWebSocket(daemon))
+    await daemon.deploy({releaseId: "v2", releasePath: path.join(fixture.root, "v2"), revision: "v2"})
+    sockets.push(await openWebSocket(daemon))
+    await daemon.deploy({releaseId: "v3", releasePath: path.join(fixture.root, "v3"), revision: "v3"})
 
     const status = daemon.status()
     const generations = ["v1", "v2", "v3"].map((releaseId) => statusRelease(daemon, releaseId))
@@ -523,27 +527,24 @@ test("multiple retired jobs generations keep distinct endpoints and live referen
     assert.deepEqual(status.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2", "v3"])
     assert.deepEqual(status.releaseReferences.map((reference) => reference.releasePath), ["v1", "v2", "v3"].map((releaseId) => path.join(fixture.root, releaseId)))
 
+    for (const socket of sockets.splice(0)) socket.close()
     await waitFor(() => statusRelease(daemon, "v1").state === "stopped" && statusRelease(daemon, "v2").state === "stopped")
     assert.deepEqual(daemon.status().releaseReferences.map((reference) => reference.releaseId), ["v3"])
   } finally {
+    for (const socket of sockets) socket.close()
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
 })
 
 test("candidate failure preserves old traffic, jobs generation, endpoint, and reference without quiescing it", async () => {
-  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, nonBlockingDrainWorker: true, webDependsOnService: true})
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, nonBlockingDrainWorker: true})
   const daemon = await startDaemon(fixture.config)
 
   try {
     await daemon.deploy({releaseId: "good", releasePath: fixture.root, revision: "good"})
     const before = statusRelease(daemon, "good")
     const beforeService = before.processes.find((processStatus) => processStatus.id === "beacon")
-
-    const webConfig = fixture.config.processes.find((processConfig) => processConfig.id === "web")
-    assert.ok(webConfig?.health)
-    webConfig.health.path = "/never-ready"
-    webConfig.health.timeoutMs = 100
 
     await assert.rejects(() => daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"}), /Health check failed/)
 
