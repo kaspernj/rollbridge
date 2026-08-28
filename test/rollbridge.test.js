@@ -278,6 +278,65 @@ test("singleton processes restart without overlap during deploy", async () => {
   }
 })
 
+test("candidate activation quiesces the old jobs generation before a blocked singleton replacement completes", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, includeSingleton: true, webDependsOnService: true})
+  const singletonGatePath = path.join(fixture.root, "singleton-replacement.gate")
+  const singletonQuietPath = path.join(fixture.root, "singleton-replacement.quiet")
+  const fifo = spawn("mkfifo", [singletonGatePath])
+
+  await once(fifo, "exit")
+
+  const config = normalizeConfig({
+    ...fixture.config,
+    processes: fixture.config.processes.map((processConfig) => processConfig.id === "jobs-main"
+      ? {...processConfig, lifecycle: {quietCommand: `printf 'quiet\\n' > ${JSON.stringify(singletonQuietPath)}; read -r _ < ${JSON.stringify(singletonGatePath)}`}}
+      : processConfig)
+  })
+  const daemon = await startDaemon(config)
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deployPromise
+  let singletonGateReleased = false
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const abortController = new AbortController()
+    const changes = fs.watch(fixture.root, {signal: abortController.signal})
+    const singletonReplacementBlocked = (async () => {
+      try {
+        for await (const change of changes) {
+          if (change.filename === path.basename(singletonQuietPath)) return
+        }
+      } finally {
+        abortController.abort()
+      }
+    })()
+
+    deployPromise = daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    let deploySettled = false
+
+    void deployPromise.then(() => { deploySettled = true }, () => { deploySettled = true })
+    await singletonReplacementBlocked
+    await Promise.resolve()
+
+    assert.equal(daemon.status().activeReleaseId, "v2", "candidate traffic must already be active")
+    assert.equal(deploySettled, false, "deploy must remain pending on singleton replacement")
+    assert.equal(await fs.readFile(fixture.serviceQuietPath, "utf8"), "v1\n", "old jobs-main must quiesce before singleton replacement completes")
+
+    await fs.writeFile(singletonGatePath, "continue\n")
+    singletonGateReleased = true
+    await deployPromise
+  } finally {
+    if (deployPromise && !singletonGateReleased) {
+      await fs.writeFile(singletonGatePath, "continue\n")
+      await deployPromise.catch(() => {})
+    }
+
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("a failed singleton replacement surfaces the error after stopping the old singleton", async () => {
   // The singleton's working directory is per-release; only the v1 directory exists, so
   // the v2 replacement cannot spawn (ENOENT on cwd) and its start() rejects.

@@ -423,7 +423,6 @@ export default class RollbridgeDaemon {
     this.logger("traffic switched", {previousReleaseId: previousRelease ? previousRelease.releaseId : null, releaseId: release.releaseId})
 
     this.refreshServiceDefinitions(release)
-    await this.replaceSingletons(release)
     let retirementFailure
 
     if (previousRelease) {
@@ -435,6 +434,8 @@ export default class RollbridgeDaemon {
         this.logger("release retirement quiescence failed", {error: retirementFailure, releaseId: previousRelease.releaseId})
       }
     }
+
+    await this.replaceSingletons(release)
 
     this.persistState()
 
