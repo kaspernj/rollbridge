@@ -22,8 +22,7 @@ test("guardian bootstrap capability is absent from process argv", async () => {
     assert.ok(!status.includes(fixture.token), "guardian capability must not be exposed through process status/title")
     assert.ok(!inventory.includes(fixture.token), "guardian capability must not be exposed through guardian status")
   } finally {
-    await fixture.client.shutdown().catch(() => {})
-    await fs.rm(fixture.root, {force: true, recursive: true})
+    await cleanupGuardian(fixture)
   }
 })
 
@@ -42,8 +41,7 @@ test("guardian inventory removes only an exact owned provenance", async () => {
     await fixture.client.remove("candidate", candidate.provenance)
     assert.deepEqual(await fixture.client.inventory(), [])
   } finally {
-    await fixture.client.shutdown().catch(() => {})
-    await fs.rm(fixture.root, {force: true, recursive: true})
+    await cleanupGuardian(fixture)
   }
 })
 
@@ -73,7 +71,31 @@ test("guardian shutdown reports an exact owned process stop failure", async () =
     }
     replacement.disconnect()
     fixture.client.disconnect()
+    await fixture.client.guardianExit().catch(() => {})
     await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("successful guardian shutdown closes an authenticated waiting contender before exit", async () => {
+  const fixture = await createGuardian()
+  const contender = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+
+  try {
+    await contender.connect()
+    assert.ok(contender.socket)
+    const contenderClosed = new Promise((resolve) => contender.socket?.once("close", () => resolve(undefined)))
+    const waitingClaim = contender.claimOwner(250)
+    const rejectedClaim = assert.rejects(waitingClaim, /connection closed/)
+
+    await fixture.client.shutdown()
+    await rejectedClaim
+    await contenderClosed
+    await assert.rejects(() => contender.inventory(), /not connected/)
+    await assert.rejects(fs.access(fixture.client.socketPath), {code: "ENOENT"})
+    await fixture.client.guardianExit()
+  } finally {
+    contender.disconnect()
+    await cleanupGuardian(fixture)
   }
 })
 
@@ -86,6 +108,26 @@ async function createGuardian() {
   await client.launch()
   await client.claimOwner(0)
   return {client, root, token}
+}
+
+/** @param {{client: GuardianClient, root: string}} fixture - Exact guardian fixture. */
+async function cleanupGuardian(fixture) {
+  let stopped = false
+
+  try {
+    await fixture.client.shutdown()
+    stopped = true
+  } catch (_error) {
+    // Exact fixture cleanup continues below.
+  }
+  fixture.client.disconnect()
+  if (!stopped && fixture.client.pid) {
+    try { process.kill(fixture.client.pid, "SIGKILL") } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error
+    }
+  }
+  await fixture.client.guardianExit().catch(() => {})
+  await fs.rm(fixture.root, {force: true, recursive: true})
 }
 
 /**

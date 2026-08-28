@@ -19,6 +19,7 @@ export default class GuardianClient {
     this.nextId = 0
     this.pending = /** @type {Map<number, {reject: (error: Error) => void, resolve: (value: import("./json.js").JsonValue) => void}>} */ (new Map())
     this.idleWaiters = /** @type {(() => void)[]} */ ([])
+    this.guardianExitPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.processes = /** @type {Map<string, GuardianProcess>} */ (new Map())
   }
 
@@ -27,6 +28,7 @@ export default class GuardianClient {
     const child = spawn(process.execPath, [guardianPath, this.socketPath], {detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"]})
 
     this.pid = child.pid
+    this.guardianExitPromise = new Promise((resolve) => child.once("exit", () => resolve(undefined)))
 
     await new Promise((resolve, reject) => {
       child.once("error", reject)
@@ -98,6 +100,12 @@ export default class GuardianClient {
     }
     await this.request({command: "shutdown"})
     this.socket?.end()
+  }
+
+  /** Waits for a guardian launched by this client to exit. */
+  async guardianExit() {
+    if (!this.guardianExitPromise) throw new Error("Guardian exit is observable only from the launching client")
+    await this.guardianExitPromise
   }
 
   /** @param {number} graceMs - Event-driven handoff grace while the prior owner disconnects. */

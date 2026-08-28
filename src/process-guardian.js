@@ -39,6 +39,7 @@ const processes = new Map()
 const clients = new Set()
 /** @type {net.Socket | undefined} */
 let ownerClient
+let shuttingDown = false
 /** @type {{reject: (error: Error) => void, resolve: (value: {claimed: boolean}) => void, socket: net.Socket, timer: ReturnType<typeof setTimeout>}[]} */
 const claimWaiters = []
 
@@ -101,10 +102,12 @@ async function handleLine(socket, line) {
     request = /** @type {GuardianRequest} */ (JSON.parse(line))
     if (request.token !== token) throw new Error("Guardian authentication failed")
     const result = await execute(request, socket)
+    const response = `${JSON.stringify({id: request.id, result})}\n`
 
-    socket.write(`${JSON.stringify({id: request.id, result})}\n`)
+    if (request.command === "shutdown") await finishShutdown(socket, response)
+    else socket.write(response)
   } catch (error) {
-    socket.write(`${JSON.stringify({error: error instanceof Error ? error.message : String(error), id: request?.id})}\n`)
+    if (!socket.destroyed) socket.write(`${JSON.stringify({error: error instanceof Error ? error.message : String(error), id: request?.id})}\n`)
   }
 }
 
@@ -114,6 +117,8 @@ async function handleLine(socket, line) {
  * @returns {Promise<import("./json.js").JsonValue>} Command result.
  */
 async function execute(request, socket) {
+  if (shuttingDown) throw new Error("Process guardian is shutting down")
+
   if (request.command === "claim-owner") {
     if (!ownerClient) {
       ownerClient = socket
@@ -133,13 +138,17 @@ async function execute(request, socket) {
   }
 
   if (request.command === "shutdown") {
-    const results = await Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
-    const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
+    shuttingDown = true
+    try {
+      const results = await Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
+      const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
 
-    if (errors.length > 0) throw new AggregateError(errors, `Guardian failed to stop ${errors.length} owned process${errors.length === 1 ? "" : "es"}: ${errors.map((error) => errorMessage(error instanceof Error ? error : String(error))).join("; ")}`)
-    server.close()
-    await fs.rm(socketPath, {force: true})
-    return {stopped: true}
+      if (errors.length > 0) throw new AggregateError(errors, `Guardian failed to stop ${errors.length} owned process${errors.length === 1 ? "" : "es"}: ${errors.map((error) => errorMessage(error instanceof Error ? error : String(error))).join("; ")}`)
+      return {stopped: true}
+    } catch (error) {
+      shuttingDown = false
+      throw error
+    }
   }
 
   if (request.command === "inventory") {
@@ -217,6 +226,27 @@ async function execute(request, socket) {
 
   broadcast({event: "status", key: request.key, status})
   return status
+}
+
+/**
+ * Flushes the successful response, closes every established authority channel, and then unlinks.
+ * @param {net.Socket} caller - Shutdown requester.
+ * @param {string} response - Serialized successful response.
+ */
+async function finishShutdown(caller, response) {
+  const serverClosed = new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error)
+      else resolve(undefined)
+    })
+  })
+
+  for (const client of clients) {
+    if (client !== caller) client.destroy()
+  }
+  await new Promise((resolve) => caller.end(response, () => resolve(undefined)))
+  await serverClosed
+  await fs.rm(socketPath, {force: true})
 }
 
 /** @param {Record<string, import("./json.js").JsonValue>} event - Event payload. */
