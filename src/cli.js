@@ -930,18 +930,20 @@ async function waitForDaemonStatus(config, timeoutMs, expected = {}) {
   let lastError = /** @type {Error | undefined} */ (undefined)
 
   while (Date.now() < deadline) {
-    try {
-      const status = await daemonStatus(config)
+    let status
 
-      if (status) {
-        if (expected.runtime && !compatibleDaemonRuntime(status, expected.runtime)) {
-          if (!expected.configDigest) assertCompatibleDaemonRuntime(status, expected.runtime)
-        } else if (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest)) {
-          return status
-        }
-      }
+    try {
+      status = await daemonStatus(config)
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
+    }
+
+    if (status) {
+      if (expected.runtime && !compatibleDaemonRuntime(status, expected.runtime)) {
+        if (!expected.configDigest) assertCompatibleDaemonRuntime(status, expected.runtime)
+      } else if (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest)) {
+        return status
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 100))
