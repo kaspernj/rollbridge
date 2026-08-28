@@ -143,7 +143,24 @@ single fenced guardian/control-socket handoff. Config identity, process topology
 control path, and package/runtime identity may change; `statePath` remains the
 unchanged transaction anchor. Failures before commit leave the old owner serving.
 After commit, drains resume under their original release configs and never block
-the command. Compatible per-deploy config reloads remain unchanged.
+the command. A monotonic guardian revision rejects a stale candidate if owner
+state changes after prepare. Listener-owned HTTP/WebSocket counts remain fenced
+to their releases until the retired listener reports them drained, preventing a
+later deploy from stopping the connected process early. Compatible per-deploy
+config reloads remain unchanged.
+
+The first upgrade from an authenticated pre-replacement Rollbridge guardian and
+daemon uses an explicitly disruptive compatibility bridge because that legacy
+owner cannot transfer listeners on Node 20. Rollbridge attests the exact guardian
+and daemon processes, sockets, runtime/config authority, and durable process
+registrations before retiring the legacy listeners. Managed process PIDs and
+release state remain supervised, but live proxy/control connections may close.
+The resulting status includes `ownerTransition: {disruptive: true, mode:
+"legacy-first-upgrade", ...}`. The bridge only accepts the incumbent config
+identity; retry config or socket changes after the protocol upgrade, when the
+normal atomic handoff applies. Other guardian/auth/transport/identity failures
+remain fail-closed.
+
 Without `ownerRecovery`, `statePath` retains the advisory orphan behavior above.
 
 ## `legacyTakeover`

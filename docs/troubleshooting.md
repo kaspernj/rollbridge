@@ -6,14 +6,20 @@
 running daemon has a legacy or mismatched runtime and confirms that the deploy
 was not sent.
 
-**Cause.** A daemon already owns the stable proxy/control socket, but it cannot
-attest to the same immutable Rollbridge runtime as the CLI preparing the deploy.
-Rollbridge does not silently restart it because rebinding the proxy could cause
-downtime or abandon managed processes.
+**Cause.** A daemon already owns the stable proxy/control socket, but Rollbridge
+cannot authenticate and attest an allowed owner transition.
 
-**Fix.** Keep the current release active, explicitly stop and restart the daemon
-with the intended Rollbridge installation during a safe handoff, then retry the
-deploy. If durable runtime preparation itself fails, check permissions for
+**Fix.** With `ownerRecovery`, a genuine pre-owner-replacement Rollbridge daemon
+and guardian can cross the documented one-time disruptive bridge automatically.
+Its existing proxy/control connections may close; successful status reports
+`ownerTransition.mode: "legacy-first-upgrade"`. Keep the incumbent config
+identity unchanged for that first invocation, then apply config/socket changes
+through the now-atomic replacement protocol. Do not treat arbitrary `Unknown
+command`, authentication, transport, malformed-response, or identity errors as
+legacy evidence: those intentionally fail closed and require repairing the
+reported authority or local socket/state problem. Without `ownerRecovery`, plan
+an explicit supervised restart during a safe handoff. If durable runtime
+preparation itself fails, check permissions for
 `--daemon-runtime-path` (default
 `/tmp/rollbridge-<user-id>-<application-hash>-runtime`) before retrying. The directory
 must be private to the invoking user.

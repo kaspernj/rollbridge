@@ -102,14 +102,23 @@ replaced candidate-first: the guardian retains active and draining generations,
 the candidate binds and validates its listeners, and an authenticated fenced
 transaction commits guardian authority and the final control socket. A lost
 control response is accepted only when the guardian confirms the exact committed
-transaction id. A legacy or mismatched daemon without that durable contract
-causes the command to fail before any deploy is sent.
+transaction id. The first authenticated upgrade from a genuine pre-replacement
+guardian/daemon is the sole exception: `ensure-daemon` preserves its exact
+guardian-owned processes but deliberately retires the old listeners before the
+Node 20 candidate binds, so existing proxy/control connections may close.
+Successful status JSON records this as `ownerTransition.disruptive: true` and
+`ownerTransition.mode: "legacy-first-upgrade"`. This one-time bridge requires
+the incumbent config identity unchanged; make config/socket changes in a second,
+atomic invocation. Auth, transport, malformed-response, arbitrary unknown-command,
+and authority failures do not qualify and fail before any deploy is sent.
 
 - `--daemon-log-path <path>` — file the detached daemon's stdout/stderr is
   appended to. Default: `/tmp/rollbridge-<application>.log`. See
   [`logging.md`](logging.md) for the log format and rotation guidance.
 - `--daemon-pid-path <path>` — file the detached daemon's PID is written to.
-  Default: `/tmp/rollbridge-<application>.pid`.
+  Default: `/tmp/rollbridge-<application>.pid`. During replacement, the file
+  continues to name the incumbent until the reachable winner reports and
+  publishes its exact `daemonPid`.
 - `--daemon-runtime-path <path>` — parent directory for content-addressed daemon
   runtime snapshots. Default:
   `/tmp/rollbridge-<user-id>-<application-hash>-runtime`. The directory must be owned

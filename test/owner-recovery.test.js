@@ -436,6 +436,9 @@ test("ensure-daemon atomically replaces an incompatible owner without losing ret
   const daemonPidPath = path.join(fixture.root, "replacement.pid")
   let owner = spawnDaemon(fixture.configPath)
   const processGroups = new Set()
+  let cleanupControlPath = oldControlPath
+  let retainedConnection
+  let retainedConnectionClose
 
   try {
     await waitForLog(owner, "control socket listening")
@@ -443,6 +446,12 @@ test("ensure-daemon atomically replaces an incompatible owner without losing ret
     const v2Path = await prepareRelease(fixture.root, "v2")
 
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldControlPath})
+    const activeV1 = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: oldControlPath}))
+    retainedConnection = await openWebSocket(/** @type {{port: number}} */ (activeV1.proxy).port)
+    retainedConnectionClose = once(retainedConnection, "close")
+    let retainedConnectionClosed = false
+
+    retainedConnection.once("close", () => { retainedConnectionClosed = true })
     await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldControlPath})
     const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: oldControlPath}))
 
@@ -469,7 +478,8 @@ test("ensure-daemon atomically replaces an incompatible owner without losing ret
       "--daemon-runtime-path", runtimePath,
       "--daemon-start-timeout-ms", "5000"
     ])
-    assert.equal(replacement.code, 0, replacement.output)
+    assert.equal(replacement.code, 0, `${replacement.output}\n${await fs.readFile(daemonLogPath, "utf8")}`)
+    cleanupControlPath = newControlPath
 
     const after = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: newControlPath}))
 
@@ -478,6 +488,7 @@ test("ensure-daemon atomically replaces an incompatible owner without losing ret
     assert.deepEqual(after.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)), before.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)))
     assert.equal(after.services[0]?.process.pid, before.services[0]?.process.pid)
     assert.equal(after.singletons[0]?.process.pid, before.singletons[0]?.process.pid)
+    assert.equal(retainedConnectionClosed, false, "listener-owned WebSocket must remain supervised across replacement")
 
     const v3Path = await prepareRelease(fixture.root, "v3")
     await sendControlCommand({command: {command: "deploy", releaseId: "v3", releasePath: v3Path, revision: "v3"}, path: newControlPath})
@@ -485,13 +496,30 @@ test("ensure-daemon atomically replaces an incompatible owner without losing ret
 
     assert.equal(deployed.activeReleaseId, "v3")
     assert.deepEqual(deployed.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2", "v3"])
+    assert.equal(releaseProcessPid(deployed, "v1", "web"), releaseProcessPid(before, "v1", "web"))
+    assert.equal(retainedConnectionClosed, false, "a later deploy must not stop a process with a transferred live connection")
 
+    retainedConnection.destroy()
+    await retainedConnectionClose
     await Promise.all(["v1", "v2"].map((releaseId) => fs.writeFile(path.join(fixture.root, releaseId, "worker.fifo"), "drained\n")))
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newControlPath})
     await fs.writeFile(path.join(v3Path, "worker.fifo"), "drained\n")
     await shutdown
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    retainedConnection?.destroy()
+    await retainedConnectionClose?.catch(() => undefined)
+    try {
+      const status = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: cleanupControlPath}))
+      const shutdown = sendControlCommand({command: {command: "shutdown"}, path: cleanupControlPath})
+
+      await Promise.all([
+        ...status.releaseReferences.map(({releaseId}) => fs.writeFile(path.join(fixture.root, releaseId, "worker.fifo"), "drained\n").catch(() => undefined)),
+        shutdown
+      ])
+    } catch (_error) {
+      // Exact process and guardian cleanup below handles a daemon that failed before control publication.
+    }
+    await killChild(owner)
     for (const pid of processGroups) {
       try { process.kill(-pid, "SIGKILL") } catch (_error) { /* Exact managed group already exited. */ }
     }
@@ -596,13 +624,24 @@ async function stopFixtureGuardian(statePath) {
     const client = new GuardianClient(identity)
 
     await client.connect()
-    for (const entry of await client.inventory()) {
+    const inventory = await client.inventory()
+
+    try {
+      await client.shutdown()
+      return
+    } catch (error) {
+      if (!(error instanceof Error) || !/requires the committed owner/.test(error.message)) throw error
+      client.disconnect()
+      try { process.kill(-identity.pid, "SIGKILL") } catch (killError) {
+        if (!killError || typeof killError !== "object" || !("code" in killError) || killError.code !== "ESRCH") throw killError
+      }
+    }
+    for (const entry of inventory) {
       if (!entry.status.pid) continue
       try { process.kill(-entry.status.pid, "SIGKILL") } catch (error) {
         if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error
       }
     }
-    await client.shutdown()
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && (error.code === "ENOENT" || error.code === "ESRCH")) return
     throw error
@@ -660,6 +699,43 @@ async function waitForFile(filePath) {
   } finally {
     await watcher.return?.()
   }
+}
+
+/**
+ * Opens a live WebSocket through the fixture proxy.
+ * @param {number} port - Proxy port.
+ * @returns {Promise<net.Socket>} Upgraded socket.
+ */
+async function openWebSocket(port) {
+  const socket = net.createConnection({host: "127.0.0.1", port})
+
+  await once(socket, "connect")
+  socket.write([
+    "GET /socket HTTP/1.1",
+    "Host: 127.0.0.1",
+    "Connection: Upgrade",
+    "Upgrade: websocket",
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+    "Sec-WebSocket-Version: 13",
+    "\r\n"
+  ].join("\r\n"))
+  const [response] = await once(socket, "data")
+
+  assert.match(String(response), /^HTTP\/1\.1 101 /)
+  return socket
+}
+
+/**
+ * @param {DaemonStatus} status - Daemon status.
+ * @param {string} releaseId - Release id.
+ * @param {string} processId - Process id.
+ * @returns {number} Managed process PID.
+ */
+function releaseProcessPid(status, releaseId, processId) {
+  const pid = status.releases.find((release) => release.releaseId === releaseId)?.processes.find((entry) => entry.id === processId)?.pid
+
+  if (typeof pid !== "number") throw new Error(`Missing ${processId} PID for release ${releaseId}`)
+  return pid
 }
 
 /**

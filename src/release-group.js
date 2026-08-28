@@ -54,6 +54,8 @@ export default class ReleaseGroup extends EventEmitter {
     this.state = /** @type {ReleaseState} */ ("starting")
     this.connectionCount = 0
     this.connections = /** @type {ReleaseConnections} */ ({http: 0, websocket: 0})
+    this.transferredConnections = /** @type {ReleaseConnections} */ ({http: 0, websocket: 0})
+    this.ownerHandoffPaused = false
     this.processes = /** @type {Map<string, ManagedProcess>} */ (new Map())
     this.handoffServiceIds = /** @type {Set<string>} */ (new Set())
     this.nonBlockingDrainIds = /** @type {Set<string>} */ (new Set())
@@ -138,6 +140,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.drainStartedAt = snapshot.drainStartedAt
     this.retirementError = snapshot.retirementError
     this.stoppedAt = snapshot.stoppedAt
+    this.setTransferredConnections(snapshot.connections)
 
     for (const processStatus of snapshot.processes) {
       const baseId = processStatus.id.replace(/#\d+$/, "")
@@ -414,6 +417,48 @@ export default class ReleaseGroup extends EventEmitter {
   }
 
   /**
+   * Reconciles connections still owned by a prior daemon listener.
+   * @param {ReleaseConnections} connections - Exact incumbent listener counts.
+   */
+  setTransferredConnections(connections) {
+    const http = connections?.http
+    const websocket = connections?.websocket
+
+    if (!Number.isSafeInteger(http) || http < 0 || !Number.isSafeInteger(websocket) || websocket < 0) {
+      throw new Error(`Persisted release ${this.releaseId} has invalid listener connection counts`)
+    }
+    const previous = this.transferredConnections
+
+    this.connectionCount += http + websocket - previous.http - previous.websocket
+    this.connections.http += http - previous.http
+    this.connections.websocket += websocket - previous.websocket
+    this.transferredConnections = {http, websocket}
+    if (this.connectionCount === 0) this.emit("drained")
+  }
+
+  /** @returns {boolean} Whether a prior daemon still owns live connections for this release. */
+  hasTransferredConnections() {
+    return this.transferredConnections.http + this.transferredConnections.websocket > 0
+  }
+
+  /** Pauses only daemon-local connection-dependent retirement at owner handoff. */
+  pauseDrainForOwnerHandoff() {
+    if (this.state !== "draining") return
+    this.ownerHandoffPaused = true
+    this.emit("ownerHandoff")
+  }
+
+  /** @returns {boolean} Whether retirement completion belongs to the prepared successor. */
+  isDrainPausedForOwnerHandoff() {
+    return this.ownerHandoffPaused
+  }
+
+  /** Resumes a drain after its prepared owner handoff aborts. */
+  resumeDrainAfterOwnerHandoff() {
+    this.ownerHandoffPaused = false
+  }
+
+  /**
    * Starts draining and stops once existing connections close or timeout.
    * @param {number} timeoutMs - Drain timeout.
    * @param {import("./config.js").RollbridgeConfig} [config] - Refreshed config governing retirement.
@@ -434,12 +479,23 @@ export default class ReleaseGroup extends EventEmitter {
 
     if (this.connectionCount > 0) {
       await new Promise((resolve) => {
-        const timer = setTimeout(resolve, timeoutMs)
-        this.once("drained", () => {
+        let timer = /** @type {ReturnType<typeof setTimeout> | undefined} */ (undefined)
+        const completed = () => {
           clearTimeout(timer)
+          this.off("drained", completed)
+          this.off("ownerHandoff", completed)
           resolve(undefined)
-        })
+        }
+
+        this.once("drained", completed)
+        this.once("ownerHandoff", completed)
+        timer = setTimeout(completed, timeoutMs)
       })
+    }
+
+    if (this.ownerHandoffPaused) {
+      void Promise.allSettled(nonBlockingStops)
+      return
     }
 
     await Promise.allSettled(connectionDependent.map((processInstance) => processInstance.stop()))

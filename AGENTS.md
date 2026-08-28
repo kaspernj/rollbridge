@@ -47,7 +47,11 @@ preserves and reconstructs active/draining generations after daemon process
 exit. With `ownerRecovery` and the same `statePath` transaction anchor,
 `ensure-daemon` also replaces incompatible config, control-socket, package, and
 runtime owners through a guardian-fenced candidate-first handoff while retaining
-active and draining generations. `--takeover-owner` remains a destructive
+active and draining generations. The first authenticated upgrade from a genuine
+pre-replacement guardian/daemon is a documented disruptive compatibility bridge:
+it preserves exact supervised processes and state, but may close proxy/control
+connections. Every protocol-capable replacement after that bridge is atomic.
+`--takeover-owner` remains a destructive
 external-supervisor migration path, not that atomic handoff.
 
 ## Validation and publication

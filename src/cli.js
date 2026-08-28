@@ -5,7 +5,7 @@ import fsPromises from "node:fs/promises"
 import {createHash} from "node:crypto"
 import path from "node:path"
 import {spawn} from "node:child_process"
-import {Command} from "commander"
+import {Command, Option} from "commander"
 import RollbridgeDaemon, {ownerConfigDigest} from "./daemon.js"
 import {loadDaemonRuntimeIdentity, prepareDaemonRuntime} from "./daemon-runtime.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
@@ -39,12 +39,19 @@ export async function runCli(argv) {
     .option("--boot-attestation <digest>", "Opaque bootstrap ownership attestation (requires the complete bootstrap release tuple)")
     .option("--takeover-owner", "Boot and health-check before retiring the current external owner")
     .option("--replace-owner", "Resume a prepared durable owner replacement")
+    .addOption(new Option("--legacy-incumbent-pid <pid>").hideHelp())
     .action(async (options) => {
       const bootstrap = await validateDaemonBootstrapOptions(options)
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const runtime = await loadDaemonRuntimeIdentity(process.env.ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST)
-      const daemon = new RollbridgeDaemon({bootstrap, config, configPath, runtime})
+      const daemon = new RollbridgeDaemon({
+        bootstrap,
+        config,
+        configPath,
+        legacyIncumbentPid: positiveIntegerOrUndefined(options.legacyIncumbentPid, "legacy incumbent pid"),
+        runtime
+      })
 
       if (options.takeoverOwner && (!bootstrap || !bootstrap.attestation)) throw new Error("Daemon --takeover-owner requires the complete bootstrap release tuple and --boot-attestation.")
 
@@ -844,12 +851,15 @@ async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtim
   const replacement = Boolean(config.ownerRecovery && (existingStatus || (persistedRecovery && typeof persistedRecovery === "object" && !Array.isArray(persistedRecovery) && (
     persistedRecovery.configDigest !== expectedConfigDigest || !compatibleDaemonRuntime(/** @type {Record<string, import("./json.js").JsonValue>} */ (persistedOwner), runtime)
   ))))
+  const resolvedPidPath = pidPath || defaultDaemonPidPath(config)
+  const legacyIncumbentPid = replacement ? await readDaemonPid(resolvedPidPath) : undefined
 
   await startDaemonProcess({
     configPath,
     logPath: logPath || defaultDaemonLogPath(config),
-    pidPath: pidPath || defaultDaemonPidPath(config),
+    pidPath: resolvedPidPath,
     replacement,
+    legacyIncumbentPid,
     runtime
   })
 
@@ -859,6 +869,13 @@ async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtim
   })
 
   assertCompatibleDaemonRuntime(startedStatus, runtime)
+  const startedPid = positiveIntegerOrUndefined(
+    typeof startedStatus.daemonPid === "number" ? String(startedStatus.daemonPid) : undefined,
+    "started daemon status PID"
+  )
+
+  if (!startedPid) throw new Error("Started Rollbridge daemon did not report its exact PID")
+  await fsPromises.writeFile(resolvedPidPath, `${startedPid}\n`)
   return startedStatus
 }
 
@@ -890,10 +907,11 @@ async function daemonStatus(config) {
  * @param {string} args.logPath - Log file path.
  * @param {string} args.pidPath - PID file path.
  * @param {boolean} args.replacement - Whether to run the incompatible replacement transaction.
+ * @param {number | undefined} args.legacyIncumbentPid - Exact incumbent recorded before candidate spawn.
  * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} args.runtime - Prepared runtime.
  * @returns {Promise<void>} Resolves after the child has been spawned.
  */
-async function startDaemonProcess({configPath, logPath, pidPath, replacement = false, runtime}) {
+async function startDaemonProcess({configPath, legacyIncumbentPid, logPath, pidPath, replacement = false, runtime}) {
   await fsPromises.mkdir(path.dirname(logPath), {recursive: true})
   await fsPromises.mkdir(path.dirname(pidPath), {recursive: true})
 
@@ -901,7 +919,11 @@ async function startDaemonProcess({configPath, logPath, pidPath, replacement = f
   const stderrFd = fs.openSync(logPath, "a")
 
   try {
-    const child = spawn(process.execPath, [path.join(runtime.path, "bin", "rollbridge"), "daemon", "--config", configPath, ...(replacement ? ["--replace-owner"] : [])], {
+    const child = spawn(process.execPath, [
+      path.join(runtime.path, "bin", "rollbridge"), "daemon", "--config", configPath,
+      ...(replacement ? ["--replace-owner"] : []),
+      ...(legacyIncumbentPid ? ["--legacy-incumbent-pid", String(legacyIncumbentPid)] : [])
+    ], {
       detached: true,
       env: {...process.env, ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST: path.join(runtime.path, "runtime.json")},
       stdio: ["ignore", stdoutFd, stderrFd]
@@ -909,13 +931,46 @@ async function startDaemonProcess({configPath, logPath, pidPath, replacement = f
 
     child.unref()
 
-    if (child.pid) {
+    if (child.pid && !replacement) {
       await fsPromises.writeFile(pidPath, `${child.pid}\n`)
     }
   } finally {
     fs.closeSync(stdoutFd)
     fs.closeSync(stderrFd)
   }
+}
+
+/**
+ * Reads an exact daemon PID before the candidate overwrites the PID file.
+ * @param {string} pidPath - Daemon PID file.
+ * @returns {Promise<number | undefined>} Positive PID when the file exists and is valid.
+ */
+async function readDaemonPid(pidPath) {
+  let value
+
+  try {
+    value = await fsPromises.readFile(pidPath, "utf8")
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined
+    throw error
+  }
+  const trimmed = value.trim()
+
+  if (!/^\d+$/.test(trimmed)) throw new Error(`Daemon PID file ${pidPath} does not contain one positive integer`)
+  return positiveIntegerOrUndefined(trimmed, `daemon PID file ${pidPath}`)
+}
+
+/**
+ * @param {string | undefined} value - Integer text.
+ * @param {string} label - Diagnostic label.
+ * @returns {number | undefined} Positive integer or undefined.
+ */
+function positiveIntegerOrUndefined(value, label) {
+  if (value === undefined) return undefined
+  const parsed = Number(value)
+
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${label} must be a positive integer`)
+  return parsed
 }
 
 /**

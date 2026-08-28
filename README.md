@@ -222,6 +222,23 @@ transfer guardian authority while every retained generation keeps its exact
 release reference and drains asynchronously. The old `statePath` is the durable
 transaction anchor and cannot change during this handoff. The `0600` state file
 contains the guardian capability; protect its directory accordingly.
+Prepared transactions fence owner mutations and compare a monotonic guardian
+state revision at staging. Existing HTTP/WebSocket connections remain owned by
+the retired listener process, while their counts transfer to the new daemon so
+later deploys continue to honor the original drain boundary.
+
+There is one explicit compatibility boundary: the first upgrade from a genuine
+pre-owner-replacement Rollbridge guardian and daemon cannot share its listeners
+on supported Node 20. After authenticating the guardian, exact daemon PID/socket,
+runtime authority, and durable owned-process state, `ensure-daemon` performs a
+one-time **disruptive** bridge. Existing proxy/control connections may close,
+the retained processes keep their exact PIDs under guardian supervision, and
+`status.ownerTransition` reports `mode: "legacy-first-upgrade"` with
+`disruptive: true`. The bridge requires the existing config identity unchanged;
+apply config/socket changes in a subsequent invocation, which uses the atomic
+protocol. Unknown commands, auth/transport failures, malformed responses, and
+identity mismatches fail closed without entering this bridge. Every replacement
+after this protocol upgrade remains candidate-first and atomic.
 
 ```js
 statePath: "/var/lib/rollbridge/ticket-server.state.json",
