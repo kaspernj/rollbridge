@@ -40,6 +40,11 @@ const clients = new Set()
 /** @type {net.Socket | undefined} */
 let ownerClient
 let shuttingDown = false
+/** @type {net.Socket | undefined} */
+let shutdownClient
+let shutdownFinalizing = false
+/** @type {Promise<void> | undefined} */
+let serverClosed
 /** @type {{reject: (error: Error) => void, resolve: (value: {claimed: boolean}) => void, socket: net.Socket, timer: ReturnType<typeof setTimeout>}[]} */
 const claimWaiters = []
 
@@ -59,8 +64,9 @@ const server = net.createServer((socket) => {
     }
     if (ownerClient === socket) {
       ownerClient = undefined
-      grantNextOwner()
+      if (!shuttingDown) grantNextOwner()
     }
+    if (shutdownClient === socket) void finishShutdown()
   })
   socket.on("data", (chunk) => {
     buffer += chunk
@@ -102,10 +108,8 @@ async function handleLine(socket, line) {
     request = /** @type {GuardianRequest} */ (JSON.parse(line))
     if (request.token !== token) throw new Error("Guardian authentication failed")
     const result = await execute(request, socket)
-    const response = `${JSON.stringify({id: request.id, result})}\n`
 
-    if (request.command === "shutdown") await finishShutdown(socket, response)
-    else socket.write(response)
+    socket.write(`${JSON.stringify({id: request.id, result})}\n`)
   } catch (error) {
     if (!socket.destroyed) socket.write(`${JSON.stringify({error: error instanceof Error ? error.message : String(error), id: request?.id})}\n`)
   }
@@ -144,8 +148,10 @@ async function execute(request, socket) {
       const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
 
       if (errors.length > 0) throw new AggregateError(errors, `Guardian failed to stop ${errors.length} owned process${errors.length === 1 ? "" : "es"}: ${errors.map((error) => errorMessage(error instanceof Error ? error : String(error))).join("; ")}`)
+      beginSuccessfulShutdown(socket)
       return {stopped: true}
     } catch (error) {
+      shutdownClient = undefined
       shuttingDown = false
       throw error
     }
@@ -229,12 +235,12 @@ async function execute(request, socket) {
 }
 
 /**
- * Flushes the successful response, closes every established authority channel, and then unlinks.
- * @param {net.Socket} caller - Shutdown requester.
- * @param {string} response - Serialized successful response.
+ * Stops accepting connections and closes every authority channel except the response caller.
+ * @param {net.Socket} caller - Shutdown requester retained until it receives the response.
  */
-async function finishShutdown(caller, response) {
-  const serverClosed = new Promise((resolve, reject) => {
+function beginSuccessfulShutdown(caller) {
+  shutdownClient = caller
+  serverClosed = new Promise((resolve, reject) => {
     server.close((error) => {
       if (error) reject(error)
       else resolve(undefined)
@@ -244,7 +250,14 @@ async function finishShutdown(caller, response) {
   for (const client of clients) {
     if (client !== caller) client.destroy()
   }
-  await new Promise((resolve) => caller.end(response, () => resolve(undefined)))
+  if (caller.destroyed) void finishShutdown()
+}
+
+/** Completes shutdown after the caller has received success and closed its side. */
+async function finishShutdown() {
+  if (shutdownFinalizing) return
+  shutdownFinalizing = true
+  for (const client of clients) client.destroy()
   await serverClosed
   await fs.rm(socketPath, {force: true})
 }

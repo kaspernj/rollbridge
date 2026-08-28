@@ -17,7 +17,7 @@ export default class GuardianClient {
     this.socket = /** @type {net.Socket | undefined} */ (undefined)
     this.buffer = ""
     this.nextId = 0
-    this.pending = /** @type {Map<number, {reject: (error: Error) => void, resolve: (value: import("./json.js").JsonValue) => void}>} */ (new Map())
+    this.pending = /** @type {Map<number, {command: string, reject: (error: Error) => void, resolve: (value: import("./json.js").JsonValue) => void}>} */ (new Map())
     this.idleWaiters = /** @type {(() => void)[]} */ ([])
     this.guardianExitPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.processes = /** @type {Map<string, GuardianProcess>} */ (new Map())
@@ -58,7 +58,7 @@ export default class GuardianClient {
     })
     socket.on("data", (chunk) => this.onData(String(chunk)))
     socket.once("close", () => {
-      for (const {reject} of this.pending.values()) reject(new Error("Process guardian connection closed"))
+      for (const {command, reject} of this.pending.values()) reject(new Error(`Process guardian connection closed while awaiting ${command}`))
       this.pending.clear()
       this.resolveIdleWaiters()
     })
@@ -85,7 +85,7 @@ export default class GuardianClient {
     if (!this.socket || this.socket.destroyed) throw new Error("Process guardian is not connected")
     this.nextId += 1
     const id = this.nextId
-    const response = new Promise((resolve, reject) => this.pending.set(id, {reject, resolve}))
+    const response = new Promise((resolve, reject) => this.pending.set(id, {command: String(command.command), reject, resolve}))
 
     this.socket.write(`${JSON.stringify({...command, id, token: this.token})}\n`)
     return await response
@@ -99,7 +99,13 @@ export default class GuardianClient {
       })
     }
     await this.request({command: "shutdown"})
-    this.socket?.end()
+    const socket = this.socket
+
+    if (!socket || socket.destroyed) throw new Error("Process guardian disconnected before shutdown acknowledgement")
+    const closed = new Promise((resolve) => socket.once("close", () => resolve(undefined)))
+
+    socket.end()
+    await closed
   }
 
   /** Waits for a guardian launched by this client to exit. */

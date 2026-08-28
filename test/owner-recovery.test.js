@@ -79,7 +79,7 @@ test("replacement owner reconstructs one active and two draining generations aft
     await shutdown
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await killChild(owner)
     for (const pid of managedProcessGroups) {
       try {
         process.kill(-pid, "SIGKILL")
@@ -124,7 +124,7 @@ test("owner recovery rejects config identity mismatch without changing the valid
     await shutdown
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await killChild(owner)
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact group already exited. */ }
     }
@@ -163,7 +163,7 @@ test("failed recovery bootstrap keeps the reconstructed active generation servin
     await shutdown
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await killChild(owner)
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact group already exited. */ }
     }
@@ -205,7 +205,7 @@ test("owner recovery fails closed on a partial snapshot and preserves it for rep
     await shutdown
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await killChild(owner)
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact group already exited. */ }
     }
@@ -252,8 +252,8 @@ test("concurrent same-authority replacements converge on one fenced owner", asyn
     await shutdown
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
-    if (contender && contender.exitCode === null && contender.signalCode === null) contender.kill("SIGKILL")
+    await killChild(owner)
+    await killChild(contender)
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact group already exited. */ }
     }
@@ -319,6 +319,7 @@ test("replacement reconstructs retained draining generations without an active r
     const drainOnly = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
     assert.equal(drainOnly.activeReleaseId, null)
     assert.deepEqual(drainOnly.releaseReferences, [{releaseId: "v1", releasePath: v1Path}])
+    await waitForState(fixture.statePath, (state) => state.activeReleaseId === null && state.releaseReferences?.length === 1 && state.releaseReferences[0]?.releaseId === "v1")
 
     owner.kill("SIGKILL")
     await once(owner, "exit")
@@ -330,10 +331,10 @@ test("replacement reconstructs retained draining generations without an active r
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
     await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
-    await shutdown
+    await assert.doesNotReject(() => shutdown, "replacement shutdown must acknowledge after the recovered drain settles")
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await killChild(owner)
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -359,7 +360,7 @@ test("deploy rejects a live ownerRecovery mode change", async () => {
     await sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await killChild(owner)
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -417,7 +418,7 @@ test("replacement removes only guardian-owned candidate inventory left before de
     await shutdown
     await once(owner, "exit")
   } finally {
-    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await killChild(owner)
     if (candidatePid && isAlive(candidatePid)) {
       try { process.kill(-candidatePid, "SIGKILL") } catch (_error) { /* Exact candidate group already exited. */ }
     }
@@ -612,6 +613,18 @@ function spawnDaemon(configPath, bootstrap) {
 
   if (bootstrap) args.push("--release-id", bootstrap.releaseId, "--release-path", bootstrap.releasePath, "--revision", bootstrap.revision)
   return spawn(process.execPath, args, {stdio: ["ignore", "pipe", "pipe"]})
+}
+
+/**
+ * Terminates one exact daemon fixture and awaits its exit before guardian cleanup.
+ * @param {import("node:child_process").ChildProcess | undefined} child - Exact fixture child.
+ */
+async function killChild(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return
+  const exited = once(child, "exit")
+
+  child.kill("SIGKILL")
+  await exited
 }
 
 /**

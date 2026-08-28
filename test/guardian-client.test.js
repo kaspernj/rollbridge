@@ -82,7 +82,16 @@ test("successful guardian shutdown closes an authenticated waiting contender bef
 
   try {
     await contender.connect()
+    assert.ok(fixture.client.socket)
     assert.ok(contender.socket)
+    const shutdownOrder = /** @type {string[]} */ ([])
+    const onData = fixture.client.onData.bind(fixture.client)
+
+    fixture.client.onData = (chunk) => {
+      onData(chunk)
+      if (chunk.includes('"stopped":true')) shutdownOrder.push("response")
+    }
+    fixture.client.socket.once("close", () => shutdownOrder.push("caller-close"))
     const contenderClosed = new Promise((resolve) => contender.socket?.once("close", () => resolve(undefined)))
     const waitingClaim = contender.claimOwner(250)
     const rejectedClaim = assert.rejects(waitingClaim, /connection closed/)
@@ -90,6 +99,7 @@ test("successful guardian shutdown closes an authenticated waiting contender bef
     await fixture.client.shutdown()
     await rejectedClaim
     await contenderClosed
+    assert.deepEqual(shutdownOrder, ["response", "caller-close"], "shutdown success must be received before the caller connection closes")
     await assert.rejects(() => contender.inventory(), /not connected/)
     await assert.rejects(fs.access(fixture.client.socketPath), {code: "ENOENT"})
     await fixture.client.guardianExit()
