@@ -56,6 +56,7 @@ export default {
         VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}"
       },
       command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- npx velocious background-jobs-main",
+      lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
       port: {from: 7331, to: 7399}
     },
     {
@@ -88,6 +89,9 @@ export default {
   ]
 }
 ```
+
+`appctl` is a placeholder for a reviewed Velocious/application integration that
+quiesces jobs-main admission without terminating its worker/report endpoint.
 
 Beacon keeps its fixed port because it is intentionally shared. Jobs-main uses a
 range because every release gets its own coordinator. Same-release
@@ -138,10 +142,11 @@ report every referenced release directory so Rampway can pin it against cleanup.
 A runtime owner/version handoff preserves or transfers that supervision and
 returns after the replacement is healthy; it is not a full synchronous shutdown.
 
-These are target requirements. Current Rollbridge drains releases
-asynchronously only while the same daemon remains alive, cannot re-adopt
-surviving PIDs after restart, and stops rather than transfers all managed
-processes during `--takeover-owner`; see [`docs/cli.md`](cli.md#daemon).
+Current Rollbridge implements the same-owner portion when jobs-main has a
+successful `quietCommand`: post-activation quiescence, concurrent endpoints,
+asynchronous generation drain, and `status.releaseReferences`. It cannot
+re-adopt surviving PIDs or transfer them during `--takeover-owner`; durable
+guardian recovery and atomic owner upgrades remain required follow-ups.
 
 ## Timeouts
 

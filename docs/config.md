@@ -206,9 +206,13 @@ range** so old and new instances can run at the same time:
   policy: "service",
   deployStrategy: "handoff",
   command: "npx velocious background-jobs-main",
+  lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
   port: {from: 7331, to: 7399}
 }
 ```
+
+The `appctl` command is illustrative; the application must provide a reviewed
+equivalent that quiesces admission without terminating jobs-main.
 
 Reference it from same-release processes with `{{ports.background-jobs-main}}`.
 During a deploy, old workers keep the old port and new workers get the new port.
@@ -218,14 +222,12 @@ retirement must quiesce the old jobs-main's scheduling, dispatch, and new worker
 handoffs while keeping it with its workers until their accepted work settles.
 Workers are not adopted by the new service.
 
-That immediate old-main quiescence is **required future compliance behavior**,
-not current `deployStrategy: "handoff"` behavior. Today the release group starts
-`stop()` for `nonBlockingDrain` companions at retirement but sends no retirement
-or quiescence notice to the handoff service. It waits for the connection drain,
-stops other dependent processes, waits for the non-blocking companion stops, and
-only then stops the handoff service. Consequently, old and new jobs-main
-instances can overlap scheduling and dispatch ownership. Do not treat the
-configuration above alone as compliance with the background-jobs contract.
+Configure `lifecycle.quietCommand` on the handoff service to stop schedules,
+dispatch, and new handoffs without exiting. Immediately after activation,
+Rollbridge quiesces it with `nonBlockingDrain` companions, then returns without
+waiting for their drain. A failed hook leaves the generation alive, records
+`retirementError`, and emits `release retirement quiescence failed`. Durable
+recovery and atomic owner/config/socket/package replacement remain unimplemented.
 
 ### `processes[].lifecycle`
 
@@ -276,9 +278,9 @@ proxied process (a job worker on a shared queue). Rollbridge starts that
 companion's configured stop sequence **as soon as the release is retired**, in
 parallel with the connection drain, rather than after it. Its quiet command or
 signal must make the worker stop accepting new handoffs. The asynchronous
-release drain continues after the deploy response. As described above, current
-Rollbridge does not simultaneously quiesce the handoff service, so this setting
-alone does not prevent overlapping jobs-main scheduling or dispatch ownership.
+release drain continues after the deploy response. Rollbridge simultaneously
+quiesces same-release handoff services, so an old main stops new dispatch while
+remaining available to its old workers.
 
 ```js
 {id: "worker", policy: "companion", command: "…", nonBlockingDrain: true, stopSignal: "SIGINT", gracefulStopMs: "indefinite"}

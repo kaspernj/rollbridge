@@ -83,6 +83,7 @@ export default {
       deployStrategy: "handoff",
       cwd: "{{releasePath}}",
       command: "env VELOCIOUS_BACKGROUND_JOBS_PORT={{port}} npx velocious background-jobs-main",
+      lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
       port: {from: 7331, to: 7399}
     },
     {
@@ -96,6 +97,9 @@ export default {
   ]
 }
 ```
+
+`appctl jobs-main-retire` is illustrative; replace it with a reviewed command
+that quiesces the real jobs-main without exiting it.
 
 Each process retains its most recent stdout/stderr lines and reports them in
 `status`. Set `outputLines` (a positive integer, default 50) per process to keep
@@ -169,6 +173,13 @@ handoffs as soon as its release retires, independently of the proxied connection
 drain. Its release-scoped handoff jobs-main remains running to supervise existing
 handoffs and exits only after the worker pool has drained.
 
+Give the handoff jobs-main a `lifecycle.quietCommand` that stops schedules,
+dispatch, and new handoffs without terminating the main. After candidate health
+and traffic activation, Rollbridge waits only for this bounded quiescence step,
+then returns while the old main and workers drain together. A failed quiet hook
+is reported as `retirementError`; Rollbridge leaves that generation alive for
+diagnosis instead of silently continuing to stop it.
+
 See [`docs/workers.md`](docs/workers.md) for the full release-generation
 deployment pattern: a handoff `background-jobs-main`, its companion worker pool,
 independent quiescence, and durable supervision while retained generations drain.
@@ -241,7 +252,7 @@ rendered when the process starts:
 Referencing a placeholder with no value (including an unset `{{env.<NAME>}}`)
 fails the process start with a clear error, so typos surface immediately.
 
-Production-ready examples live in `examples/`, including
+Configuration examples live in `examples/`, including
 `examples/tensorbuzz.com.js` for the current TensorBuzz backend deployment; see
 [`docs/tensorbuzz-runbook.md`](docs/tensorbuzz-runbook.md) for the matching
 production runbook (ports, deploy ordering, rollback constraints, and day-to-day
@@ -338,6 +349,7 @@ candidate coordinator.
   deployStrategy: "handoff",
   cwd: "{{releasePath}}",
   command: "npx velocious background-jobs-main",
+  lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
   port: {from: 7331, to: 7399}
 }
 ```
@@ -350,7 +362,7 @@ On `rollbridge deploy`, the required ordering is:
 2. starts the new release's `companion`s, then its `proxied` process, and
    health-checks the proxied process;
 3. switches new traffic to the new release;
-4. marks the previous jobs-main and worker pool retired as one generation;
+4. quiesces the previous jobs-main and worker pool as one retired generation;
 5. replaces `singleton`s (stops the old one, then starts the new one);
 6. returns success without waiting for the previous generation or its independent
    HTTP/WebSocket drain; Rollbridge supervises all retained drains in the
@@ -358,6 +370,11 @@ On `rollbridge deploy`, the required ordering is:
 
 If the new release fails to start or health-check, the previous release stays
 active and any service started during this deploy is rolled back.
+
+`status.releaseReferences` lists the id and path of every active or draining
+release in the current daemon. A reference disappears only when that release is
+fully stopped. Durable guardian recovery and atomic owner/config/socket/package
+replacement remain unimplemented follow-ups.
 
 ## Commands
 
@@ -439,11 +456,11 @@ rollbridge daemon --config /srv/ticket-server/rollbridge.js \
 External supervisors that need to replace a foreground owner without waiting
 for retained generations to drain add `--takeover-owner`. The candidate starts
 and health-checks the exact release first. Only then does it retire the accepted
-owner's proxy/control listeners. Durable supervision of old jobs-main/worker
-generations must be preserved or transferred while the attested replacement
-binds the stable listeners; replacement does not mean full synchronous shutdown.
-Candidate bootstrap failure leaves the accepted owner untouched. This is opt-in;
-ordinary daemon bootstrap and `shutdown` keep their existing behavior.
+owner's proxy/control listeners. Candidate bootstrap failure leaves the accepted
+owner untouched. Current takeover does not preserve retained jobs generations
+or transfer listeners atomically, so it is not a zero-downtime package, config,
+or socket upgrade mechanism. This is opt-in; ordinary daemon bootstrap and
+`shutdown` keep their existing behavior.
 
 The four bootstrap inputs are all-or-nothing and use absolute config/release
 paths. Rollbridge binds its proxy, activates the release through the normal

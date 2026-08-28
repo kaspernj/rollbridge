@@ -6,7 +6,7 @@ import {processGroupHasLiveMembers, processGroupMembers} from "./process-memory.
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
- * @typedef {"starting" | "running" | "stopping" | "stopped" | "failed"} ManagedProcessState
+ * @typedef {"starting" | "running" | "quiesced" | "stopping" | "stopped" | "failed"} ManagedProcessState
  * @typedef {"deploy" | "crash" | "manual" | "memory"} ManagedProcessStartReason
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
@@ -64,6 +64,8 @@ export default class ManagedProcess extends EventEmitter {
     this.intentionalStop = false
     this.intentionalStopSignal = /** @type {ProcessExitSignal | undefined} */ (undefined)
     this.quiescePromise = /** @type {Promise<void> | undefined} */ (undefined)
+    this.quiesceError = /** @type {Error | undefined} */ (undefined)
+    this.stopPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.restartTimer = undefined
     this.child = undefined
     this.exitPromise = undefined
@@ -82,6 +84,8 @@ export default class ManagedProcess extends EventEmitter {
     this.intentionalStop = false
     this.intentionalStopSignal = undefined
     this.quiescePromise = undefined
+    this.quiesceError = undefined
+    this.stopPromise = undefined
     this.exitCode = undefined
     this.exitSignal = undefined
     this.state = "starting"
@@ -342,6 +346,15 @@ export default class ManagedProcess extends EventEmitter {
    * @returns {Promise<void>} Resolves when stopped.
    */
   async stop(options = {}) {
+    if (!this.stopPromise) this.stopPromise = this.performStop(options)
+    return await this.stopPromise
+  }
+
+  /**
+   * @param {{timeoutMs?: number}} options - Stop options.
+   * @returns {Promise<void>} Resolves when stopped.
+   */
+  async performStop(options) {
     const pgid = this.child?.pid ?? this.pid
     const exitPromise = this.exitPromise
     await this.quiesce()
@@ -405,9 +418,16 @@ export default class ManagedProcess extends EventEmitter {
         return
       }
       this.state = "stopping"
-      if (this.lifecycle.quietCommand) await this.runHook(this.lifecycle.quietCommand, this.hookTimeoutMs(), "quiet command")
+      if (this.lifecycle.quietCommand) this.quiesceError = await this.runHook(this.lifecycle.quietCommand, this.hookTimeoutMs(), "quiet command")
+      if (!this.quiesceError) this.state = "quiesced"
     })()
     return await this.quiescePromise
+  }
+
+  /** @returns {Promise<void>} Quiesces and rejects when the quiet hook did not succeed. */
+  async quiesceStrict() {
+    await this.quiesce()
+    if (this.quiesceError) throw this.quiesceError
   }
 
   /** @returns {number} Timeout used for lifecycle hooks. */
@@ -419,18 +439,19 @@ export default class ManagedProcess extends EventEmitter {
 
   /**
    * Runs a lifecycle hook command, bounded by a timeout so a hung hook can never block stop().
-   * Failures are logged and swallowed — the graceful-stop sequence proceeds (and SIGKILL is the
-   * ultimate fallback) regardless of the hook's outcome.
+   * Failures are logged and returned so generation retirement can surface a failed quiet hook;
+   * ordinary stop sequences may still continue to their configured stop mechanism.
    * @param {string} command - Shell command to run.
    * @param {number} timeoutMs - Maximum time to wait for the hook before killing it.
    * @param {string} label - Hook name, for log messages.
    * @param {number | undefined} [pid] - Process-group leader exposed to the hook.
-   * @returns {Promise<void>} Resolves when the hook exits, errors, or times out.
+   * @returns {Promise<Error | undefined>} Failure, or undefined after a successful hook.
    */
   async runHook(command, timeoutMs, label, pid = this.pid) {
-    await new Promise((resolve) => {
+    return await new Promise((resolve) => {
       let settled = false
-      const finish = () => { if (!settled) { settled = true; resolve(undefined) } }
+      /** @param {Error | undefined} error - Hook failure. */
+      const finish = (error) => { if (!settled) { settled = true; resolve(error) } }
 
       /** @type {import("node:child_process").ChildProcess} */
       let hook
@@ -444,8 +465,9 @@ export default class ManagedProcess extends EventEmitter {
           stdio: "ignore"
         })
       } catch (error) {
-        this.logger(`${label} failed`, {error: error instanceof Error ? error.message : String(error), id: this.id})
-        finish()
+        const failure = error instanceof Error ? error : new Error(String(error))
+        this.logger(`${label} failed`, {error: failure.message, id: this.id})
+        finish(failure)
 
         return
       }
@@ -461,7 +483,7 @@ export default class ManagedProcess extends EventEmitter {
           }
         }
 
-        finish()
+        finish(new Error(`${label} timed out after ${timeoutMs}ms`))
       }, timeoutMs)
 
       hook.once("exit", (code, signal) => {
@@ -470,16 +492,24 @@ export default class ManagedProcess extends EventEmitter {
         // A non-zero/signalled exit is surfaced (but still non-fatal); skip when the timeout
         // already killed the hook, which logs separately.
         if (!settled) {
-          if (typeof code === "number" && code !== 0) this.logger(`${label} exited non-zero`, {code, id: this.id})
-          else if (signal) this.logger(`${label} exited on signal`, {id: this.id, signal})
+          if (typeof code === "number" && code !== 0) {
+            this.logger(`${label} exited non-zero`, {code, id: this.id})
+            finish(new Error(`${label} exited non-zero with status ${code}`))
+            return
+          } else if (signal) {
+            this.logger(`${label} exited on signal`, {id: this.id, signal})
+            finish(new Error(`${label} exited on signal ${signal}`))
+            return
+          }
         }
 
-        finish()
+        finish(undefined)
       })
       hook.once("error", (error) => {
         clearTimeout(timer)
-        this.logger(`${label} failed`, {error: error instanceof Error ? error.message : String(error), id: this.id})
-        finish()
+        const failure = error instanceof Error ? error : new Error(String(error))
+        this.logger(`${label} failed`, {error: failure.message, id: this.id})
+        finish(failure)
       })
     })
   }

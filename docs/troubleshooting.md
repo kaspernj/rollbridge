@@ -123,7 +123,8 @@ end close idle WebSockets on deploy). In the documented compliant jobs topology,
 jobs companions use `nonBlockingDrain: true`, so timeout expiry affects only the
 web side and must not stop a still-draining jobs generation.
 
-Reporting release references to Rampway and pinning release directories against
-on-disk cleanup are required future behavior, not implemented today. Current
-Rollbridge `status` and `releaseRetention` govern only its in-memory release
-records and do not fence Rampway cleanup.
+`status.releaseReferences` reports active and draining releases until full stop;
+Rampway still owns enforcement against on-disk cleanup. References do not yet
+transfer across daemon-owner recovery or takeover. If `retirementError` is set,
+inspect the quiet-hook events. Rollbridge deliberately leaves that generation
+alive rather than signaling arbitrary PIDs or continuing its stop sequence.

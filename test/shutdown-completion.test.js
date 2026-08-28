@@ -197,7 +197,7 @@ test("external-owner retirement releases listeners before a long-draining compan
     await replacement.start({reportOrphans: false})
     assert.equal((await sendControlCommand({command: {command: "status"}, path: socketPath})).application, "shutdown-target")
     assert.deepEqual(replacement.status().orphans, [], "intentional retired companions are not replacement orphans")
-    assert.equal(daemon.status().releases[0].processes[0].state, "stopping")
+    assert.equal(daemon.status().releases[0].processes[0].state, "quiesced")
   } finally {
     await fs.writeFile(gatePath, "done\n").catch(() => {})
     if (replacement) await replacement.shutdown()

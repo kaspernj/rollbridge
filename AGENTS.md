@@ -40,6 +40,11 @@ implemented. Do not claim production compliance when source/config still uses a
 fixed jobs-main, worker adoption by a new main, destructive orphan recovery, or
 synchronous cleanup.
 
+Current same-owner behavior quiesces configured handoff services after candidate
+activation, retains concurrent generations, and reports live release references.
+Durable guardian recovery and atomic owner/config/socket/package replacement are
+still unimplemented follow-up requirements.
+
 ## Validation and publication
 
 The project is ESM JavaScript with JSDoc type checking. Package scripts are the
