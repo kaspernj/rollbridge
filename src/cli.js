@@ -17,6 +17,8 @@ import {readState} from "./state-store.js"
 
 const DEFAULT_DAEMON_START_TIMEOUT_MS = 10000
 
+/** @typedef {import("node:child_process").ChildProcess["signalCode"]} DaemonExitSignal */
+
 /**
  * Runs the CLI.
  * @param {string[]} argv - Process argv.
@@ -854,29 +856,35 @@ async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtim
   const resolvedPidPath = pidPath || defaultDaemonPidPath(config)
   const legacyIncumbentPid = replacement ? await readDaemonPid(resolvedPidPath) : undefined
 
-  await startDaemonProcess({
+  await fsPromises.mkdir(path.dirname(resolvedPidPath), {recursive: true})
+  const candidate = await startDaemonProcess({
     configPath,
     logPath: logPath || defaultDaemonLogPath(config),
-    pidPath: resolvedPidPath,
     replacement,
     legacyIncumbentPid,
     runtime
   })
+  let startedStatus
 
-  const startedStatus = await waitForDaemonStatus(config, timeoutMs, {
-    configDigest: config.ownerRecovery ? expectedConfigDigest : undefined,
-    runtime
-  })
+  try {
+    startedStatus = await waitForDaemonStatus(config, timeoutMs, {
+      candidate,
+      configDigest: config.ownerRecovery ? expectedConfigDigest : undefined,
+      runtime
+    })
 
-  assertCompatibleDaemonRuntime(startedStatus, runtime)
-  const startedPid = positiveIntegerOrUndefined(
-    typeof startedStatus.daemonPid === "number" ? String(startedStatus.daemonPid) : undefined,
-    "started daemon status PID"
-  )
+    assertCompatibleDaemonRuntime(startedStatus, runtime)
+    const startedPid = positiveIntegerOrUndefined(
+      typeof startedStatus.daemonPid === "number" ? String(startedStatus.daemonPid) : undefined,
+      "started daemon status PID"
+    )
 
-  if (!startedPid) throw new Error("Started Rollbridge daemon did not report its exact PID")
-  await fsPromises.writeFile(resolvedPidPath, `${startedPid}\n`)
-  return startedStatus
+    if (!startedPid) throw new Error("Started Rollbridge daemon did not report its exact PID")
+    await fsPromises.writeFile(resolvedPidPath, `${startedPid}\n`)
+    return startedStatus
+  } finally {
+    candidate.unref()
+  }
 }
 
 /**
@@ -905,15 +913,13 @@ async function daemonStatus(config) {
  * @param {object} args - Options.
  * @param {string} args.configPath - Config path.
  * @param {string} args.logPath - Log file path.
- * @param {string} args.pidPath - PID file path.
  * @param {boolean} args.replacement - Whether to run the incompatible replacement transaction.
  * @param {number | undefined} args.legacyIncumbentPid - Exact incumbent recorded before candidate spawn.
  * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} args.runtime - Prepared runtime.
- * @returns {Promise<void>} Resolves after the child has been spawned.
+ * @returns {Promise<import("node:child_process").ChildProcess>} Referenced child after exact spawn completion.
  */
-async function startDaemonProcess({configPath, legacyIncumbentPid, logPath, pidPath, replacement = false, runtime}) {
+async function startDaemonProcess({configPath, legacyIncumbentPid, logPath, replacement = false, runtime}) {
   await fsPromises.mkdir(path.dirname(logPath), {recursive: true})
-  await fsPromises.mkdir(path.dirname(pidPath), {recursive: true})
 
   const stdoutFd = fs.openSync(logPath, "a")
   const stderrFd = fs.openSync(logPath, "a")
@@ -929,11 +935,20 @@ async function startDaemonProcess({configPath, legacyIncumbentPid, logPath, pidP
       stdio: ["ignore", stdoutFd, stderrFd]
     })
 
-    child.unref()
+    await new Promise((resolve, reject) => {
+      const onError = (/** @type {Error} */ error) => finish(error)
+      const onSpawn = () => finish(undefined)
+      const finish = (/** @type {Error | undefined} */ error) => {
+        child.off("error", onError)
+        child.off("spawn", onSpawn)
+        if (error) reject(error)
+        else resolve(undefined)
+      }
 
-    if (child.pid && !replacement) {
-      await fsPromises.writeFile(pidPath, `${child.pid}\n`)
-    }
+      child.once("error", onError)
+      child.once("spawn", onSpawn)
+    })
+    return child
   } finally {
     fs.closeSync(stdoutFd)
     fs.closeSync(stderrFd)
@@ -977,36 +992,77 @@ function positiveIntegerOrUndefined(value, label) {
  * Waits until a daemon answers status commands.
  * @param {import("./config.js").RollbridgeConfig} config - Loaded config.
  * @param {number} timeoutMs - Timeout in milliseconds.
- * @param {{configDigest?: string, runtime?: import("./daemon-runtime.js").DaemonRuntimeIdentity}} [expected] - Required authority.
+ * @param {{candidate?: import("node:child_process").ChildProcess, configDigest?: string, runtime?: import("./daemon-runtime.js").DaemonRuntimeIdentity}} [expected] - Required authority and exact spawned candidate.
  * @returns {Promise<Record<string, import("./json.js").JsonValue>>} Daemon status response.
  */
 async function waitForDaemonStatus(config, timeoutMs, expected = {}) {
   const deadline = Date.now() + timeoutMs
   let lastError = /** @type {Error | undefined} */ (undefined)
-
-  while (Date.now() < deadline) {
-    let status
-
-    try {
-      status = await daemonStatus(config)
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error))
-    }
-
-    if (status) {
-      if (expected.runtime && !compatibleDaemonRuntime(status, expected.runtime)) {
-        if (!expected.configDigest) assertCompatibleDaemonRuntime(status, expected.runtime)
-      } else if (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest)) {
-        return status
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 100))
+  let candidateExit = expected.candidate && (expected.candidate.exitCode !== null || expected.candidate.signalCode !== null)
+    ? {code: expected.candidate.exitCode, signal: expected.candidate.signalCode}
+    : undefined
+  let wakeDelay = /** @type {(() => void) | undefined} */ (undefined)
+  const onCandidateExit = (/** @type {number | null} */ code, /** @type {DaemonExitSignal} */ signal) => {
+    candidateExit = {code, signal}
+    wakeDelay?.()
   }
 
-  const detail = lastError ? ` Last error: ${lastError.message}` : ""
+  expected.candidate?.once("exit", onCandidateExit)
 
-  throw new Error(`Rollbridge daemon did not become ready within ${timeoutMs}ms.${detail}`)
+  try {
+    while (Date.now() < deadline) {
+      let status
+
+      try {
+        status = await daemonStatus(config)
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error))
+      }
+
+      if (status) {
+        const statusPid = typeof status.daemonPid === "number" ? status.daemonPid : undefined
+        const candidateResolved = !expected.candidate || candidateExit || statusPid === expected.candidate.pid
+
+        if (expected.runtime && !compatibleDaemonRuntime(status, expected.runtime)) {
+          if (!expected.configDigest) assertCompatibleDaemonRuntime(status, expected.runtime)
+        } else if (candidateResolved && (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest))) {
+          return status
+        }
+      }
+
+      if (candidateExit && expected.candidate) throw candidateExitError(expected.candidate, candidateExit)
+      await new Promise((resolve) => {
+        const timer = setTimeout(finish, 100)
+        /** Completes one readiness interval or candidate-exit wake-up. */
+        function finish() {
+          clearTimeout(timer)
+          wakeDelay = undefined
+          resolve(undefined)
+        }
+
+        wakeDelay = finish
+      })
+    }
+
+    const detail = lastError ? ` Last error: ${lastError.message}` : ""
+
+    throw new Error(`Rollbridge daemon did not become ready within ${timeoutMs}ms.${detail}`)
+  } finally {
+    expected.candidate?.off("exit", onCandidateExit)
+    wakeDelay = undefined
+  }
+}
+
+/**
+ * @param {import("node:child_process").ChildProcess} candidate - Exact spawned daemon candidate.
+ * @param {{code: number | null, signal: DaemonExitSignal}} exit - Exact exit status.
+ * @returns {Error} Actionable pre-readiness failure.
+ */
+function candidateExitError(candidate, exit) {
+  return new Error(
+    `Rollbridge daemon candidate ${candidate.pid ?? "unknown"} exited before readiness ` +
+    `(code ${exit.code ?? "none"}, signal ${exit.signal ?? "none"}). Spawned argv: ${JSON.stringify(candidate.spawnargs)}`
+  )
 }
 
 /**

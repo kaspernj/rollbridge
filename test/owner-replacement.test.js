@@ -135,6 +135,37 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
   }
 })
 
+test("ensure-daemon owns and reports the exact candidate exit before readiness", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-candidate-exit-"))
+  const configPath = path.join(root, "rollbridge.cjs")
+  const evidencePath = path.join(root, "candidate.json")
+  const packagePath = path.join(root, "candidate-package")
+  const runtimePath = path.join(root, "runtime")
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+
+  try {
+    await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+    await prepareCandidatePackage(packagePath)
+    await installCandidateExit(packagePath, evidencePath, 47)
+    const ensured = await run(process.execPath, [
+      path.join(packagePath, "bin", "rollbridge"), "ensure-daemon", "--config", configPath,
+      "--daemon-runtime-path", runtimePath, "--daemon-log-path", path.join(root, "daemon.log"),
+      "--daemon-pid-path", path.join(root, "daemon.pid"), "--daemon-start-timeout-ms", "3000"
+    ])
+    const candidate = JSON.parse(await fs.readFile(evidencePath, "utf8"))
+
+    assert.equal(candidate.ppid, ensured.pid, "the recorded process must be the candidate spawned by this exact ensuring CLI")
+    assert.notEqual(candidate.pid, ensured.pid)
+    assert.deepEqual(candidate.argv.slice(2), ["daemon", "--config", configPath])
+    assert.equal(ensured.code, 1)
+    assert.match(ensured.stderr, new RegExp(`Rollbridge daemon candidate ${candidate.pid} exited before readiness \\(code 47, signal none\\)`))
+    assert.doesNotMatch(ensured.stderr, /did not become ready within/)
+  } finally {
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("legacy disruptive bridge rejects non-protocol guardian failures exactly", () => {
   assert.equal(isLegacyGuardianPrepareDiagnostic("Guardian prepare-owner-replacement requires a process key"), true)
   assert.equal(isLegacyGuardianPrepareDiagnostic("Unknown guardian command: prepare-owner-replacement"), true)
@@ -500,6 +531,30 @@ async function prepareCandidatePackage(destination, options = {}) {
 }
 
 /**
+ * Replaces only the copied package's daemon entry with an exact early-exit fixture.
+ * @param {string} packagePath - Copied candidate package root.
+ * @param {string} evidencePath - Exact candidate identity record.
+ * @param {number} exitCode - Distinct candidate exit code.
+ * @returns {Promise<void>} Fixture installation completion.
+ */
+async function installCandidateExit(packagePath, evidencePath, exitCode) {
+  const binPath = path.join(packagePath, "bin", "rollbridge")
+  const source = `#!/usr/bin/env node
+import fs from "node:fs"
+
+if (process.argv[2] === "daemon") {
+  fs.writeFileSync(${JSON.stringify(evidencePath)}, JSON.stringify({argv: process.argv, pid: process.pid, ppid: process.ppid}))
+  process.exit(${exitCode})
+}
+
+const {runCli} = await import("../src/cli.js")
+await runCli(process.argv)
+`
+
+  await fs.writeFile(binPath, source, {mode: 0o755})
+}
+
+/**
  * @param {{configPath: string, daemonPidPath: string, logPath: string, packagePath: string, runtimePath: string}} options - Ensure fixture paths.
  * @returns {Promise<{code: number, stderr: string, stdout: string}>} Ensure result.
  */
@@ -557,7 +612,7 @@ function releaseProcessPid(status, releaseId, processId) {
 /**
  * @param {string} command - Executable.
  * @param {string[]} args - Arguments.
- * @returns {Promise<{code: number, stderr: string, stdout: string}>} Child result.
+ * @returns {Promise<{code: number, pid: number, stderr: string, stdout: string}>} Child result.
  */
 async function run(command, args) {
   const child = spawn(command, args, {stdio: ["ignore", "pipe", "pipe"]})
@@ -567,7 +622,8 @@ async function run(command, args) {
   child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk })
   child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
   const [code] = await once(child, "exit")
-  return {code, stderr, stdout}
+  assert.ok(child.pid)
+  return {code, pid: child.pid, stderr, stdout}
 }
 
 /**

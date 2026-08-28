@@ -24,6 +24,12 @@ preparation itself fails, check permissions for
 `/tmp/rollbridge-<user-id>-<application-hash>-runtime`) before retrying. The directory
 must be private to the invoking user.
 
+If startup instead reports `Rollbridge daemon candidate <pid> exited before
+readiness`, the ensuring CLI observed that exact child exit before it could
+attest status. The diagnostic includes the exit code or signal and spawned
+arguments. Inspect the configured `--daemon-log-path` for that PID's startup
+failure; this is distinct from a control-socket readiness timeout.
+
 Start with these three commands — they diagnose most problems without guessing:
 
 - `rollbridge validate` — config errors, with an example fix for each.

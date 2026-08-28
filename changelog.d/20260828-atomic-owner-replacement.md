@@ -16,3 +16,7 @@
 - Reserve every live generation's allocated endpoints before its processes bind
   and until that generation truly stops, and reconstruct those reservations on
   owner recovery so overlapping jobs generations cannot reuse an endpoint.
+- Keep an exact newly spawned daemon candidate referenced until its status and
+  PID authority are verified. `ensure-daemon` now reports an exact early child
+  exit instead of leaving its top-level operation unsettled or waiting for a
+  generic readiness timeout; the healthy daemon is detached only afterward.
