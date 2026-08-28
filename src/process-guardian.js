@@ -18,9 +18,20 @@ import ManagedProcess from "./managed-process.js"
  * @property {string} token - Authentication token.
  */
 
-const [socketPath, token] = process.argv.slice(2)
+const [socketPath] = process.argv.slice(2)
 
-if (!socketPath || !token) throw new Error("process-guardian requires socket path and token")
+if (!socketPath || !process.send) throw new Error("process-guardian requires socket path and a private bootstrap channel")
+
+const token = await new Promise((resolve, reject) => {
+  process.once("disconnect", () => reject(new Error("Guardian bootstrap channel closed before authentication capability arrived")))
+  process.once("message", (message) => {
+    if (!message || typeof message !== "object" || !("token" in message) || typeof message.token !== "string" || !message.token) {
+      reject(new Error("Guardian bootstrap authentication capability is invalid"))
+      return
+    }
+    resolve(message.token)
+  })
+})
 
 /** @type {Map<string, {desired: boolean, process: ManagedProcess, provenance: string}>} */
 const processes = new Map()
@@ -28,6 +39,12 @@ const processes = new Map()
 const clients = new Set()
 /** @type {net.Socket | undefined} */
 let ownerClient
+let shuttingDown = false
+/** @type {net.Socket | undefined} */
+let shutdownClient
+let shutdownFinalizing = false
+/** @type {Promise<void> | undefined} */
+let serverClosed
 /** @type {{reject: (error: Error) => void, resolve: (value: {claimed: boolean}) => void, socket: net.Socket, timer: ReturnType<typeof setTimeout>}[]} */
 const claimWaiters = []
 
@@ -47,8 +64,9 @@ const server = net.createServer((socket) => {
     }
     if (ownerClient === socket) {
       ownerClient = undefined
-      grantNextOwner()
+      if (!shuttingDown) grantNextOwner()
     }
+    if (shutdownClient === socket) void finishShutdown()
   })
   socket.on("data", (chunk) => {
     buffer += chunk
@@ -93,7 +111,7 @@ async function handleLine(socket, line) {
 
     socket.write(`${JSON.stringify({id: request.id, result})}\n`)
   } catch (error) {
-    socket.write(`${JSON.stringify({error: error instanceof Error ? error.message : String(error), id: request?.id})}\n`)
+    if (!socket.destroyed) socket.write(`${JSON.stringify({error: error instanceof Error ? error.message : String(error), id: request?.id})}\n`)
   }
 }
 
@@ -103,6 +121,8 @@ async function handleLine(socket, line) {
  * @returns {Promise<import("./json.js").JsonValue>} Command result.
  */
 async function execute(request, socket) {
+  if (shuttingDown) throw new Error("Process guardian is shutting down")
+
   if (request.command === "claim-owner") {
     if (!ownerClient) {
       ownerClient = socket
@@ -122,11 +142,35 @@ async function execute(request, socket) {
   }
 
   if (request.command === "shutdown") {
-    await Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
-    server.close()
-    await fs.rm(socketPath, {force: true})
-    setImmediate(() => process.exit(0))
-    return {stopped: true}
+    shuttingDown = true
+    try {
+      const results = await Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
+      const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
+
+      if (errors.length > 0) throw new AggregateError(errors, `Guardian failed to stop ${errors.length} owned process${errors.length === 1 ? "" : "es"}: ${errors.map((error) => errorMessage(error instanceof Error ? error : String(error))).join("; ")}`)
+      beginSuccessfulShutdown(socket)
+      return {stopped: true}
+    } catch (error) {
+      shutdownClient = undefined
+      shuttingDown = false
+      throw error
+    }
+  }
+
+  if (request.command === "inventory") {
+    return [...processes.entries()].map(([key, entry]) => ({key, provenance: entry.provenance, status: entry.process.status()}))
+  }
+
+  if (request.command === "remove") {
+    if (!request.key || !request.provenance) throw new Error("Guardian remove requires key and provenance")
+    const existing = processes.get(request.key)
+
+    if (!existing) throw new Error(`Guardian process ${request.key} is not registered`)
+    if (existing.provenance !== request.provenance) throw new Error(`Guardian provenance mismatch for ${request.key}`)
+    existing.desired = false
+    await existing.process.stop()
+    processes.delete(request.key)
+    return {removed: true}
   }
 
   if (request.command === "register") {
@@ -190,6 +234,34 @@ async function execute(request, socket) {
   return status
 }
 
+/**
+ * Stops accepting connections and closes every authority channel except the response caller.
+ * @param {net.Socket} caller - Shutdown requester retained until it receives the response.
+ */
+function beginSuccessfulShutdown(caller) {
+  shutdownClient = caller
+  serverClosed = new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error)
+      else resolve(undefined)
+    })
+  })
+
+  for (const client of clients) {
+    if (client !== caller) client.destroy()
+  }
+  if (caller.destroyed) void finishShutdown()
+}
+
+/** Completes shutdown after the caller has received success and closed its side. */
+async function finishShutdown() {
+  if (shutdownFinalizing) return
+  shutdownFinalizing = true
+  for (const client of clients) client.destroy()
+  await serverClosed
+  await fs.rm(socketPath, {force: true})
+}
+
 /** @param {Record<string, import("./json.js").JsonValue>} event - Event payload. */
 function broadcast(event) {
   const line = `${JSON.stringify(event)}\n`
@@ -209,4 +281,12 @@ function grantNextOwner() {
     clearTimeout(waiter.timer)
     waiter.reject(new Error("Durable owner was claimed by another matching daemon"))
   }
+}
+
+/**
+ * @param {Error | string} error - Error-like value.
+ * @returns {string} Error message.
+ */
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
 }
