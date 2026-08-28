@@ -933,7 +933,13 @@ async function waitForDaemonStatus(config, timeoutMs, expected = {}) {
     try {
       const status = await daemonStatus(config)
 
-      if (status && (!expected.runtime || compatibleDaemonRuntime(status, expected.runtime)) && (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest))) return status
+      if (status) {
+        if (expected.runtime && !compatibleDaemonRuntime(status, expected.runtime)) {
+          if (!expected.configDigest) assertCompatibleDaemonRuntime(status, expected.runtime)
+        } else if (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest)) {
+          return status
+        }
+      }
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
     }
