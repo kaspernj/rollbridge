@@ -36,6 +36,7 @@ export default class ReleaseGroup extends EventEmitter {
    * @param {object} args - Options.
    * @param {import("./config.js").RollbridgeConfig} args.config - Rollbridge config.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} args.logger - Logger.
+   * @param {Set<number>} [args.portReservations] - Ports owned by live generations and daemon services.
    * @param {string} args.releaseId - Release id.
    * @param {string} args.releasePath - Release path.
    * @param {string | undefined} args.revision - Revision.
@@ -43,7 +44,7 @@ export default class ReleaseGroup extends EventEmitter {
    * @param {() => boolean} [args.shouldStart] - Whether bootstrap may create another process.
    * @param {(key: string, definition: ConstructorParameters<typeof ManagedProcess>[0]) => ManagedProcess} [args.processFactory] - Durable process factory.
    */
-  constructor({config, logger, processFactory, releaseId, releasePath, revision, servicePorts = {}, shouldStart = () => true}) {
+  constructor({config, logger, portReservations = new Set(), processFactory, releaseId, releasePath, revision, servicePorts = {}, shouldStart = () => true}) {
     super()
 
     this.config = config
@@ -60,6 +61,8 @@ export default class ReleaseGroup extends EventEmitter {
     this.handoffServiceIds = /** @type {Set<string>} */ (new Set())
     this.nonBlockingDrainIds = /** @type {Set<string>} */ (new Set())
     this.ports = /** @type {Record<string, number>} */ ({})
+    this.portReservations = portReservations
+    this.ownedPortReservations = /** @type {Set<number>} */ (new Set())
     this.servicePorts = servicePorts
     this.shouldStart = shouldStart
     this.processFactory = processFactory
@@ -131,6 +134,20 @@ export default class ReleaseGroup extends EventEmitter {
     }
     for (const processConfig of this.config.processes) {
       if (processConfig.port && typeof snapshot.ports[processConfig.id] !== "number") throw new Error(`Persisted release ${this.releaseId} is missing port ${processConfig.id}`)
+    }
+
+    const generationPorts = this.config.processes
+      .filter((processConfig) => processConfig.port && (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff"))
+      .map((processConfig) => snapshot.ports[processConfig.id])
+    const distinctGenerationPorts = new Set(generationPorts)
+
+    if (distinctGenerationPorts.size !== generationPorts.length) throw new Error(`Persisted release ${this.releaseId} reuses a port within one live generation`)
+    for (const port of distinctGenerationPorts) {
+      if (this.portReservations.has(port)) throw new Error(`Persisted release ${this.releaseId} port ${port} is already reserved by another live generation`)
+    }
+    for (const port of distinctGenerationPorts) {
+      this.portReservations.add(port)
+      this.ownedPortReservations.add(port)
     }
 
     this.ports = {...snapshot.ports}
@@ -240,24 +257,41 @@ export default class ReleaseGroup extends EventEmitter {
   async allocatePorts() {
     if (this.portsAllocated) return
 
-    const usedPorts = /** @type {Set<number>} */ (new Set())
-
     for (const processConfig of this.config.processes) {
       if (!processConfig.port) continue
       if (processConfig.policy === "service" && processConfig.deployStrategy !== "handoff" && this.servicePorts[processConfig.id] !== undefined) {
         this.ports[processConfig.id] = this.servicePorts[processConfig.id]
-        usedPorts.add(this.servicePorts[processConfig.id])
         continue
       }
 
-      this.ports[processConfig.id] = await findAvailablePort({
+      const port = await findAvailablePort({
         host: this.config.proxy.upstreamHost,
         range: processConfig.port,
-        usedPorts
+        usedPorts: this.portReservations
       })
+
+      this.ports[processConfig.id] = port
+      this.ownedPortReservations.add(port)
     }
 
     this.portsAllocated = true
+  }
+
+  /**
+   * Transfers a newly allocated daemon-wide service port out of this generation's cleanup scope.
+   * @param {string} processId - Daemon-wide service process id.
+   * @returns {void}
+   */
+  transferPortReservation(processId) {
+    const port = this.ports[processId]
+
+    if (port !== undefined) this.ownedPortReservations.delete(port)
+  }
+
+  /** @returns {void} Releases ports only after this generation has truly stopped. */
+  releasePortReservations() {
+    for (const port of this.ownedPortReservations) this.portReservations.delete(port)
+    this.ownedPortReservations.clear()
   }
 
   /**
@@ -503,6 +537,7 @@ export default class ReleaseGroup extends EventEmitter {
     await Promise.allSettled(handoffServices.map((processInstance) => processInstance.stop()))
     this.state = "stopped"
     this.stoppedAt = new Date().toISOString()
+    this.releasePortReservations()
   }
 
   /**
@@ -539,6 +574,7 @@ export default class ReleaseGroup extends EventEmitter {
     await Promise.allSettled(stopTasks)
     this.state = "stopped"
     this.stoppedAt = new Date().toISOString()
+    this.releasePortReservations()
   }
 
   /** @returns {Promise<void>} Quiesces every release process without waiting for its drain. */

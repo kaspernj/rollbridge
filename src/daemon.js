@@ -60,6 +60,7 @@ export default class RollbridgeDaemon {
     this.releases = /** @type {Map<string, ReleaseGroup>} */ (new Map())
     this.services = /** @type {Map<string, import("./managed-process.js").default>} */ (new Map())
     this.servicePorts = /** @type {Record<string, number>} */ ({})
+    this.portReservations = /** @type {Set<number>} */ (new Set())
     this.singletons = /** @type {Map<string, import("./managed-process.js").default>} */ (new Map())
     this.activeRelease = /** @type {ReleaseGroup | undefined} */ (undefined)
     this.proxy = httpProxy.createProxyServer({ws: true, xfwd: true})
@@ -195,6 +196,7 @@ export default class RollbridgeDaemon {
       const release = new ReleaseGroup({
         config: releaseConfigs[releaseStatus.releaseId] || config,
         logger: this.logger,
+        portReservations: this.portReservations,
         processFactory: (key, definition) => this.guardianProcess(key, definition),
         releaseId: releaseStatus.releaseId,
         releasePath: releaseStatus.releasePath,
@@ -220,7 +222,13 @@ export default class RollbridgeDaemon {
 
       await this.recoverGuardianProcess(service)
       this.services.set(serviceStatus.id, service)
-      if (definitionRelease.ports[serviceStatus.id] !== undefined) this.servicePorts[serviceStatus.id] = definitionRelease.ports[serviceStatus.id]
+      if (definitionRelease.ports[serviceStatus.id] !== undefined) {
+        const port = definitionRelease.ports[serviceStatus.id]
+
+        if (this.portReservations.has(port)) throw new Error(`Persisted daemon service ${serviceStatus.id} port ${port} is already reserved by a live generation`)
+        this.portReservations.add(port)
+        this.servicePorts[serviceStatus.id] = port
+      }
     }
     for (const singletonStatus of snapshot.singletons) {
       const processConfig = config.processes.find((candidate) => candidate.id === singletonStatus.id && candidate.policy === "singleton")
@@ -1024,6 +1032,7 @@ export default class RollbridgeDaemon {
     const release = new ReleaseGroup({
       config: nextConfig,
       logger: this.logger,
+      portReservations: this.portReservations,
       ...(this.guardian ? {processFactory: (key, definition) => this.guardianProcess(key, definition)} : {}),
       releaseId: newReleaseId,
       releasePath,
@@ -1214,6 +1223,7 @@ export default class RollbridgeDaemon {
 
       try {
         await service.start("deploy")
+        release.transferPortReservation(processConfig.id)
         startedServices.push(processConfig.id)
       } catch (error) {
         this.services.delete(processConfig.id)
@@ -1238,6 +1248,9 @@ export default class RollbridgeDaemon {
 
       await service.stop()
       this.services.delete(serviceId)
+      const port = this.servicePorts[serviceId]
+
+      if (port !== undefined) this.portReservations.delete(port)
       delete this.servicePorts[serviceId]
     }
   }

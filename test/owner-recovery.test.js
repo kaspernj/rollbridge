@@ -29,24 +29,30 @@ test("replacement owner reconstructs one active and two draining generations aft
   try {
     await waitForLog(owner, "control socket listening")
     for (const releaseId of ["v1", "v2", "v3"]) {
-      const releasePath = path.join(fixture.root, releaseId)
+      const releasePath = await prepareRelease(fixture.root, releaseId, {holdJobsBind: releaseId === "v2"})
 
-      await fs.mkdir(releasePath)
-      const gate = spawn("mkfifo", [path.join(releasePath, "worker.fifo")])
-      assert.equal((await once(gate, "exit"))[0], 0)
       await sendControlCommand({command: {command: "deploy", releaseId, releasePath, revision: releaseId}, path: fixture.socketPath})
+      if (releaseId === "v2") await waitForFile(path.join(releasePath, "jobs.bind-waiting"))
+      const deployed = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+      for (const retained of deployed.releases) {
+        for (const processStatus of retained.processes) if (processStatus.pid) managedProcessGroups.add(processStatus.pid)
+      }
+      for (const entry of [...deployed.services, ...deployed.singletons]) if (entry.process.pid) managedProcessGroups.add(entry.process.pid)
     }
 
     const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
 
     assert.equal(before.activeReleaseId, "v3")
     assert.deepEqual(before.releaseReferences.map((/** @type {{releaseId: string}} */ reference) => reference.releaseId), ["v1", "v2", "v3"])
-    assert.equal(new Set(before.releases.map((release) => release.ports.jobs)).size, 3)
-    for (const release of before.releases) {
-      for (const processStatus of release.processes) if (processStatus.pid) managedProcessGroups.add(processStatus.pid)
-    }
-    for (const entry of [...before.services, ...before.singletons]) if (entry.process.pid) managedProcessGroups.add(entry.process.pid)
+    const generationEndpoints = before.releases.map((release) => ({
+      jobsPort: release.ports.jobs,
+      jobsState: release.processes.find((processStatus) => processStatus.id === "jobs")?.state,
+      releaseId: release.releaseId,
+      state: release.state
+    }))
 
+    assert.equal(new Set(generationEndpoints.map(({jobsPort}) => jobsPort)).size, 3, JSON.stringify(generationEndpoints))
     owner.kill("SIGKILL")
     await once(owner, "exit")
 
@@ -550,7 +556,11 @@ async function createFixture() {
       {
         command: `${JSON.stringify(process.execPath)} ${JSON.stringify(serviceAppPath)}`,
         deployStrategy: "handoff",
-        env: {ROLLBRIDGE_SERVICE_LOG: serviceLogPath},
+        env: {
+          ROLLBRIDGE_SERVICE_BIND_GATE: "{{releasePath}}/jobs.bind",
+          ROLLBRIDGE_SERVICE_BIND_WAITING: "{{releasePath}}/jobs.bind-waiting",
+          ROLLBRIDGE_SERVICE_LOG: serviceLogPath
+        },
         id: "jobs",
         lifecycle: {quietCommand: "exit 0"},
         policy: "service",
@@ -588,12 +598,14 @@ async function createFixture() {
 /**
  * @param {string} root - Fixture root.
  * @param {string} releaseId - Release id.
+ * @param {{holdJobsBind?: boolean}} [options] - Whether the handoff service must remain unbound.
  * @returns {Promise<string>} Prepared release path.
  */
-async function prepareRelease(root, releaseId) {
+async function prepareRelease(root, releaseId, {holdJobsBind = false} = {}) {
   const releasePath = path.join(root, releaseId)
 
   await fs.mkdir(releasePath)
+  if (!holdJobsBind) await fs.writeFile(path.join(releasePath, "jobs.bind"), "ready\n")
   const gate = spawn("mkfifo", [path.join(releasePath, "worker.fifo")])
   assert.equal((await once(gate, "exit"))[0], 0)
   return releasePath

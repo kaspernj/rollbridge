@@ -13,3 +13,6 @@
 - Fence post-prepare owner-state mutations with a guardian revision check and
   carry incumbent listener connection counts until the old HTTP/WebSocket
   sockets drain, so later deploys cannot stop a still-connected process early.
+- Reserve every live generation's allocated endpoints before its processes bind
+  and until that generation truly stops, and reconstruct those reservations on
+  owner recovery so overlapping jobs generations cannot reuse an endpoint.
