@@ -124,7 +124,13 @@ export default class RollbridgeDaemon {
     }
     await this.guardian.claimOwner(this.config.ownerRecovery?.reconnectGraceMs ?? 30000, this.ownerAuthority())
 
-    if (snapshot) await this.restoreOwnerState(snapshot)
+    if (snapshot) {
+      await this.restoreOwnerState(snapshot, {resumeDrains: false})
+      await this.guardian.reconcileInventory()
+      for (const release of this.releases.values()) {
+        if (release.state === "draining") void this.drainAndPrune(release, release.config)
+      }
+    }
     else {
       this.persistenceEnabled = true
       await this.persistState({throwOnError: true})

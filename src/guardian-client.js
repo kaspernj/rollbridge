@@ -17,16 +17,19 @@ export default class GuardianClient {
     this.socket = /** @type {net.Socket | undefined} */ (undefined)
     this.buffer = ""
     this.nextId = 0
-    this.pending = /** @type {Map<number, {reject: (error: Error) => void, resolve: (value: import("./json.js").JsonValue) => void}>} */ (new Map())
+    this.pending = /** @type {Map<number, {command: string, reject: (error: Error) => void, resolve: (value: import("./json.js").JsonValue) => void}>} */ (new Map())
+    this.idleWaiters = /** @type {(() => void)[]} */ ([])
+    this.guardianExitPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.processes = /** @type {Map<string, GuardianProcess>} */ (new Map())
     this.events = /** @type {Map<string, {reject: (error: Error) => void, resolve: (value: Record<string, import("./json.js").JsonValue>) => void}[]>} */ (new Map())
   }
 
   /** Launches a new detached guardian and connects to it after its bind acknowledgement. */
   async launch() {
-    const child = spawn(process.execPath, [guardianPath, this.socketPath, this.token], {detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"]})
+    const child = spawn(process.execPath, [guardianPath, this.socketPath], {detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"]})
 
     this.pid = child.pid
+    this.guardianExitPromise = new Promise((resolve) => child.once("exit", () => resolve(undefined)))
 
     await new Promise((resolve, reject) => {
       child.once("error", reject)
@@ -35,7 +38,11 @@ export default class GuardianClient {
         if (message && typeof message === "object" && "error" in message) reject(new Error(String(message.error)))
         else resolve(undefined)
       })
+      child.send({token: this.token}, (error) => {
+        if (error) reject(error)
+      })
     })
+    if (child.connected) await new Promise((resolve) => child.once("disconnect", () => resolve(undefined)))
     child.unref()
     await this.connect()
   }
@@ -52,10 +59,11 @@ export default class GuardianClient {
     })
     socket.on("data", (chunk) => this.onData(String(chunk)))
     socket.once("close", () => {
-      for (const {reject} of this.pending.values()) reject(new Error("Process guardian connection closed"))
+      for (const {command, reject} of this.pending.values()) reject(new Error(`Process guardian connection closed while awaiting ${command}`))
       this.pending.clear()
       for (const waiters of this.events.values()) for (const {reject} of waiters) reject(new Error("Process guardian connection closed"))
       this.events.clear()
+      this.resolveIdleWaiters()
     })
     this.socket = socket
   }
@@ -80,7 +88,7 @@ export default class GuardianClient {
     if (!this.socket || this.socket.destroyed) throw new Error("Process guardian is not connected")
     this.nextId += 1
     const id = this.nextId
-    const response = new Promise((resolve, reject) => this.pending.set(id, {reject, resolve}))
+    const response = new Promise((resolve, reject) => this.pending.set(id, {command: String(command.command), reject, resolve}))
 
     this.socket.write(`${JSON.stringify({...command, id, token: this.token})}\n`)
     return await response
@@ -88,8 +96,25 @@ export default class GuardianClient {
 
   /** Stops the guardian after every owned process has stopped. */
   async shutdown() {
+    if (this.pending.size > 0) {
+      await new Promise((resolve) => {
+        this.idleWaiters.push(() => { resolve(undefined) })
+      })
+    }
     await this.request({command: "shutdown"})
-    this.socket?.end()
+    const socket = this.socket
+
+    if (!socket || socket.destroyed) throw new Error("Process guardian disconnected before shutdown acknowledgement")
+    const closed = new Promise((resolve) => socket.once("close", () => resolve(undefined)))
+
+    socket.end()
+    await closed
+  }
+
+  /** Waits for a guardian launched by this client to exit. */
+  async guardianExit() {
+    if (!this.guardianExitPromise) throw new Error("Guardian exit is observable only from the launching client")
+    await this.guardianExitPromise
   }
 
   /**
@@ -153,9 +178,41 @@ export default class GuardianClient {
     })
   }
 
+  /** @returns {Promise<{key: string, provenance: string, status: import("./managed-process.js").ManagedProcessStatus}[]>} Exact guardian-owned inventory. */
+  async inventory() {
+    return /** @type {{key: string, provenance: string, status: import("./managed-process.js").ManagedProcessStatus}[]} */ (await this.request({command: "inventory"}))
+  }
+
+  /**
+   * Stops and forgets one exact guardian-owned registration.
+   * @param {string} key - Stable guardian registration key.
+   * @param {string} provenance - Exact expected process-definition provenance.
+   */
+  async remove(key, provenance) {
+    await this.request({command: "remove", key, provenance})
+    this.processes.delete(key)
+  }
+
+  /** Stops guardian registrations absent from the reconstructed durable snapshot. */
+  async reconcileInventory() {
+    const unexpected = (await this.inventory()).filter((entry) => !this.processes.has(entry.key))
+    const results = await Promise.allSettled(unexpected.map((entry) => this.remove(entry.key, entry.provenance)))
+    const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
+
+    if (errors.length > 0) {
+      throw new AggregateError(errors, `Guardian inventory reconciliation failed for ${errors.length} registration${errors.length === 1 ? "" : "s"}: ${errors.map((error) => errorMessage(error instanceof Error ? error : String(error))).join("; ")}`)
+    }
+  }
+
   /** Disconnects a fenced startup loser without changing guardian-owned processes. */
   disconnect() {
     this.socket?.destroy()
+  }
+
+  /** Resolves shutdown barriers after every earlier request settles. */
+  resolveIdleWaiters() {
+    if (this.pending.size > 0) return
+    for (const resolve of this.idleWaiters.splice(0)) resolve()
   }
 
   /** @param {string} chunk - Protocol bytes. */
@@ -177,6 +234,7 @@ export default class GuardianClient {
         const pending = this.pending.get(message.id)
 
         this.pending.delete(message.id)
+        this.resolveIdleWaiters()
         if (message.error) pending?.reject(new Error(message.error))
         else pending?.resolve(message.result)
       }
@@ -285,4 +343,12 @@ function serializableDefinition(definition) {
  */
 function asProcessStatus(value) {
   return JSON.parse(JSON.stringify(value))
+}
+
+/**
+ * @param {Error | string} error - Error-like value.
+ * @returns {string} Error message.
+ */
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
 }
