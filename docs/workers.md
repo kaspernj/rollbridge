@@ -73,7 +73,8 @@ across later deploys and supervisor/host recovery. Every referenced release
 directory must be reported to Rampway and stays pinned against cleanup until the
 last retained process exits. Rollbridge exposes references as
 `status.releaseReferences`, supports concurrent retired generations, and with
-`ownerRecovery` preserves them across same-authority daemon replacement; see
+`ownerRecovery` preserves them across same-authority daemon recovery and atomic
+incompatible `ensure-daemon` owner replacement; see
 [`docs/config.md`](config.md#processesdeploystrategy) and
 [`docs/cli.md`](cli.md#deploy).
 

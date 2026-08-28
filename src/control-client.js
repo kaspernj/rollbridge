@@ -27,7 +27,15 @@ export async function sendControlCommand({command, path}) {
       if (newlineIndex < 0) return
 
       const line = buffer.slice(0, newlineIndex)
-      const response = JSON.parse(line)
+      let response
+
+      try {
+        response = JSON.parse(line)
+      } catch (error) {
+        socket.destroy()
+        reject(new Error(`Invalid Rollbridge control response from ${path}`, {cause: error}))
+        return
+      }
 
       socket.end()
 

@@ -44,8 +44,11 @@ Current same-authority behavior quiesces configured handoff services after
 candidate activation, retains concurrent generations, reports live release
 references, and can opt into `ownerRecovery` so a durable process guardian
 preserves and reconstructs active/draining generations after daemon process
-exit. Atomic incompatible config/socket/package owner replacement remains an
-unimplemented follow-up requirement.
+exit. With `ownerRecovery` and the same `statePath` transaction anchor,
+`ensure-daemon` also replaces incompatible config, control-socket, package, and
+runtime owners through a guardian-fenced candidate-first handoff while retaining
+active and draining generations. `--takeover-owner` remains a destructive
+external-supervisor migration path, not that atomic handoff.
 
 ## Validation and publication
 

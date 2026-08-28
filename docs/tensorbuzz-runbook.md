@@ -72,9 +72,10 @@ last retained process exits.
 Rollbridge meets the same-authority daemon-exit portion when `ownerRecovery` is
 configured: its guardian retains provenanced processes and a replacement
 reconstructs concurrent generations, endpoints, and `releaseReferences`.
-Without that opt-in, surviving PIDs remain advisory orphans. `--takeover-owner`
-still does not provide an atomic incompatible config/package/socket upgrade;
-that separate handoff remains non-compliant.
+With the same `statePath`, `ensure-daemon` also performs guardian-fenced
+incompatible config/control-socket/package/runtime replacement without stopping
+those generations. Without that opt-in, surviving PIDs remain advisory orphans.
+`--takeover-owner` remains a separate destructive migration path.
 
 ## Operator checks
 

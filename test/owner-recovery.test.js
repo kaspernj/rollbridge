@@ -364,6 +364,79 @@ test("deploy rejects a live ownerRecovery mode change", async () => {
   }
 })
 
+test("ensure-daemon atomically replaces an incompatible owner without losing retained generations", async () => {
+  const fixture = await createFixture()
+  const oldControlPath = fixture.socketPath
+  const newControlPath = path.join(fixture.root, "rollbridge-v2.sock")
+  const runtimePath = path.join(fixture.root, "runtime")
+  const daemonLogPath = path.join(fixture.root, "replacement.log")
+  const daemonPidPath = path.join(fixture.root, "replacement.pid")
+  let owner = spawnDaemon(fixture.configPath)
+  const processGroups = new Set()
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const v1Path = await prepareRelease(fixture.root, "v1")
+    const v2Path = await prepareRelease(fixture.root, "v2")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldControlPath})
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldControlPath})
+    const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: oldControlPath}))
+
+    for (const release of before.releases) for (const processStatus of release.processes) if (processStatus.pid) processGroups.add(processStatus.pid)
+    for (const entry of [...before.services, ...before.singletons]) if (entry.process.pid) processGroups.add(entry.process.pid)
+
+    const nextConfig = /** @type {import("../src/config.js").RollbridgeConfig} */ (structuredClone(fixture.config))
+    nextConfig.control = {path: newControlPath}
+    const companionTemplate = nextConfig.processes.find((processConfig) => processConfig.policy === "companion")
+
+    assert.ok(companionTemplate)
+    nextConfig.processes.splice(2, 0, {
+      ...structuredClone(companionTemplate),
+      id: "new-topology-process",
+      lifecycle: {drainTimeoutMs: 0},
+      nonBlockingDrain: false
+    })
+    await writeConfig(fixture.configPath, nextConfig)
+
+    const replacement = await runCli([
+      "ensure-daemon", "--config", fixture.configPath,
+      "--daemon-log-path", daemonLogPath,
+      "--daemon-pid-path", daemonPidPath,
+      "--daemon-runtime-path", runtimePath,
+      "--daemon-start-timeout-ms", "5000"
+    ])
+    assert.equal(replacement.code, 0, replacement.output)
+
+    const after = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: newControlPath}))
+
+    assert.equal(after.activeReleaseId, "v2")
+    assert.deepEqual(after.releaseReferences, before.releaseReferences)
+    assert.deepEqual(after.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)), before.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)))
+    assert.equal(after.services[0]?.process.pid, before.services[0]?.process.pid)
+    assert.equal(after.singletons[0]?.process.pid, before.singletons[0]?.process.pid)
+
+    const v3Path = await prepareRelease(fixture.root, "v3")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v3", releasePath: v3Path, revision: "v3"}, path: newControlPath})
+    const deployed = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: newControlPath}))
+
+    assert.equal(deployed.activeReleaseId, "v3")
+    assert.deepEqual(deployed.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2", "v3"])
+
+    await Promise.all(["v1", "v2"].map((releaseId) => fs.writeFile(path.join(fixture.root, releaseId, "worker.fifo"), "drained\n")))
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newControlPath})
+    await fs.writeFile(path.join(v3Path, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    for (const pid of processGroups) {
+      try { process.kill(-pid, "SIGKILL") } catch (_error) { /* Exact managed group already exited. */ }
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 /** @returns {Promise<{config: Record<string, import("../src/json.js").JsonValue>, configPath: string, root: string, socketPath: string, statePath: string}>} Fixture paths. */
 async function createFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-recovery-"))
@@ -507,6 +580,20 @@ function spawnDaemon(configPath, bootstrap) {
  */
 async function runDaemon(configPath) {
   const child = spawnDaemon(configPath)
+  let output = ""
+
+  child.stdout?.setEncoding("utf8").on("data", (chunk) => { output += chunk })
+  child.stderr?.setEncoding("utf8").on("data", (chunk) => { output += chunk })
+  const [code] = await once(child, "exit")
+  return {code, output}
+}
+
+/**
+ * @param {string[]} args - CLI arguments.
+ * @returns {Promise<{code: number, output: string}>} Exit result.
+ */
+async function runCli(args) {
+  const child = spawn(process.execPath, [binPath, ...args], {stdio: ["ignore", "pipe", "pipe"]})
   let output = ""
 
   child.stdout?.setEncoding("utf8").on("data", (chunk) => { output += chunk })

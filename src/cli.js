@@ -6,13 +6,14 @@ import {createHash} from "node:crypto"
 import path from "node:path"
 import {spawn} from "node:child_process"
 import {Command} from "commander"
-import RollbridgeDaemon from "./daemon.js"
+import RollbridgeDaemon, {ownerConfigDigest} from "./daemon.js"
 import {loadDaemonRuntimeIdentity, prepareDaemonRuntime} from "./daemon-runtime.js"
 import {loadConfig, parseConfigFile, resolveConfigPath, validateConfig} from "./config.js"
 import {runEnvironmentChecks, runReleaseChecks} from "./doctor.js"
 import {predeployCleanup} from "./predeploy-cleanup.js"
 import {recoverOrphans} from "./recover.js"
 import {sendControlCommand} from "./control-client.js"
+import {readState} from "./state-store.js"
 
 const DEFAULT_DAEMON_START_TIMEOUT_MS = 10000
 
@@ -37,6 +38,7 @@ export async function runCli(argv) {
     .option("--revision <sha>", "Bootstrap revision (requires --config, --release-path, and --release-id)")
     .option("--boot-attestation <digest>", "Opaque bootstrap ownership attestation (requires the complete bootstrap release tuple)")
     .option("--takeover-owner", "Boot and health-check before retiring the current external owner")
+    .option("--replace-owner", "Resume a prepared durable owner replacement")
     .action(async (options) => {
       const bootstrap = await validateDaemonBootstrapOptions(options)
       const configPath = await resolveConfigPath(options.config)
@@ -46,7 +48,12 @@ export async function runCli(argv) {
 
       if (options.takeoverOwner && (!bootstrap || !bootstrap.attestation)) throw new Error("Daemon --takeover-owner requires the complete bootstrap release tuple and --boot-attestation.")
 
-      if (!options.takeoverOwner) {
+      if (options.replaceOwner) {
+        if (bootstrap || options.takeoverOwner) throw new Error("Daemon --replace-owner cannot be combined with bootstrap takeover options.")
+        await daemon.replaceIncompatibleOwner()
+      }
+
+      if (!options.takeoverOwner && !options.replaceOwner) {
         try {
           await daemon.start({exposeControl: !bootstrap})
         } catch (error) {
@@ -819,20 +826,37 @@ async function validateDaemonBootstrapOptions(options) {
 async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtimePath, timeoutMs}) {
   const runtime = await prepareDaemonRuntime(runtimePath || defaultDaemonRuntimePath(config))
   const existingStatus = await daemonStatus(config)
+  const expectedConfigDigest = ownerConfigDigest(config)
 
   if (existingStatus) {
-    assertCompatibleDaemonRuntime(existingStatus, runtime)
-    return existingStatus
+    const matchingRecoveryAuthority = !config.ownerRecovery || (
+      existingStatus.ownerRecovery && typeof existingStatus.ownerRecovery === "object" && !Array.isArray(existingStatus.ownerRecovery) &&
+      existingStatus.ownerRecovery.configDigest === expectedConfigDigest
+    )
+
+    if (compatibleDaemonRuntime(existingStatus, runtime) && matchingRecoveryAuthority) return existingStatus
+    if (!config.ownerRecovery) assertCompatibleDaemonRuntime(existingStatus, runtime)
   }
+
+  const persistedState = config.ownerRecovery && config.statePath ? await readState(config.statePath) : undefined
+  const persistedOwner = persistedState && typeof persistedState === "object" && !Array.isArray(persistedState) ? persistedState : undefined
+  const persistedRecovery = persistedOwner?.recovery
+  const replacement = Boolean(config.ownerRecovery && (existingStatus || (persistedRecovery && typeof persistedRecovery === "object" && !Array.isArray(persistedRecovery) && (
+    persistedRecovery.configDigest !== expectedConfigDigest || !compatibleDaemonRuntime(/** @type {Record<string, import("./json.js").JsonValue>} */ (persistedOwner), runtime)
+  ))))
 
   await startDaemonProcess({
     configPath,
     logPath: logPath || defaultDaemonLogPath(config),
     pidPath: pidPath || defaultDaemonPidPath(config),
+    replacement,
     runtime
   })
 
-  const startedStatus = await waitForDaemonStatus(config, timeoutMs)
+  const startedStatus = await waitForDaemonStatus(config, timeoutMs, {
+    configDigest: config.ownerRecovery ? expectedConfigDigest : undefined,
+    runtime
+  })
 
   assertCompatibleDaemonRuntime(startedStatus, runtime)
   return startedStatus
@@ -865,10 +889,11 @@ async function daemonStatus(config) {
  * @param {string} args.configPath - Config path.
  * @param {string} args.logPath - Log file path.
  * @param {string} args.pidPath - PID file path.
+ * @param {boolean} args.replacement - Whether to run the incompatible replacement transaction.
  * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} args.runtime - Prepared runtime.
  * @returns {Promise<void>} Resolves after the child has been spawned.
  */
-async function startDaemonProcess({configPath, logPath, pidPath, runtime}) {
+async function startDaemonProcess({configPath, logPath, pidPath, replacement = false, runtime}) {
   await fsPromises.mkdir(path.dirname(logPath), {recursive: true})
   await fsPromises.mkdir(path.dirname(pidPath), {recursive: true})
 
@@ -876,7 +901,7 @@ async function startDaemonProcess({configPath, logPath, pidPath, runtime}) {
   const stderrFd = fs.openSync(logPath, "a")
 
   try {
-    const child = spawn(process.execPath, [path.join(runtime.path, "bin", "rollbridge"), "daemon", "--config", configPath], {
+    const child = spawn(process.execPath, [path.join(runtime.path, "bin", "rollbridge"), "daemon", "--config", configPath, ...(replacement ? ["--replace-owner"] : [])], {
       detached: true,
       env: {...process.env, ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST: path.join(runtime.path, "runtime.json")},
       stdio: ["ignore", stdoutFd, stderrFd]
@@ -897,9 +922,10 @@ async function startDaemonProcess({configPath, logPath, pidPath, runtime}) {
  * Waits until a daemon answers status commands.
  * @param {import("./config.js").RollbridgeConfig} config - Loaded config.
  * @param {number} timeoutMs - Timeout in milliseconds.
+ * @param {{configDigest?: string, runtime?: import("./daemon-runtime.js").DaemonRuntimeIdentity}} [expected] - Required authority.
  * @returns {Promise<Record<string, import("./json.js").JsonValue>>} Daemon status response.
  */
-async function waitForDaemonStatus(config, timeoutMs) {
+async function waitForDaemonStatus(config, timeoutMs, expected = {}) {
   const deadline = Date.now() + timeoutMs
   let lastError = /** @type {Error | undefined} */ (undefined)
 
@@ -907,7 +933,7 @@ async function waitForDaemonStatus(config, timeoutMs) {
     try {
       const status = await daemonStatus(config)
 
-      if (status) return status
+      if (status && (!expected.runtime || compatibleDaemonRuntime(status, expected.runtime)) && (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest))) return status
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
     }
@@ -954,16 +980,23 @@ function defaultDaemonRuntimePath(config) {
  * @returns {void}
  */
 function assertCompatibleDaemonRuntime(status, expected) {
-  const runtime = status.daemonRuntime
-  const compatible = runtime && typeof runtime === "object" && !Array.isArray(runtime) &&
-    runtime.format === expected.format && runtime.version === expected.version && runtime.digest === expected.digest
-
-  if (compatible) return
+  if (compatibleDaemonRuntime(status, expected)) return
 
   throw new Error(
     "The running Rollbridge daemon has a legacy or mismatched runtime. " +
     "The deploy was not sent. Keep the current release active, then explicitly stop and restart the daemon with this Rollbridge installation before retrying."
   )
+}
+
+/**
+ * @param {Record<string, import("./json.js").JsonValue>} status - Daemon status.
+ * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} expected - Runtime.
+ * @returns {boolean} Whether the runtime authorities match.
+ */
+function compatibleDaemonRuntime(status, expected) {
+  const runtime = status.daemonRuntime
+
+  return Boolean(runtime && typeof runtime === "object" && !Array.isArray(runtime) && runtime.format === expected.format && runtime.version === expected.version && runtime.digest === expected.digest)
 }
 
 /**

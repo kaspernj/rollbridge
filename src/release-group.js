@@ -66,6 +66,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.activatedAt = /** @type {string | undefined} */ (undefined)
     this.stoppedAt = /** @type {string | undefined} */ (undefined)
     this.retirementError = /** @type {string | undefined} */ (undefined)
+    this.preserveConfigOnRetirement = false
   }
 
   /** @returns {Promise<void>} Starts release-owned processes and health checks the proxied process. */

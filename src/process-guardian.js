@@ -2,6 +2,8 @@
 
 import fs from "node:fs/promises"
 import net from "node:net"
+import crypto from "node:crypto"
+import {isDeepStrictEqual} from "node:util"
 import ManagedProcess from "./managed-process.js"
 
 /**
@@ -14,6 +16,10 @@ import ManagedProcess from "./managed-process.js"
  * @property {{timeoutMs?: number}} [options] - Stop options.
  * @property {string} [previousProvenance] - Expected current provenance.
  * @property {string} [provenance] - New or registered provenance.
+ * @property {import("./json.js").JsonValue} [ownerState] - Private owner transfer state.
+ * @property {string} [replacementId] - Prepared replacement transaction id.
+ * @property {import("./json.js").JsonValue} [authority] - Expected current authority.
+ * @property {import("./json.js").JsonValue} [nextAuthority] - Requested replacement authority.
  * @property {import("./managed-process.js").ManagedProcessStartReason} [reason] - Start reason.
  * @property {string} token - Authentication token.
  */
@@ -28,12 +34,27 @@ const processes = new Map()
 const clients = new Set()
 /** @type {net.Socket | undefined} */
 let ownerClient
+/** @type {net.Socket | undefined} */
+let replacementClient
+/** @type {string | undefined} */
+let replacementId
+/** @type {string | undefined} */
+let committedReplacementId
+/** @type {import("./json.js").JsonValue | undefined} */
+let replacementAuthority
+/** @type {import("./json.js").JsonValue | undefined} */
+let replacementOwnerState
+/** @type {import("./json.js").JsonValue | undefined} */
+let ownerState
 /** @type {{reject: (error: Error) => void, resolve: (value: {claimed: boolean}) => void, socket: net.Socket, timer: ReturnType<typeof setTimeout>}[]} */
 const claimWaiters = []
 
 const server = net.createServer((socket) => {
   clients.add(socket)
   socket.setEncoding("utf8")
+  // An abruptly killed daemon can reset its private guardian connection. Keep the
+  // durable guardian alive; the close handler below releases only that owner claim.
+  socket.on("error", () => socket.destroy())
   let buffer = ""
 
   socket.once("close", () => {
@@ -47,7 +68,18 @@ const server = net.createServer((socket) => {
     }
     if (ownerClient === socket) {
       ownerClient = undefined
-      grantNextOwner()
+      if (replacementClient && replacementOwnerState) commitReplacement()
+      else {
+        if (replacementClient) abortReplacement("Committed owner disconnected before replacement candidate was ready")
+        grantNextOwner()
+      }
+    }
+    if (replacementClient === socket) {
+      replacementClient = undefined
+      replacementId = undefined
+      replacementAuthority = undefined
+      replacementOwnerState = undefined
+      if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: "replacement-aborted"})}\n`)
     }
   })
   socket.on("data", (chunk) => {
@@ -105,6 +137,9 @@ async function handleLine(socket, line) {
 async function execute(request, socket) {
   if (request.command === "claim-owner") {
     if (!ownerClient) {
+      if (ownerState !== undefined && !isDeepStrictEqual(request.authority, ownerAuthority(ownerState))) {
+        throw new Error("Owner recovery authority does not match the guardian's committed authority")
+      }
       ownerClient = socket
       return {claimed: true}
     }
@@ -121,7 +156,60 @@ async function execute(request, socket) {
     })
   }
 
+  if (request.command === "publish-owner-state") {
+    requireOwner(socket, request.command)
+    if (request.ownerState === undefined) throw new Error("Guardian owner publication requires ownerState")
+    ownerState = request.ownerState
+    committedReplacementId = undefined
+    return {published: true}
+  }
+
+  if (request.command === "owner-state") {
+    requireOwner(socket, request.command)
+    if (!ownerState) throw new Error("Committed owner has not published transferable state")
+    return {ownerState}
+  }
+
+  if (request.command === "replacement-status") {
+    return {committedReplacementId: committedReplacementId ?? null, ownerClaimed: Boolean(ownerClient)}
+  }
+
+  if (request.command === "prepare-owner-replacement") {
+    if (socket === ownerClient) throw new Error("Committed owner cannot prepare itself as a replacement")
+    if (replacementClient && replacementClient !== socket) throw new Error("Another owner replacement candidate is already prepared")
+    if (!ownerState) throw new Error("Committed owner has not published transferable state")
+    const currentAuthority = ownerAuthority(ownerState)
+    const resumesCommittedAuthority = !ownerClient && isDeepStrictEqual(currentAuthority, request.nextAuthority)
+
+    if (!resumesCommittedAuthority && !isDeepStrictEqual(currentAuthority, request.authority)) {
+      throw new Error("Owner replacement authority fence does not match the guardian's committed authority")
+    }
+    if (request.nextAuthority === undefined) throw new Error("Owner replacement requires the requested authority")
+    if (!replacementId) replacementId = crypto.randomUUID()
+    replacementClient = socket
+    replacementAuthority = request.nextAuthority
+    return {ownerState, replacementId}
+  }
+
+  if (request.command === "stage-owner-replacement") {
+    requireReplacement(socket, request)
+    if (request.ownerState === undefined || !isDeepStrictEqual(ownerAuthority(request.ownerState), replacementAuthority)) {
+      throw new Error("Prepared replacement state does not match the requested authority")
+    }
+    replacementOwnerState = request.ownerState
+    if (!ownerClient) commitReplacement()
+    return {committed: ownerClient === socket}
+  }
+
+  if (request.command === "commit-owner-replacement") {
+    requireOwner(socket, request.command)
+    if (!replacementClient || request.replacementId !== replacementId || !replacementOwnerState) throw new Error("Owner replacement transaction is not the prepared ready candidate")
+    commitReplacement()
+    return {committed: true}
+  }
+
   if (request.command === "shutdown") {
+    requireOwner(socket, request.command)
     await Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
     server.close()
     await fs.rm(socketPath, {force: true})
@@ -137,6 +225,8 @@ async function execute(request, socket) {
       if (existing.provenance !== request.provenance) throw new Error(`Guardian provenance mismatch for ${request.key}`)
       return existing.process.status()
     }
+
+    requireOwner(socket, request.command)
 
     const record = /** @type {{desired: boolean, process?: ManagedProcess, provenance: string}} */ ({desired: true, provenance: request.provenance})
     const definition = request.definition
@@ -155,6 +245,8 @@ async function execute(request, socket) {
   const record = processes.get(request.key)
 
   if (!record) throw new Error(`Guardian process ${request.key} is not registered`)
+
+  if (request.command !== "status") requireOwner(socket, request.command)
 
   if (request.command === "start") {
     record.desired = true
@@ -188,6 +280,58 @@ async function execute(request, socket) {
 
   broadcast({event: "status", key: request.key, status})
   return status
+}
+
+/**
+ * @param {net.Socket} socket - Requesting client.
+ * @param {string} command - Command name.
+ */
+function requireOwner(socket, command) {
+  if (ownerClient !== socket) throw new Error(`Guardian ${command} requires the committed owner`)
+}
+
+/** @param {string} reason - Abort diagnostic. */
+function abortReplacement(reason) {
+  if (replacementClient && !replacementClient.destroyed) replacementClient.write(`${JSON.stringify({event: "replacement-aborted", reason})}\n`)
+  replacementClient = undefined
+  replacementId = undefined
+  replacementAuthority = undefined
+  replacementOwnerState = undefined
+}
+
+/** Atomically promotes the prepared client and its complete transferable state. */
+function commitReplacement() {
+  if (!replacementClient || !replacementId || !replacementOwnerState) throw new Error("Owner replacement candidate is not ready")
+  const previousOwner = ownerClient
+  const committedClient = replacementClient
+  const committedId = replacementId
+
+  ownerClient = committedClient
+  ownerState = replacementOwnerState
+  committedReplacementId = committedId
+  replacementClient = undefined
+  replacementId = undefined
+  replacementAuthority = undefined
+  replacementOwnerState = undefined
+  committedClient.write(`${JSON.stringify({event: "replacement-committed", replacementId: committedId})}\n`)
+  if (previousOwner && !previousOwner.destroyed) previousOwner.write(`${JSON.stringify({event: "replacement-retired", replacementId: committedId})}\n`)
+}
+
+/**
+ * @param {net.Socket} socket - Requesting client.
+ * @param {GuardianRequest} request - Request.
+ */
+function requireReplacement(socket, request) {
+  if (replacementClient !== socket || request.replacementId !== replacementId) throw new Error("Owner replacement transaction is not the prepared candidate")
+}
+
+/**
+ * @param {import("./json.js").JsonValue} state - Transfer state.
+ * @returns {import("./json.js").JsonValue} Embedded authority fence.
+ */
+function ownerAuthority(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state) || !("authority" in state)) throw new Error("Guardian owner state is missing its authority fence")
+  return state.authority
 }
 
 /** @param {Record<string, import("./json.js").JsonValue>} event - Event payload. */

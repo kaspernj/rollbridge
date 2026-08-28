@@ -19,6 +19,7 @@ export default class GuardianClient {
     this.nextId = 0
     this.pending = /** @type {Map<number, {reject: (error: Error) => void, resolve: (value: import("./json.js").JsonValue) => void}>} */ (new Map())
     this.processes = /** @type {Map<string, GuardianProcess>} */ (new Map())
+    this.events = /** @type {Map<string, {reject: (error: Error) => void, resolve: (value: Record<string, import("./json.js").JsonValue>) => void}[]>} */ (new Map())
   }
 
   /** Launches a new detached guardian and connects to it after its bind acknowledgement. */
@@ -53,6 +54,8 @@ export default class GuardianClient {
     socket.once("close", () => {
       for (const {reject} of this.pending.values()) reject(new Error("Process guardian connection closed"))
       this.pending.clear()
+      for (const waiters of this.events.values()) for (const {reject} of waiters) reject(new Error("Process guardian connection closed"))
+      this.events.clear()
     })
     this.socket = socket
   }
@@ -89,9 +92,65 @@ export default class GuardianClient {
     this.socket?.end()
   }
 
-  /** @param {number} graceMs - Event-driven handoff grace while the prior owner disconnects. */
-  async claimOwner(graceMs) {
-    await this.request({command: "claim-owner", graceMs})
+  /**
+   * @param {number} graceMs - Event-driven handoff grace while the prior owner disconnects.
+   * @param {import("./json.js").JsonValue} authority - Exact owner authority.
+   */
+  async claimOwner(graceMs, authority) {
+    await this.request({authority, command: "claim-owner", graceMs})
+  }
+
+  /** @param {import("./json.js").JsonValue} ownerState - Private transferable owner state. */
+  async publishOwnerState(ownerState) {
+    await this.request({command: "publish-owner-state", ownerState})
+  }
+
+  /**
+   * @param {import("./json.js").JsonValue} authority - Persisted current authority.
+   * @param {import("./json.js").JsonValue} nextAuthority - Requested authority.
+   * @returns {Promise<{ownerState: import("./json.js").JsonValue, replacementId: string}>} Prepared transaction.
+   */
+  async prepareOwnerReplacement(authority, nextAuthority) {
+    return /** @type {{ownerState: import("./json.js").JsonValue, replacementId: string}} */ (await this.request({authority, command: "prepare-owner-replacement", nextAuthority}))
+  }
+
+  /**
+   * @param {string} replacementId - Prepared transaction.
+   * @param {import("./json.js").JsonValue} ownerState - Complete candidate state.
+   * @returns {Promise<{committed: boolean}>} Whether staging completed an ownerless transaction.
+   */
+  async stageOwnerReplacement(replacementId, ownerState) {
+    return /** @type {{committed: boolean}} */ (await this.request({command: "stage-owner-replacement", ownerState, replacementId}))
+  }
+
+  /** @param {string} replacementId - Prepared transaction id. */
+  async commitOwnerReplacement(replacementId) {
+    await this.request({command: "commit-owner-replacement", replacementId})
+  }
+
+  /** @returns {Promise<{committedReplacementId: string | null, ownerClaimed: boolean}>} Transaction status. */
+  async replacementStatus() {
+    return /** @type {{committedReplacementId: string | null, ownerClaimed: boolean}} */ (await this.request({command: "replacement-status"}))
+  }
+
+  /** @returns {Promise<import("./json.js").JsonValue>} Current private transfer state. */
+  async ownerState() {
+    const result = /** @type {{ownerState: import("./json.js").JsonValue}} */ (await this.request({command: "owner-state"}))
+
+    return result.ownerState
+  }
+
+  /**
+   * @param {string} event - Guardian event name.
+   * @returns {Promise<Record<string, import("./json.js").JsonValue>>} Next event payload.
+   */
+  waitForEvent(event) {
+    return new Promise((resolve, reject) => {
+      const waiters = this.events.get(event) || []
+
+      waiters.push({reject, resolve})
+      this.events.set(event, waiters)
+    })
   }
 
   /** Disconnects a fenced startup loser without changing guardian-owned processes. */
@@ -110,7 +169,10 @@ export default class GuardianClient {
 
       this.buffer = this.buffer.slice(newline + 1)
       if (message.event) {
-        this.processes.get(message.key)?.onGuardianEvent(message)
+        if (message.event === "process" || message.event === "status") this.processes.get(message.key)?.onGuardianEvent(message)
+        const waiter = this.events.get(message.event)?.shift()
+
+        if (waiter) waiter.resolve(message)
       } else {
         const pending = this.pending.get(message.id)
 

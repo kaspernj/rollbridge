@@ -37,7 +37,7 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Document the required Velocious release-generation contract (`docs/velocious.md` and `docs/workers.md`) without treating documentation as proof that the runtime implements it.
   - [x] Implement same-owner jobs-main retirement, concurrent generations, independent drains, and live release-reference reporting.
   - [x] Implement opt-in durable guardian recovery for exact same-authority daemon process replacement without stopping retained generations.
-  - [ ] Implement atomic incompatible owner/config/socket/package replacement without stopping retained generations.
+  - [x] Implement guardian-fenced atomic incompatible owner/config/control-socket/package/runtime replacement without stopping retained generations.
 - [x] Replicas and stable worker indexes. (Supported on port-less `companion` processes; `proxied`/`singleton`/ported processes stay single.)
   - [x] Allow one process config to start multiple replicas (`replicas`, companion-only for now).
   - [x] Expose `ROLLBRIDGE_REPLICA_INDEX`, replica count, and per-replica template context (`{{replicaIndex}}`/`{{replicaCount}}`).

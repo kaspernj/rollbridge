@@ -125,7 +125,9 @@ web side and must not stop a still-draining jobs generation.
 
 `status.releaseReferences` reports active and draining releases until full stop;
 Rampway still owns enforcement against on-disk cleanup. With `ownerRecovery`,
-references reconstruct across same-authority daemon process replacement; they do
-not yet transfer across incompatible takeover. If `retirementError` is set,
+references reconstruct across same-authority daemon process replacement and
+transfer across an incompatible `ensure-daemon` owner handoff. They do not
+transfer through the separate destructive `--takeover-owner` path. If
+`retirementError` is set,
 inspect the quiet-hook events. Rollbridge deliberately leaves that generation
 alive rather than signaling arbitrary PIDs or continuing its stop sequence.

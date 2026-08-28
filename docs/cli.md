@@ -74,9 +74,9 @@ The replacement can bind before those stops finish. A bootstrap failure occurs
 before retirement, so the previously accepted owner remains available.
 
 `ownerRecovery` covers unexpected process exit under the exact same authority.
-A compliant incompatible config/package/socket handoff must still preserve or
-transfer supervision without handing old workers to a new jobs-main. Current
-`--takeover-owner` does not provide that split-3 behavior.
+Guardian-fenced incompatible config/package/runtime/control-socket handoff is
+provided by `ensure-daemon`, not `--takeover-owner`; it preserves supervision
+without handing old workers to a new jobs-main.
 
 ## `ensure-daemon`
 
@@ -96,9 +96,14 @@ Before starting a detached daemon, Rollbridge atomically copies its runtime code
 and production dependency closure into a content-addressed directory outside
 the invoking release. This keeps the long-lived daemon valid when deploy
 retention removes that release. A responsive daemon is reused only when its
-runtime identity matches the invoking Rollbridge installation; a legacy or
-mismatched daemon causes the command to fail before any deploy is sent. Stop and
-restart such a daemon explicitly during a safe maintenance handoff.
+runtime and normalized config authority match. With `ownerRecovery` and the same
+`statePath`, an incompatible config/control-socket/package/runtime owner is
+replaced candidate-first: the guardian retains active and draining generations,
+the candidate binds and validates its listeners, and an authenticated fenced
+transaction commits guardian authority and the final control socket. A lost
+control response is accepted only when the guardian confirms the exact committed
+transaction id. A legacy or mismatched daemon without that durable contract
+causes the command to fail before any deploy is sent.
 
 - `--daemon-log-path <path>` — file the detached daemon's stdout/stderr is
   appended to. Default: `/tmp/rollbridge-<application>.log`. See
@@ -150,9 +155,9 @@ replacement failure can therefore return non-zero while the candidate remains
 active, but it cannot leave the old jobs generation dispatching.
 
 With `ownerRecovery`, active and draining generations remain guardian-supervised
-across unexpected same-authority daemon exit and reconstruct on replacement.
+across unexpected same-authority daemon exit and reconstruct on replacement;
+they also transfer intact through an incompatible `ensure-daemon` owner handoff.
 Without it, surviving PIDs remain advisory orphans for `recover --force`.
-Incompatible runtime/config/socket replacement is still outside this contract.
 
 Before each deploy, the daemon reloads the config path it was started with.
 Compatible process and lifecycle changes apply to the new release and govern
