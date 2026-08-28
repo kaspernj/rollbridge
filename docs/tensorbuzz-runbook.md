@@ -70,11 +70,12 @@ merely because a supervisor restarted. Cleanup becomes eligible only after the
 last retained process exits.
 
 Current Rollbridge does not yet meet those recovery and owner-handoff
-requirements. Its non-blocking release drains last only for the current daemon's
-lifetime; after restart it reports surviving PIDs as advisory, non-adoptable
+requirements. Within one daemon it quiesces configured handoff services, retains
+concurrent generations, and reports `releaseReferences`. After restart it
+reports surviving PIDs as advisory, non-adoptable
 orphans, and forced recovery stops them. `--takeover-owner` quiesces and starts
 asynchronous stops for every managed process instead of transferring retained
-generations.
+generations; listener replacement is not atomic.
 
 ## Operator checks
 

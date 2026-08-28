@@ -17,6 +17,7 @@ fixed port such as `7330`.
   policy: "service",
   deployStrategy: "handoff",
   command: "npx velocious background-jobs-main",
+  lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
   port: {from: 7331, to: 7399}
 },
 {
@@ -29,6 +30,9 @@ fixed port such as `7330`.
   gracefulStopMs: "indefinite"
 }
 ```
+
+The illustrative `appctl` command must be replaced by the application's real,
+reviewed jobs-main quiescence control.
 
 Each worker receives its generation's jobs-main port. Old workers keep that port
 for their entire lifetime; normal deploy draining never hands them to, or lets
@@ -67,8 +71,9 @@ HTTP/WebSocket connections, or other retained services to finish. The required
 supervisor contract durably retains generations after the command returns and
 across later deploys and supervisor/host recovery. Every referenced release
 directory must be reported to Rampway and stays pinned against cleanup until the
-last retained process exits. Current Rollbridge provides asynchronous draining
-only for the lifetime of the current daemon; see the current-behavior notes in
+last retained process exits. Current Rollbridge exposes same-owner references as
+`status.releaseReferences` and supports concurrent retired generations, but
+supervision lasts only for the lifetime of the current daemon; see the notes in
 [`docs/config.md`](config.md#processesdeploystrategy) and
 [`docs/cli.md`](cli.md#deploy).
 

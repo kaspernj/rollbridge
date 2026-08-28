@@ -35,7 +35,8 @@ This roadmap tracks planned Rollbridge features and documentation. Rollbridge sh
   - [x] Support signal-only lifecycle steps for workers that can quiet on a Unix signal. (Per-process `stopSignal`; sent before the `SIGKILL`-after-`gracefulStopMs` fallback.)
   - [x] Add a non-blocking drain mode so a worker can quiesce at release retirement independently of the HTTP/WebSocket connection drain (`nonBlockingDrain`). This control alone does not provide durable retired-generation supervision.
   - [x] Document the required Velocious release-generation contract (`docs/velocious.md` and `docs/workers.md`) without treating documentation as proof that the runtime implements it.
-  - [ ] Implement and verify durable release-scoped jobs-main retirement: owned-handoff supervision, recovery across daemon/host replacement, multiple concurrent retired generations, and release-reference reporting for cleanup pins.
+  - [x] Implement same-owner jobs-main retirement, concurrent generations, independent drains, and live release-reference reporting.
+  - [ ] Implement durable guardian recovery and atomic owner/config/socket/package replacement without stopping retained generations.
 - [x] Replicas and stable worker indexes. (Supported on port-less `companion` processes; `proxied`/`singleton`/ported processes stay single.)
   - [x] Allow one process config to start multiple replicas (`replicas`, companion-only for now).
   - [x] Expose `ROLLBRIDGE_REPLICA_INDEX`, replica count, and per-replica template context (`{{replicaIndex}}`/`{{replicaCount}}`).

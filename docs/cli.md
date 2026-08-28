@@ -134,12 +134,21 @@ for old workers, jobs, or HTTP/WebSocket connections to finish. Prints
 If the new release fails to start or health-check, the previous release stays
 active and the command errors.
 
+After activation, deploy waits for bounded quiet hooks of old handoff services
+and `nonBlockingDrain` companions, then returns without waiting for their drains.
+A failure is logged and exposed as `retirementError`; the generation stays alive.
+The successful activation response also includes
+`retirement: {status: "quiescence_failed", releaseId, error}` so callers cannot
+mistake the retirement failure for an unqualified transition.
+`status.releaseReferences` lists `{releaseId, releasePath}` for every active or
+draining release and excludes fully stopped history.
+
 After candidate activation, `Daemon.deploy()` synchronously waits for singleton
 replacement before starting `drainAndPrune` and returning. A replacement failure
 can therefore return a non-zero result while the candidate remains active, and a
 slow replacement delays both the response and retirement of the old release.
 
-This is a process-lifetime non-blocking drain, not durable supervision across a
+This is a same-owner non-blocking drain, not durable supervision across a
 daemon or host restart. It continues across later deploys only while the same
 daemon remains alive. After a restart, surviving PIDs from persisted state are
 advisory orphans that Rollbridge cannot re-adopt; explicit `recover --force`

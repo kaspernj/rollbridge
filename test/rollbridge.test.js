@@ -278,6 +278,65 @@ test("singleton processes restart without overlap during deploy", async () => {
   }
 })
 
+test("candidate activation quiesces the old jobs generation before a blocked singleton replacement completes", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, includeSingleton: true, webDependsOnService: true})
+  const singletonGatePath = path.join(fixture.root, "singleton-replacement.gate")
+  const singletonQuietPath = path.join(fixture.root, "singleton-replacement.quiet")
+  const fifo = spawn("mkfifo", [singletonGatePath])
+
+  await once(fifo, "exit")
+
+  const config = normalizeConfig({
+    ...fixture.config,
+    processes: fixture.config.processes.map((processConfig) => processConfig.id === "jobs-main"
+      ? {...processConfig, lifecycle: {quietCommand: `printf 'quiet\\n' > ${JSON.stringify(singletonQuietPath)}; read -r _ < ${JSON.stringify(singletonGatePath)}`}}
+      : processConfig)
+  })
+  const daemon = await startDaemon(config)
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deployPromise
+  let singletonGateReleased = false
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+
+    const abortController = new AbortController()
+    const changes = fs.watch(fixture.root, {signal: abortController.signal})
+    const singletonReplacementBlocked = (async () => {
+      try {
+        for await (const change of changes) {
+          if (change.filename === path.basename(singletonQuietPath)) return
+        }
+      } finally {
+        abortController.abort()
+      }
+    })()
+
+    deployPromise = daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    let deploySettled = false
+
+    void deployPromise.then(() => { deploySettled = true }, () => { deploySettled = true })
+    await singletonReplacementBlocked
+    await Promise.resolve()
+
+    assert.equal(daemon.status().activeReleaseId, "v2", "candidate traffic must already be active")
+    assert.equal(deploySettled, false, "deploy must remain pending on singleton replacement")
+    assert.equal(await fs.readFile(fixture.serviceQuietPath, "utf8"), "v1\n", "old jobs-main must quiesce before singleton replacement completes")
+
+    await fs.writeFile(singletonGatePath, "continue\n")
+    singletonGateReleased = true
+    await deployPromise
+  } finally {
+    if (deployPromise && !singletonGateReleased) {
+      await fs.writeFile(singletonGatePath, "continue\n")
+      await deployPromise.catch(() => {})
+    }
+
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("a failed singleton replacement surfaces the error after stopping the old singleton", async () => {
   // The singleton's working directory is per-release; only the v1 directory exists, so
   // the v2 replacement cannot spawn (ENOENT on cwd) and its start() rejects.
@@ -363,7 +422,7 @@ test("handoff services start per release and drain with their release", async ()
 
     assert.ok(v2Service?.pid, "v2 service should be running")
     assert.notEqual(v2.ports.beacon, v1.ports.beacon)
-    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state, "running")
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state, "quiesced")
 
     socket.close()
     socket = undefined
@@ -399,7 +458,7 @@ test("handoff services stop after release-local dependents finish draining", asy
     const drainingRelease = statusRelease(daemon, "v1")
 
     assert.equal(drainingRelease.state, "draining")
-    assert.equal(drainingRelease.processes.find((processStatus) => processStatus.id === "beacon")?.state, "running")
+    assert.equal(drainingRelease.processes.find((processStatus) => processStatus.id === "beacon")?.state, "quiesced")
 
     socket.close()
     socket = undefined
@@ -411,6 +470,118 @@ test("handoff services stop after release-local dependents finish draining", asy
     assert.ok(v1ServiceStop, "v1 handoff service should stop after release drain")
   } finally {
     if (socket) socket.close()
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("candidate activation retires jobs-main with its workers without waiting for the generation to drain", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerStopDelayMs: 1000})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const oldRelease = statusRelease(daemon, "v1")
+    const oldService = oldRelease.processes.find((processStatus) => processStatus.id === "beacon")
+    const oldWorker = oldRelease.processes.find((processStatus) => processStatus.id === "worker")
+
+    assert.ok(oldService?.pid)
+    assert.ok(oldWorker?.pid)
+
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    assert.equal(daemon.status().activeReleaseId, "v2", "traffic must switch only after the complete candidate is healthy")
+    assert.equal(await fs.readFile(fixture.serviceQuietPath, "utf8"), "v1\n", "old jobs-main must quiesce immediately after candidate activation")
+
+    const retired = statusRelease(daemon, "v1")
+
+    assert.equal(retired.state, "draining", "deployment completion must not wait for the old jobs generation")
+    assert.equal(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state, "quiesced", "old jobs-main must remain alive and quiesced with its draining workers")
+    assert.notEqual(retired.processes.find((processStatus) => processStatus.id === "worker")?.state, "stopped", "old worker must remain in its original generation until accepted work settles")
+    assert.notEqual(statusRelease(daemon, "v2").ports.beacon, retired.ports.beacon, "old and new workers must retain distinct jobs-main endpoints")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("multiple retired jobs generations keep distinct endpoints and live references until completion", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+  /** @type {WebSocket[]} */
+  const sockets = []
+
+  try {
+    await Promise.all(["v1", "v2", "v3"].map((releaseId) => fs.mkdir(path.join(fixture.root, releaseId))))
+    await daemon.deploy({releaseId: "v1", releasePath: path.join(fixture.root, "v1"), revision: "v1"})
+    sockets.push(await openWebSocket(daemon))
+    await daemon.deploy({releaseId: "v2", releasePath: path.join(fixture.root, "v2"), revision: "v2"})
+    sockets.push(await openWebSocket(daemon))
+    await daemon.deploy({releaseId: "v3", releasePath: path.join(fixture.root, "v3"), revision: "v3"})
+
+    const status = daemon.status()
+    const generations = ["v1", "v2", "v3"].map((releaseId) => statusRelease(daemon, releaseId))
+
+    assert.deepEqual(generations.map((release) => release.state), ["draining", "draining", "active"])
+    assert.equal(new Set(generations.map((release) => release.ports.beacon)).size, 3)
+    assert.deepEqual(status.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2", "v3"])
+    assert.deepEqual(status.releaseReferences.map((reference) => reference.releasePath), ["v1", "v2", "v3"].map((releaseId) => path.join(fixture.root, releaseId)))
+
+    for (const socket of sockets.splice(0)) socket.close()
+    await waitFor(() => statusRelease(daemon, "v1").state === "stopped" && statusRelease(daemon, "v2").state === "stopped")
+    assert.deepEqual(daemon.status().releaseReferences.map((reference) => reference.releaseId), ["v3"])
+  } finally {
+    for (const socket of sockets) socket.close()
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("candidate failure preserves old traffic, jobs generation, endpoint, and reference without quiescing it", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, nonBlockingDrainWorker: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "good", releasePath: fixture.root, revision: "good"})
+    const before = statusRelease(daemon, "good")
+    const beforeService = before.processes.find((processStatus) => processStatus.id === "beacon")
+
+    await assert.rejects(() => daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"}), /Health check failed/)
+
+    const after = statusRelease(daemon, "good")
+
+    assert.equal(await fetchText(daemon, "/release"), "good")
+    assert.equal(after.state, "active")
+    assert.equal(after.ports.beacon, before.ports.beacon)
+    assert.equal(after.processes.find((processStatus) => processStatus.id === "beacon")?.pid, beforeService?.pid)
+    assert.equal((await fs.readFile(fixture.serviceQuietPath, "utf8")).includes("good\n"), false, "candidate cleanup must not quiesce the active generation")
+    assert.deepEqual(daemon.status().releaseReferences.map((reference) => reference.releaseId), ["good"])
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("handoff-service quiescence failure is visible and leaves the generation alive", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceQuietFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
+  /** @type {{data?: Record<string, import("../src/json.js").JsonValue>, message: string}[]} */
+  const logs = []
+  const daemon = new RollbridgeDaemon({config: fixture.config, logger: (message, data) => logs.push({data, message})})
+
+  try {
+    await daemon.start()
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const result = await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    const retired = statusRelease(daemon, "v1")
+
+    assert.equal(retired.state, "draining")
+    assert.match(String(retired.retirementError), /quiet command exited non-zero.*23/)
+    assert.equal(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state, "stopping")
+    assert.notEqual(retired.processes.find((processStatus) => processStatus.id === "worker")?.state, "stopped")
+    assert.ok(logs.some((entry) => entry.message === "release retirement quiescence failed" && entry.data?.releaseId === "v1"))
+    assert.deepEqual(result.retirement, {error: retired.retirementError, releaseId: "v1", status: "quiescence_failed"})
+  } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -1187,12 +1358,13 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{companionReplicas?: number, handoffService?: boolean, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number, workerStopDelayMs?: number}} [options] - Fixture options.
- * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, singletonLogPath: string, statePath: string}>} Fixture data.
+ * @param {{companionReplicas?: number, handoffService?: boolean, handoffServiceQuiet?: boolean, handoffServiceQuietFailure?: boolean, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number, workerStopDelayMs?: number}} [options] - Fixture options.
+ * @returns {Promise<{config: import("../src/config.js").RollbridgeConfig, root: string, serviceLogPath: string, serviceQuietPath: string, singletonLogPath: string, statePath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const serviceLogPath = path.join(root, "service.log")
+  const serviceQuietPath = path.join(root, "service.quiet")
   const singletonLogPath = path.join(root, "singleton.log")
   const statePath = path.join(root, "rollbridge.state.json")
   /** @type {Array<Record<string, import("../src/json.js").JsonValue>>} */
@@ -1206,6 +1378,7 @@ async function createFixture(options = {}) {
         ROLLBRIDGE_SERVICE_LOG: serviceLogPath
       },
       id: "beacon",
+      ...(options.handoffServiceQuiet || options.handoffServiceQuietFailure ? {lifecycle: {quietCommand: options.handoffServiceQuietFailure ? "exit 23" : `printf '%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(serviceQuietPath)}`}} : {}),
       policy: "service",
       port: options.handoffService ? {from: 15000, to: 15099} : {from: 0, to: 0},
       restartDelayMs: 50
@@ -1293,7 +1466,7 @@ async function createFixture(options = {}) {
     ...(options.persistState ? {statePath} : {})
   })
 
-  return {config, root, serviceLogPath, singletonLogPath, statePath}
+  return {config, root, serviceLogPath, serviceQuietPath, singletonLogPath, statePath}
 }
 
 /**

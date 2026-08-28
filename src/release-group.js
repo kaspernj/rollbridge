@@ -10,7 +10,7 @@ import {waitForHealth} from "./health.js"
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {"starting" | "active" | "draining" | "stopped" | "failed"} ReleaseState
  * @typedef {{http: number, websocket: number}} ReleaseConnections
- * @typedef {{activatedAt: string | undefined, connectionCount: number, connections: ReleaseConnections, drainStartedAt: string | undefined, ports: Record<string, number>, processes: import("./managed-process.js").ManagedProcessStatus[], releaseId: string, releasePath: string, revision: string, state: ReleaseState, stoppedAt: string | undefined}} ReleaseStatus
+ * @typedef {{activatedAt: string | undefined, connectionCount: number, connections: ReleaseConnections, drainStartedAt: string | undefined, ports: Record<string, number>, processes: import("./managed-process.js").ManagedProcessStatus[], releaseId: string, releasePath: string, retirementError: string | undefined, revision: string, state: ReleaseState, stoppedAt: string | undefined}} ReleaseStatus
  * @typedef {{count?: number, index?: number, instanceId?: string, shouldRestart?: () => boolean}} BuildProcessOptions
  */
 
@@ -63,6 +63,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.drainStartedAt = /** @type {string | undefined} */ (undefined)
     this.activatedAt = /** @type {string | undefined} */ (undefined)
     this.stoppedAt = /** @type {string | undefined} */ (undefined)
+    this.retirementError = /** @type {string | undefined} */ (undefined)
   }
 
   /** @returns {Promise<void>} Starts release-owned processes and health checks the proxied process. */
@@ -365,9 +366,7 @@ export default class ReleaseGroup extends EventEmitter {
   async drainAndStop(timeoutMs, config = this.config) {
     if (this.state === "stopped") return
 
-    this.state = "draining"
-    this.drainStartedAt = new Date().toISOString()
-    this.refreshProcessDefinitions(config)
+    if (this.state !== "draining") await this.beginRetirement(config)
 
     // Stop nonBlockingDrain processes (e.g. job workers) immediately and in the background, so
     // their lifecycle drain runs as soon as the release is retired — in parallel with the
@@ -392,6 +391,33 @@ export default class ReleaseGroup extends EventEmitter {
     await Promise.allSettled(handoffServices.map((processInstance) => processInstance.stop()))
     this.state = "stopped"
     this.stoppedAt = new Date().toISOString()
+  }
+
+  /**
+   * Marks the generation retired and quiesces its jobs-main and non-blocking workers as one unit.
+   * @param {import("./config.js").RollbridgeConfig} [config] - Refreshed retirement config.
+   * @returns {Promise<void>} Resolves when retirement quiescence succeeds.
+   */
+  async beginRetirement(config = this.config) {
+    if (this.state === "draining") {
+      if (this.retirementError) throw new Error(this.retirementError)
+      return
+    }
+
+    this.state = "draining"
+    this.drainStartedAt = new Date().toISOString()
+    this.refreshProcessDefinitions(config)
+    const generationIds = new Set([...this.handoffServiceIds, ...this.nonBlockingDrainIds])
+    const results = await Promise.allSettled([...this.processes.entries()]
+      .filter(([id]) => generationIds.has(id))
+      .map(([, processInstance]) => processInstance.quiesceStrict()))
+    const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
+
+    if (errors.length > 0) {
+      const failure = new AggregateError(errors, `Release ${this.releaseId} retirement quiescence failed`)
+      this.retirementError = `${failure.message}: ${errors.map((error) => error instanceof Error ? error.message : String(error)).join("; ")}`
+      throw failure
+    }
   }
 
   /** @returns {Promise<void>} Stops all release-owned processes. */
@@ -419,6 +445,7 @@ export default class ReleaseGroup extends EventEmitter {
       processes: [...this.processes.values()].map((processInstance) => processInstance.status()),
       releaseId: this.releaseId,
       releasePath: this.releasePath,
+      retirementError: this.retirementError,
       revision: this.revision,
       state: this.state,
       stoppedAt: this.stoppedAt

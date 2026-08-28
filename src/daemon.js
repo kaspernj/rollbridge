@@ -19,7 +19,7 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
- * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  */
 
 export default class RollbridgeDaemon {
@@ -423,17 +423,26 @@ export default class RollbridgeDaemon {
     this.logger("traffic switched", {previousReleaseId: previousRelease ? previousRelease.releaseId : null, releaseId: release.releaseId})
 
     this.refreshServiceDefinitions(release)
-    await this.replaceSingletons(release)
+    let retirementFailure
 
     if (previousRelease) {
-      void this.drainAndPrune(previousRelease, nextConfig)
+      try {
+        await previousRelease.beginRetirement(nextConfig)
+        void this.drainAndPrune(previousRelease, nextConfig)
+      } catch (error) {
+        retirementFailure = previousRelease.retirementError ?? (error instanceof Error ? error.message : String(error))
+        this.logger("release retirement quiescence failed", {error: retirementFailure, releaseId: previousRelease.releaseId})
+      }
     }
+
+    await this.replaceSingletons(release)
 
     this.persistState()
 
     return {
       activeReleaseId: release.releaseId,
-      previousReleaseId: previousRelease ? previousRelease.releaseId : null
+      previousReleaseId: previousRelease ? previousRelease.releaseId : null,
+      ...(retirementFailure && previousRelease ? {retirement: {error: retirementFailure, releaseId: previousRelease.releaseId, status: "quiescence_failed"}} : {})
     }
   }
 
@@ -957,6 +966,9 @@ export default class RollbridgeDaemon {
         port: this.proxyPort ?? this.config.proxy.port,
         upstreamHost: this.config.proxy.upstreamHost
       },
+      releaseReferences: [...this.releases.values()]
+        .filter((release) => release.state === "active" || release.state === "draining")
+        .map((release) => ({releaseId: release.releaseId, releasePath: release.releasePath})),
       releases: [...this.releases.values()].map((release) => release.status()),
       services: [...this.services.entries()].map(([id, processInstance]) => ({
         id,
