@@ -230,11 +230,13 @@ export default class RollbridgeDaemon {
     if (snapshot.activeReleaseId === null && snapshot.releases.length === 0) return
     this.bootstrap = snapshot.bootstrap ? {...snapshot.bootstrap} : undefined
     this.ownerTransition = snapshot.ownerTransition ? {...snapshot.ownerTransition} : undefined
+    const singletonOwnerReleaseIds = new Set(Object.values(singletonReleaseIds))
 
     for (const releaseStatus of snapshot.releases) {
       const transitionCandidate = this.generationTransition?.candidateReleaseId === releaseStatus.releaseId && this.generationTransition.phase !== "committed"
+      const singletonOwner = singletonOwnerReleaseIds.has(releaseStatus.releaseId)
 
-      if (releaseStatus.state !== "active" && releaseStatus.state !== "draining" && !transitionCandidate) continue
+      if (releaseStatus.state !== "active" && releaseStatus.state !== "draining" && !transitionCandidate && !singletonOwner) continue
       const release = new ReleaseGroup({
         config: releaseConfigs[releaseStatus.releaseId] || config,
         logger: this.logger,
@@ -273,12 +275,13 @@ export default class RollbridgeDaemon {
       }
     }
     for (const singletonStatus of snapshot.singletons) {
-      const processConfig = config.processes.find((candidate) => candidate.id === singletonStatus.id && candidate.policy === "singleton")
       const singletonReleaseId = singletonReleaseIds[singletonStatus.id] || definitionRelease.releaseId
       const singletonRelease = this.releases.get(singletonReleaseId)
 
-      if (!processConfig) throw new Error(`Owner recovery state contains unknown singleton ${singletonStatus.id}.`)
       if (!singletonRelease) throw new Error(`Owner recovery state contains singleton ${singletonStatus.id} for unknown release ${singletonReleaseId}.`)
+      const processConfig = singletonRelease.config.processes.find((candidate) => candidate.id === singletonStatus.id && candidate.policy === "singleton")
+
+      if (!processConfig) throw new Error(`Owner recovery state contains unknown singleton ${singletonStatus.id} for release ${singletonReleaseId}.`)
       const singleton = singletonRelease.buildProcess(processConfig, {guardianKey: `singleton:${singletonReleaseId}:${singletonStatus.id}`})
 
       await this.recoverGuardianProcess(singleton)
@@ -1531,6 +1534,7 @@ export default class RollbridgeDaemon {
       this.singletonReleaseIds.set(processConfig.id, release.releaseId)
       await singleton.start("deploy")
     }
+    this.pruneStoppedReleases()
   }
 
   /**
@@ -1662,9 +1666,13 @@ export default class RollbridgeDaemon {
 
   /** @returns {void} Removes stopped releases beyond the retention policy. */
   pruneStoppedReleases() {
-    const statuses = [...this.releases.values()].map((release) => release.status())
+    const singletonOwnerReleaseIds = new Set(this.singletonReleaseIds.values())
+    const statuses = [...this.releases.values()]
+      .filter((release) => !singletonOwnerReleaseIds.has(release.releaseId))
+      .map((release) => release.status())
 
     for (const releaseId of releasesToPrune(statuses, this.config.releaseRetention, Date.now())) {
+      this.releases.get(releaseId)?.releasePortReservations()
       this.releases.delete(releaseId)
     }
   }
@@ -1911,6 +1919,8 @@ export default class RollbridgeDaemon {
     // a cleared orphan must not reappear if the OS later recycles its pid for an unrelated process.
     this.orphans = this.orphans.filter((orphan) => isProcessAlive(orphan.pid))
 
+    const singletonOwnerReleaseIds = new Set(this.singletonReleaseIds.values())
+
     return {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,
       application: this.config.application,
@@ -1928,7 +1938,7 @@ export default class RollbridgeDaemon {
         upstreamHost: this.config.proxy.upstreamHost
       },
       releaseReferences: [...this.releases.values()]
-        .filter((release) => release.state === "active" || release.state === "draining" || (this.generationTransition?.phase !== "committed" && this.generationTransition?.candidateReleaseId === release.releaseId))
+        .filter((release) => release.state === "active" || release.state === "draining" || singletonOwnerReleaseIds.has(release.releaseId) || (this.generationTransition?.phase !== "committed" && this.generationTransition?.candidateReleaseId === release.releaseId))
         .map((release) => ({releaseId: release.releaseId, releasePath: release.releasePath})),
       releases: [...this.releases.values()].map((release) => release.status()),
       services: [...this.services.entries()].map(([id, processInstance]) => ({

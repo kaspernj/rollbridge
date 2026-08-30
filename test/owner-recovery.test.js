@@ -20,7 +20,7 @@ const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
 const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 
 /** @typedef {import("../src/daemon.js").DaemonStatus} DaemonStatus */
-/** @typedef {DaemonStatus & {recovery: {configDigest: string}}} RecoveryState */
+/** @typedef {DaemonStatus & {recovery: {configDigest: string}, singletonReleaseIds?: Record<string, string>}} RecoveryState */
 
 test("external owner retirement releases guardian authority without losing its generation", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-retirement-recovery-"))
@@ -294,6 +294,141 @@ test("owner recovery preserves exact release definitions across a candidate conf
 
       await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)))
       await shutdown.catch(() => {})
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery reconstructs a stopped release that still owns a committed-pending singleton", async () => {
+  const fixture = await createFixture()
+
+  fixture.config.releaseRetention = {keep: 0, maxAgeMs: 0}
+  await writeConfig(fixture.configPath, fixture.config)
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  const replacementPause = pauseSingletonReplacement(owner, "v2")
+  const capturedDrain = captureReleaseDrain(owner, "v1")
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deployPromise
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    deployPromise = owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    void deployPromise.catch(() => {})
+    await replacementPause.started
+    await capturedDrain.started
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await capturedDrain.completed
+    if (owner.pendingWrite) await owner.pendingWrite
+    const pending = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(fixture.statePath, "utf8")))
+
+    assert.equal(pending.activeReleaseId, "v2")
+    assert.equal(pending.generationTransition?.phase, "committed_pending")
+    assert.equal(pending.singletonReleaseIds?.singleton, "v1")
+    const stoppedRelease = pending.releases.find((release) => release.releaseId === "v1" && release.state === "stopped")
+
+    assert.ok(stoppedRelease)
+    assert.deepEqual(pending.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2"])
+    await owner.retireCommittedOwner(undefined)
+    owner.guardian?.disconnect()
+
+    recovered = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+    await recovered.start()
+
+    assert.equal(recovered.status().generationTransition?.phase, "committed")
+    assert.equal(recovered.singletonReleaseIds.get("singleton"), "v2")
+    assert.ok(!recovered.releases.has("v1"), "the stopped singleton owner may be pruned after replacement commits")
+    assert.equal(recovered.portReservations.has(stoppedRelease.ports.jobs), false)
+    assert.equal(recovered.portReservations.has(stoppedRelease.ports.web), false)
+  } finally {
+    replacementPause.continue()
+    await deployPromise?.catch(() => {})
+    if (recovered) {
+      const shutdown = recovered.shutdown()
+
+      await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => {})
+      recovered.guardian?.disconnect()
+    } else {
+      const shutdown = owner.shutdown()
+
+      await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => {})
+      owner.guardian?.disconnect()
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery uses the owning release singleton definition during a committed-pending config change", async () => {
+  const fixture = await createFixture()
+  const initialProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const initialSingleton = initialProcesses.find((processConfig) => processConfig.id === "singleton")
+
+  assert.ok(initialSingleton)
+  initialSingleton.env = {SINGLETON_CONFIG_AUTHORITY: "v1"}
+  await writeConfig(fixture.configPath, fixture.config)
+  const initialConfig = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config: initialConfig, configPath: fixture.configPath, logger: () => {}})
+  const replacementPause = pauseSingletonReplacement(owner, "v2")
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deployPromise
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    const changedConfig = structuredClone(fixture.config)
+    const changedProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (changedConfig.processes)
+    const changedSingleton = changedProcesses.find((processConfig) => processConfig.id === "singleton")
+
+    assert.ok(changedSingleton)
+    changedSingleton.env = {SINGLETON_CONFIG_AUTHORITY: "v2"}
+    await writeConfig(fixture.configPath, changedConfig)
+    deployPromise = owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    void deployPromise.catch(() => {})
+    await replacementPause.started
+    const pending = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(fixture.statePath, "utf8")))
+
+    assert.equal(pending.activeReleaseId, "v2")
+    assert.equal(pending.generationTransition?.phase, "committed_pending")
+    assert.equal(pending.singletonReleaseIds?.singleton, "v1")
+    await owner.retireCommittedOwner(undefined)
+    owner.guardian?.disconnect()
+
+    const nextConfig = normalizeConfig(changedConfig, fixture.configPath)
+
+    recovered = new RollbridgeDaemon({config: nextConfig, configPath: fixture.configPath, logger: () => {}})
+    await recovered.start()
+
+    assert.equal(recovered.status().generationTransition?.phase, "committed")
+    assert.equal(recovered.singletonReleaseIds.get("singleton"), "v2")
+    assert.equal(recovered.singletons.get("singleton")?.env.SINGLETON_CONFIG_AUTHORITY, "v2")
+  } finally {
+    replacementPause.continue()
+    await deployPromise?.catch(() => {})
+    if (recovered) {
+      const shutdown = recovered.shutdown()
+
+      await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)))
+      await shutdown.catch(() => {})
+      recovered.guardian?.disconnect()
+    } else {
+      const shutdown = owner.shutdown()
+
+      await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)))
+      await shutdown.catch(() => {})
+      owner.guardian?.disconnect()
     }
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -888,6 +1023,65 @@ async function prepareRelease(root, releaseId, {holdJobsBind = false} = {}) {
  */
 async function writeConfig(configPath, config) {
   await fs.writeFile(configPath, `module.exports = ${JSON.stringify(config, null, 2)}\n`)
+}
+
+/**
+ * Pauses only one candidate's post-commit singleton replacement at an exact promise boundary.
+ * @param {RollbridgeDaemon} daemon - Current owner.
+ * @param {string} releaseId - Candidate release to pause.
+ * @returns {{continue: () => void, started: Promise<void>}} Pause controls.
+ */
+function pauseSingletonReplacement(daemon, releaseId) {
+  const replaceSingletons = daemon.replaceSingletons.bind(daemon)
+  /** @type {() => void} */
+  let markStarted = () => {}
+  /** @type {() => void} */
+  let continueReplacement = () => {}
+  const started = new Promise((resolve) => { markStarted = () => resolve(undefined) })
+  const gate = new Promise((resolve) => { continueReplacement = () => resolve(undefined) })
+
+  daemon.replaceSingletons = async (release) => {
+    if (release.releaseId === releaseId) {
+      markStarted()
+      await gate
+    }
+    await replaceSingletons(release)
+  }
+  return {continue: continueReplacement, started}
+}
+
+/**
+ * Captures one background release drain through its package-owned promise.
+ * @param {RollbridgeDaemon} daemon - Current owner.
+ * @param {string} releaseId - Release whose drain completion is required.
+ * @returns {{completed: Promise<void>, started: Promise<void>}} Drain boundaries.
+ */
+function captureReleaseDrain(daemon, releaseId) {
+  const drainAndPrune = daemon.drainAndPrune.bind(daemon)
+  /** @type {() => void} */
+  let markStarted = () => {}
+  /** @type {(error: Error | string) => void} */
+  let rejectCompleted = () => {}
+  /** @type {() => void} */
+  let resolveCompleted = () => {}
+  const started = new Promise((resolve) => { markStarted = () => resolve(undefined) })
+  const completed = new Promise((resolve, reject) => {
+    resolveCompleted = () => resolve(undefined)
+    rejectCompleted = reject
+  })
+
+  daemon.drainAndPrune = async (release, config) => {
+    if (release.releaseId !== releaseId) return await drainAndPrune(release, config)
+    markStarted()
+    try {
+      await drainAndPrune(release, config)
+      resolveCompleted()
+    } catch (error) {
+      rejectCompleted(error instanceof Error ? error : String(error))
+      throw error
+    }
+  }
+  return {completed, started}
 }
 
 /**
