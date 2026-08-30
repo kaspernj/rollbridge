@@ -884,9 +884,7 @@ async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtim
   const persistedState = config.ownerRecovery && config.statePath ? await readState(config.statePath) : undefined
   const persistedOwner = persistedState && typeof persistedState === "object" && !Array.isArray(persistedState) ? persistedState : undefined
   const persistedRecovery = persistedOwner?.recovery
-  const replacement = Boolean(config.ownerRecovery && (existingStatus || (persistedRecovery && typeof persistedRecovery === "object" && !Array.isArray(persistedRecovery) && (
-    persistedRecovery.configDigest !== expectedConfigDigest || !compatibleDaemonRuntime(/** @type {Record<string, import("./json.js").JsonValue>} */ (persistedOwner), runtime)
-  ))))
+  const replacement = Boolean(config.ownerRecovery && (existingStatus || (persistedRecovery && typeof persistedRecovery === "object" && !Array.isArray(persistedRecovery))))
   const resolvedPidPath = path.resolve(pidPath || defaultDaemonPidPath(config))
   const legacyIncumbentPid = replacement ? await readDaemonPid(resolvedPidPath) : undefined
 

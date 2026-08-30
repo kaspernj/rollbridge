@@ -19,4 +19,5 @@
 
 - Serialize active-role restoration with retirement, reject empty lifecycle
   commands, bound guardian process-log forwarding for stalled clients, and keep
-  a claimed recovery owner alive until replacement listener retirement.
+  a claimed recovery owner alive until replacement listener retirement. Journal
+  hook-free post-switch retirement and singleton work for exact crash recovery.

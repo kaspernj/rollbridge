@@ -637,6 +637,9 @@ test("owner recovery reconstructs a stopped release that still owns a committed-
 
 test("owner recovery uses the owning release singleton definition during a committed-pending config change", async () => {
   const fixture = await createFixture()
+  const fixtureProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+
+  fixture.config.processes = fixtureProcesses.filter((processConfig) => processConfig.id !== "beacon")
   const initialProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
   const initialSingleton = initialProcesses.find((processConfig) => processConfig.id === "singleton")
 
@@ -1222,6 +1225,47 @@ test("replacement removes only guardian-owned candidate inventory left before de
     if (candidatePid && isProcessRunning(candidatePid)) {
       try { process.kill(-candidatePid, "SIGKILL") } catch (_error) { /* Exact candidate group already exited. */ }
     }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("ensure-daemon replaces a same-authority owner whose control socket disappeared", async () => {
+  const fixture = await createFixture()
+  const runtimePath = path.join(fixture.root, "runtime")
+  const daemonLogPath = path.join(fixture.root, "same-authority-replacement.log")
+  const daemonPidPath = path.join(fixture.root, "same-authority-replacement.pid")
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const ensureArgs = [
+    "ensure-daemon", "--config", fixture.configPath,
+    "--daemon-log-path", daemonLogPath,
+    "--daemon-pid-path", daemonPidPath,
+    "--daemon-runtime-path", runtimePath,
+    "--daemon-start-timeout-ms", "5000"
+  ]
+
+  try {
+    const first = await runCli(ensureArgs)
+
+    assert.equal(first.code, 0, first.output)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    await fs.rm(fixture.socketPath, {force: true})
+    const replacement = await runCli(ensureArgs)
+
+    assert.equal(replacement.code, 0, `${replacement.output}\n${await fs.readFile(daemonLogPath, "utf8")}`)
+    const after = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    assert.equal(after.activeReleaseId, "v1")
+    assert.notEqual(after.daemonPid, before.daemonPid)
+    await waitForProcessExit(before.daemonPid)
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
   }

@@ -686,6 +686,65 @@ test("retired owner replacement commit carries its exact recovered process key",
   await client.commitRetiredOwnerReplacement(replacementId, processKey)
 })
 
+test("reserved process recovery rejects a reconstructed definition with different provenance", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const processKey = "release:v1:worker"
+
+  try {
+    await fixture.client.process(processKey, definition("worker")).recover()
+    const [registration] = await fixture.client.inventory()
+
+    assert.ok(registration)
+    await candidate.connect()
+    candidate.reserveProcessRecovery(processKey, registration.provenance)
+    await assert.rejects(
+      () => candidate.process(processKey, definition("different-worker")).recover(),
+      /provenance mismatch for reserved process/
+    )
+    assert.deepEqual((await fixture.client.inventory()).map(({key}) => key), [processKey])
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("retired owner replacement rejects a registered process absent from committed owner state", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const committedProcessKey = "release:v1:worker"
+  const candidateProcessKey = "release:candidate:worker"
+  const authority = {configDigest: "owner", runtime: null}
+  const snapshot = {
+    activeReleaseId: "v1",
+    control: {path: path.join(fixture.root, "rollbridge.sock")},
+    releases: [{processes: [{id: "worker"}], releaseId: "v1"}],
+    services: [],
+    singletons: []
+  }
+  const candidateSnapshot = {
+    ...snapshot,
+    releases: [...snapshot.releases, {processes: [{id: "worker"}], releaseId: "candidate"}]
+  }
+
+  try {
+    await fixture.client.process(committedProcessKey, definition("worker")).recover()
+    await fixture.client.process(candidateProcessKey, definition("candidate-worker")).recover()
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {authority, snapshot: candidateSnapshot})
+    await assert.rejects(
+      () => candidate.commitRetiredOwnerReplacement(prepared.replacementId, candidateProcessKey),
+      /process .* does not belong to the committed owner/
+    )
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("retired owner replacement requires unchanged authority and the exact control path absent", async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
@@ -694,7 +753,13 @@ test("retired owner replacement requires unchanged authority and the exact contr
   const processKey = "release:v1:worker"
   const authority = {configDigest: "incumbent", runtime: null}
   const nextAuthority = {configDigest: "candidate", runtime: null}
-  const snapshot = {activeReleaseId: "v1", control: {path: controlPath}}
+  const snapshot = {
+    activeReleaseId: "v1",
+    control: {path: controlPath},
+    releases: [{processes: [{id: "worker"}], releaseId: "v1"}],
+    services: [],
+    singletons: []
+  }
 
   try {
     await fixture.client.process(processKey, definition("worker")).recover()
@@ -723,12 +788,22 @@ test("retired owner replacement requires unchanged authority and the exact contr
       /not the prepared candidate/
     )
     await assert.rejects(
+      () => candidate.commitRetiredOwnerReplacement("stale-replacement", processKey),
+      /not the prepared candidate/
+    )
+    await assert.rejects(
       () => candidate.commitRetiredOwnerReplacement(ready.replacementId, "release:v1:wrong"),
       /process .* is not registered/
     )
     const committed = candidate.waitForEvent("replacement-committed")
+    const retirementRequested = fixture.client.waitForEvent("replacement-retirement-requested")
+    const connectionState = candidate.waitForEvent("owner-connection-state")
 
     await candidate.commitRetiredOwnerReplacement(ready.replacementId, processKey)
+    await retirementRequested
+    await fixture.client.publishOwnerConnectionState(ready.replacementId, "v1", {http: 1, websocket: 2})
+    assert.deepEqual(await connectionState, {connections: {http: 1, websocket: 2}, event: "owner-connection-state", releaseId: "v1"})
+    await fixture.client.finalizeOwnerReplacement(ready.replacementId)
     await committed
     await candidate.shutdown()
     await fixture.client.guardianExit()
