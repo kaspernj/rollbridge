@@ -4,3 +4,6 @@
   snapshot rather than candidate-local process order, and independently require
   that proof to remain registered while retaining the replacement transaction,
   authority, and control-path fences.
+- Fail closed when an older retained guardian cannot commit that replacement
+  atomically after the incumbent control socket disappears, preserving the
+  incumbent owner, retained connections, and guardian-managed release processes.
