@@ -210,32 +210,68 @@ test("replacement staging rejects owner state published after prepare", async ()
   }
 })
 
+test("retired owner replacement commit carries its exact recovered process key", async () => {
+  const client = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+  const replacementId = "prepared-replacement"
+  const processKey = "release:v1:worker"
+
+  client.request = async (request) => {
+    if (!request.key) throw new Error(`Guardian ${request.command} requires a process key`)
+    assert.deepEqual(request, {command: "commit-retired-owner-replacement", key: processKey, replacementId})
+    return {committed: true}
+  }
+
+  await client.commitRetiredOwnerReplacement(replacementId, processKey)
+})
+
 test("retired owner replacement requires unchanged authority and the exact control path absent", async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const contender = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
   const controlPath = path.join(fixture.root, "rollbridge.sock")
+  const processKey = "release:v1:worker"
   const authority = {configDigest: "incumbent", runtime: null}
   const nextAuthority = {configDigest: "candidate", runtime: null}
   const snapshot = {activeReleaseId: "v1", control: {path: controlPath}}
 
   try {
+    await fixture.client.process(processKey, definition("worker")).recover()
     await fixture.client.publishOwnerState({authority, snapshot})
     await candidate.connect()
     const changed = await candidate.prepareOwnerReplacement(authority, nextAuthority)
 
     await candidate.stageOwnerReplacement(changed.replacementId, {authority: nextAuthority, snapshot})
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId), /unchanged owner authority/)
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId, processKey), /unchanged owner authority/)
     await candidate.abortOwnerReplacement(changed.replacementId)
 
     const occupied = await candidate.prepareOwnerReplacement(authority, authority)
 
     await candidate.stageOwnerReplacement(occupied.replacementId, {authority, snapshot})
     await fs.writeFile(controlPath, "occupied\n")
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId), /control socket .* still exists/)
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId, processKey), /control socket .* still exists/)
     await candidate.abortOwnerReplacement(occupied.replacementId)
-    await fixture.client.shutdown()
+
+    await fs.rm(controlPath)
+    const ready = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(ready.replacementId, {authority, snapshot})
+    await contender.connect()
+    await assert.rejects(
+      () => contender.request({command: "commit-retired-owner-replacement", key: processKey, replacementId: ready.replacementId}),
+      /not the prepared candidate/
+    )
+    await assert.rejects(
+      () => candidate.commitRetiredOwnerReplacement(ready.replacementId, "release:v1:wrong"),
+      /process .* is not registered/
+    )
+    const committed = candidate.waitForEvent("replacement-committed")
+
+    await candidate.commitRetiredOwnerReplacement(ready.replacementId, processKey)
+    await committed
+    await candidate.shutdown()
     await fixture.client.guardianExit()
   } finally {
+    contender.disconnect()
     candidate.disconnect()
     await cleanupGuardian(fixture)
   }
