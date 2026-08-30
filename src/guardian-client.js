@@ -196,7 +196,7 @@ export default class GuardianClient {
 
   /**
    * @param {string} replacementId - Same-authority transaction whose incumbent listener is absent.
-   * @param {string} key - Exact retained process proving guardian ownership.
+   * @param {string} key - Exact recovered guardian process proving candidate reconstruction.
    */
   async commitRetiredOwnerReplacement(replacementId, key) {
     await this.request({command: "commit-retired-owner-replacement", key, replacementId})

@@ -299,9 +299,8 @@ async function execute(request, socket) {
   }
 
   if (request.command === "commit-retired-owner-replacement") {
-    if (!request.key) throw new Error("Guardian commit-retired-owner-replacement requires a process key")
-    if (!processes.has(request.key)) throw new Error(`Guardian process ${request.key} is not registered`)
     requireReplacement(socket, request)
+    requireProcess(request)
     if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
     if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
     const controlPath = ownerControlPath(ownerState)
@@ -410,10 +409,7 @@ async function execute(request, socket) {
     return managedProcess.status()
   }
 
-  if (!request.key) throw new Error(`Guardian ${request.command} requires a process key`)
-  const record = processes.get(request.key)
-
-  if (!record) throw new Error(`Guardian process ${request.key} is not registered`)
+  const record = requireProcess(request)
 
   if (request.command !== "status") requireOwner(socket, request.command)
 
@@ -530,6 +526,18 @@ function publishReplacementCommitted(committedClient, committedId) {
  */
 function requireReplacement(socket, request) {
   if (replacementClient !== socket || request.replacementId !== replacementId) throw new Error("Owner replacement transaction is not the prepared candidate")
+}
+
+/**
+ * @param {GuardianRequest} request - Keyed guardian request.
+ * @returns {{desired: boolean, process: ManagedProcess, provenance: string}} Exact registered process.
+ */
+function requireProcess(request) {
+  if (!request.key) throw new Error(`Guardian ${request.command} requires a process key`)
+  const record = processes.get(request.key)
+
+  if (!record) throw new Error(`Guardian process ${request.key} is not registered`)
+  return record
 }
 
 /**

@@ -413,11 +413,11 @@ export default class RollbridgeDaemon {
 
       if (!staged.committed) {
         if (retiredIncumbentControl) {
-          const retainedProcessKey = legacyGuardianKeys(transfer.snapshot)[0]
+          const processKey = this.guardian.processes.keys().next().value
 
-          if (!retainedProcessKey) throw new Error("Retired owner replacement requires an exact guardian-owned process registration in durable state")
+          if (!processKey) throw new Error("Retired owner replacement requires an exact recovered guardian process registration")
           try {
-            await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, retainedProcessKey)
+            await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, processKey)
           } catch (error) {
             if (!(error instanceof Error) || error.message !== "Guardian commit-retired-owner-replacement requires the committed owner") throw error
             await this.retireRetainedProtocolOwner(transfer.snapshot)
