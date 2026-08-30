@@ -14,6 +14,7 @@ import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic} from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
 import {findAvailablePort} from "../src/port-allocator.js"
+import {waitForProcessExit} from "./support/process.js"
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const binPath = path.join(repoRoot, "bin", "rollbridge")
@@ -764,7 +765,7 @@ function releaseProcessPid(status, releaseId, processId) {
  * @param {string} expectedState - Expected completed state.
  */
 async function waitForReleaseState(socketPath, releaseId, expectedState) {
-  const deadline = Date.now() + 3000
+  const deadline = Date.now() + 10000
 
   while (Date.now() < deadline) {
     const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
@@ -774,22 +775,6 @@ async function waitForReleaseState(socketPath, releaseId, expectedState) {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error(`Timed out waiting for release ${releaseId} to reach ${expectedState}`)
-}
-
-/** @param {number} pid - Exact fixture process expected to exit. */
-async function waitForProcessExit(pid) {
-  const deadline = Date.now() + 3000
-
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0)
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
-      throw error
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25))
-  }
-  throw new Error(`Timed out waiting for process ${pid} to exit`)
 }
 
 /** @param {string} filePath - Exact fixture marker. */

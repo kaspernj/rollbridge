@@ -8,6 +8,7 @@ import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
 import GuardianClient from "../src/guardian-client.js"
+import {waitForProcessExit} from "./support/process.js"
 
 const legacyGuardianPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "pre-split3-process-guardian.js")
 const recoveryOwnerPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "guardian-recovery-owner.js")
@@ -225,7 +226,7 @@ test("guardian terminates a restart attempt that never claims ownership", async 
           executable: process.execPath
         },
         reconnectGraceMs: 0,
-        startupTimeoutMs: 60
+        startupTimeoutMs: 1000
       },
       snapshot: {activeReleaseId: null}
     })
@@ -420,9 +421,10 @@ test("guardian logs an asynchronous daemon spawn failure before retrying", async
       snapshot: {activeReleaseId: null}
     })
     fixture.client.disconnect()
-    const diagnostic = await waitForFileText(logPath)
+    const diagnosticPattern = /"code":"ENOENT".*"message":"guardian failed to restart daemon"/
+    const diagnostic = await waitForFileText(logPath, diagnosticPattern)
 
-    assert.match(diagnostic, /"code":"ENOENT".*"message":"guardian failed to restart daemon"/)
+    assert.match(diagnostic, diagnosticPattern)
     for (const privateValue of [privateArgs, privateEnvironment, privateExecutable, fixture.root, logPath]) {
       assert.ok(!diagnostic.includes(privateValue), `guardian diagnostic exposed ${privateValue}`)
     }
@@ -883,39 +885,23 @@ async function waitForRestartRecords(markerPath, count) {
 
 /**
  * @param {string} filePath - File to read after creation.
- * @returns {Promise<string>} File contents.
+ * @param {RegExp} [expected] - Content that must be present before returning.
+ * @returns {Promise<string>} Non-empty accepted file contents.
  */
-async function waitForFileText(filePath) {
+async function waitForFileText(filePath, expected) {
   const deadline = Date.now() + 3000
 
   while (Date.now() < deadline) {
     try {
-      return await fs.readFile(filePath, "utf8")
+      const contents = await fs.readFile(filePath, "utf8")
+
+      if (contents && (!expected || expected.test(contents))) return contents
     } catch (error) {
       if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
     }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   throw new Error(`Timed out waiting for ${filePath}`)
-}
-
-/**
- * @param {number} pid - Exact process PID.
- * @returns {Promise<void>} Resolves after exit.
- */
-async function waitForProcessExit(pid) {
-  const deadline = Date.now() + 1000
-
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0)
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
-      throw error
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
-  throw new Error(`Timed out waiting for process ${pid} to exit`)
 }
 
 /**

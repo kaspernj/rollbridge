@@ -13,6 +13,7 @@ import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
+import {isProcessRunning, waitForProcessExit} from "./support/process.js"
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
@@ -85,7 +86,7 @@ test("external owner retirement releases guardian authority without losing its g
     await waitForFile(path.join(v1Path, "drain-started"), 1000)
     await fs.writeFile(path.join(v1Path, "drained"), "done\n")
     await waitForProcessExit(v1WorkerPid, 1000)
-    assert.equal(isAlive(v2WorkerPid), true, "the active candidate worker must remain usable while the old generation drains")
+    assert.equal(isProcessRunning(v2WorkerPid), true, "the active candidate worker must remain usable while the old generation drains")
   } finally {
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "drained"), "done\n").catch(() => {})))
     await replacement?.shutdown().catch(() => {})
@@ -204,7 +205,7 @@ test("guardian restarts an abruptly exited daemon without replacing managed proc
     await shutdown
   } finally {
     await killChild(owner)
-    if (recoveredDaemonPid && isAlive(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
+    if (recoveredDaemonPid && isProcessRunning(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact managed group already exited. */ }
     }
@@ -330,7 +331,7 @@ test("owner recovery repairs a partial public snapshot from committed guardian s
     await shutdown
   } finally {
     await killChild(owner)
-    if (recoveredDaemonPid && isAlive(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
+    if (recoveredDaemonPid && isProcessRunning(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact group already exited. */ }
     }
@@ -533,7 +534,7 @@ test("replacement removes only guardian-owned candidate inventory left before de
 
     assert.equal(recovered.activeReleaseId, "v1")
     assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath: v1Path}])
-    assert.equal(isAlive(candidatePid), false, "uncommitted candidate must be stopped before replacement becomes healthy")
+    assert.equal(isProcessRunning(candidatePid), false, "uncommitted candidate must be stopped before replacement becomes healthy")
 
     await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
     assert.equal((await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})).activeReleaseId, "v2", "removed candidate keys must be reusable by a later valid deploy")
@@ -544,7 +545,7 @@ test("replacement removes only guardian-owned candidate inventory left before de
     await once(owner, "exit")
   } finally {
     await killChild(owner)
-    if (candidatePid && isAlive(candidatePid)) {
+    if (candidatePid && isProcessRunning(candidatePid)) {
       try { process.kill(-candidatePid, "SIGKILL") } catch (_error) { /* Exact candidate group already exited. */ }
     }
     await stopFixtureGuardian(fixture.statePath)
@@ -851,17 +852,6 @@ async function waitForFile(filePath, timeoutMs) {
 }
 
 /**
- * @param {number} pid - Exact fixture process.
- * @param {number} timeoutMs - Bounded exit wait.
- */
-async function waitForProcessExit(pid, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
-
-  while (isAlive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
-  assert.equal(isAlive(pid), false, `process ${pid} did not exit within ${timeoutMs}ms`)
-}
-
-/**
  * Opens a live WebSocket through the fixture proxy.
  * @param {number} port - Proxy port.
  * @returns {Promise<net.Socket>} Upgraded socket.
@@ -896,20 +886,6 @@ function releaseProcessPid(status, releaseId, processId) {
 
   if (typeof pid !== "number") throw new Error(`Missing ${processId} PID for release ${releaseId}`)
   return pid
-}
-
-/**
- * @param {number} pid - Exact fixture pid.
- * @returns {boolean} Whether the exact fixture process is alive.
- */
-function isAlive(pid) {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return false
-    throw error
-  }
 }
 
 /**
