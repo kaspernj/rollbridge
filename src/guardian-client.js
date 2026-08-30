@@ -156,6 +156,11 @@ export default class GuardianClient {
     await this.request({authority, command: "claim-owner", graceMs})
   }
 
+  /** Starts graceful process retirement and relinquishes committed owner authority. */
+  async retireOwner() {
+    await this.request({command: "retire-owner"})
+  }
+
   /** @param {import("./json.js").JsonValue} ownerState - Private transferable owner state. */
   async publishOwnerState(ownerState) {
     await this.request({command: "publish-owner-state", ownerState})

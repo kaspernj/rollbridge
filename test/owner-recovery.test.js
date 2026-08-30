@@ -9,6 +9,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
+import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
@@ -20,6 +21,79 @@ const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 
 /** @typedef {import("../src/daemon.js").DaemonStatus} DaemonStatus */
 /** @typedef {DaemonStatus & {recovery: {configDigest: string}}} RecoveryState */
+
+test("external owner retirement releases guardian authority without losing its generation", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-retirement-recovery-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "rollbridge.state.json")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
+  const config = normalizeConfig({
+    application: "owner-retirement-recovery-test",
+    control: {path: socketPath},
+    ownerRecovery: {reconnectGraceMs: 50},
+    processes: [
+      {
+        command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+        id: "worker",
+        lifecycle: {drainCommand: "printf started > \"$ROLLBRIDGE_RELEASE_PATH/drain-started\"; while [ ! -f \"$ROLLBRIDGE_RELEASE_PATH/drained\" ]; do sleep 0.01; done", drainTimeoutMs: 3000},
+        nonBlockingDrain: true,
+        policy: "companion"
+      },
+      {
+        command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
+        health: {intervalMs: 25, path: "/ping", timeoutMs: 3000},
+        id: "web",
+        policy: "proxied",
+        port: {from: 0, to: 0}
+      }
+    ],
+    proxy: {forceStopTimeoutMs: 500, healthPath: "/ping", healthTimeoutMs: 3000, host: "127.0.0.1", port: 0},
+    statePath
+  })
+  const retired = new RollbridgeDaemon({config, logger: () => {}})
+  let replacement
+
+  try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path)])
+    await retired.start()
+    await retired.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    const before = retired.status()
+    const v1WorkerPid = releaseProcessPid(before, "v1", "worker")
+
+    replacement = new RollbridgeDaemon({config, logger: () => {}})
+    await replacement.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    const v2WorkerPid = releaseProcessPid(replacement.status(), "v2", "worker")
+
+    await retired.retireOwner({attestation: `sha256:${"a".repeat(64)}`})
+    await replacement.start({reportOrphans: false})
+    const recovered = replacement.status()
+    const v1 = recovered.releases.find(({releaseId}) => releaseId === "v1")
+    const v2 = recovered.releases.find(({releaseId}) => releaseId === "v2")
+
+    assert.equal(recovered.activeReleaseId, "v2", "the prestarted candidate must remain active")
+    assert.deepEqual(recovered.releaseReferences.sort((a, b) => a.releaseId.localeCompare(b.releaseId)), [
+      {releaseId: "v1", releasePath: v1Path},
+      {releaseId: "v2", releasePath: v2Path}
+    ])
+    assert.equal(v1?.state, "draining")
+    assert.equal(v1?.processes.find(({id}) => id === "worker")?.pid, v1WorkerPid)
+    assert.equal(v1?.processes.find(({id}) => id === "worker")?.state, "quiesced")
+    assert.equal(v2?.state, "active")
+    assert.equal(v2?.processes.find(({id}) => id === "worker")?.pid, v2WorkerPid)
+    assert.equal(v2?.processes.find(({id}) => id === "worker")?.state, "running")
+    await waitForFile(path.join(v1Path, "drain-started"), 1000)
+    await fs.writeFile(path.join(v1Path, "drained"), "done\n")
+    await waitForProcessExit(v1WorkerPid, 1000)
+    assert.equal(isAlive(v2WorkerPid), true, "the active candidate worker must remain usable while the old generation drains")
+  } finally {
+    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "drained"), "done\n").catch(() => {})))
+    await replacement?.shutdown().catch(() => {})
+    retired.guardian?.disconnect()
+    await stopFixtureGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
 
 test("replacement owner reconstructs one active and two draining generations after abrupt daemon exit", async () => {
   const fixture = await createFixture()
@@ -687,16 +761,19 @@ async function waitForState(statePath, predicate) {
 
 /**
  * @param {string} filePath - File whose creation is the transaction-boundary signal.
+ * @param {number} [timeoutMs] - Optional bounded wait.
  * @returns {Promise<void>} Resolves when the file exists.
  */
-async function waitForFile(filePath) {
+async function waitForFile(filePath, timeoutMs) {
   try {
     await fs.access(filePath)
     return
   } catch (error) {
     if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
   }
-  const watcher = fs.watch(path.dirname(filePath))
+  const controller = timeoutMs === undefined ? undefined : new AbortController()
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller?.abort(), timeoutMs)
+  const watcher = fs.watch(path.dirname(filePath), {signal: controller?.signal})
 
   try {
     for await (const change of watcher) {
@@ -708,9 +785,24 @@ async function waitForFile(filePath) {
         if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
       }
     }
+  } catch (error) {
+    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw new Error(`Timed out waiting for ${filePath}`, {cause: error})
+    throw error
   } finally {
+    clearTimeout(timer)
     await watcher.return?.()
   }
+}
+
+/**
+ * @param {number} pid - Exact fixture process.
+ * @param {number} timeoutMs - Bounded exit wait.
+ */
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+
+  while (isAlive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(isAlive(pid), false, `process ${pid} did not exit within ${timeoutMs}ms`)
 }
 
 /**

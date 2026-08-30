@@ -200,6 +200,19 @@ async function execute(request, socket) {
     })
   }
 
+  if (request.command === "retire-owner") {
+    requireOwner(socket, request.command)
+    if (replacementClient) throw new Error("Committed owner cannot retire while an owner replacement is prepared")
+    for (const entry of processes.values()) entry.desired = false
+    void Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
+    ownerClient = undefined
+    ownerMutationClient = undefined
+    ownerMutationId = undefined
+    ownerRevision += 1
+    grantNextOwner()
+    return {retired: true}
+  }
+
   if (request.command === "abandon-legacy-upgrade") {
     if (!legacyGuardian) throw new Error("Guardian is not a legacy upgrade coordinator")
     if (ownerClient || committedReplacementId) throw new Error("Committed guardian authority cannot abandon its legacy backend")
