@@ -54,7 +54,7 @@ export default class GuardianClient {
   }
 
   /**
-   * Starts a current transaction guardian in front of this authenticated pre-split guardian.
+   * Starts a current transaction guardian in front of this authenticated legacy guardian.
    * @param {{ownerState: import("./json.js").JsonValue, socketPath: string, token: string}} options - Upgrade identity and exact committed state.
    * @returns {Promise<GuardianClient>} Current guardian client backed by the legacy supervisor.
    */
@@ -190,6 +190,32 @@ export default class GuardianClient {
   }
 
   /**
+   * Classifies the authenticated guardian's owner-replacement protocol without preparing a transaction.
+   * @returns {Promise<"atomic" | "legacy">} Compatible replacement route.
+   */
+  async ownerReplacementProtocol() {
+    try {
+      const response = await this.request({command: "owner-replacement-capabilities"})
+
+      if (!isOwnerReplacementCapabilities(response)) throw new Error("Guardian returned an invalid owner-replacement capability response")
+      return "atomic"
+    } catch (error) {
+      if (!(error instanceof Error) || !isLegacyCapabilityDispatchDiagnostic(error.message)) throw error
+    }
+
+    try {
+      await this.request({command: "commit-retired-owner-replacement", replacementId: "owner-replacement-capability-probe"})
+      throw new Error("Guardian unexpectedly accepted the retired-owner capability probe")
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      if (error.message === "Owner replacement transaction is not the prepared candidate") return "atomic"
+      if (error.message === "Guardian commit-retired-owner-replacement requires a process key" ||
+        error.message === "Unknown guardian command: commit-retired-owner-replacement") return "legacy"
+      throw new Error("Guardian returned an ambiguous retired-owner capability response", {cause: error})
+    }
+  }
+
+  /**
    * @param {import("./json.js").JsonValue} authority - Persisted current authority.
    * @param {import("./json.js").JsonValue} nextAuthority - Requested authority.
    * @returns {Promise<{ownerState: import("./json.js").JsonValue, replacementId: string}>} Prepared transaction.
@@ -223,6 +249,23 @@ export default class GuardianClient {
    */
   async commitRetiredOwnerReplacement(replacementId, key) {
     await this.request({command: "commit-retired-owner-replacement", key, replacementId})
+  }
+
+  /**
+   * Begins acquiring the authenticated legacy backend owner channel at the disruptive boundary.
+   * @param {string} replacementId - Exact prepared candidate transaction.
+   * @param {number} graceMs - Event-driven incumbent disconnect grace.
+   */
+  async beginLegacyOwnerClaim(replacementId, graceMs) {
+    await this.request({command: "begin-legacy-owner-claim", graceMs, replacementId})
+  }
+
+  /**
+   * Waits until the upgraded guardian owns its authenticated legacy backend.
+   * @param {string} replacementId - Exact prepared candidate transaction.
+   */
+  async completeLegacyOwnerClaim(replacementId) {
+    await this.request({command: "complete-legacy-owner-claim", replacementId})
   }
 
   /** @param {string} replacementId - Committed transaction awaiting incumbent retirement. */
@@ -494,6 +537,28 @@ function serializableDefinition(definition) {
  */
 function asProcessStatus(value) {
   return JSON.parse(JSON.stringify(value))
+}
+
+/**
+ * @param {import("./json.js").JsonValue} value - Capability response.
+ * @returns {boolean} Whether the response explicitly guarantees retired-owner commit support.
+ */
+function isOwnerReplacementCapabilities(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const response = /** @type {Record<string, import("./json.js").JsonValue>} */ (value)
+
+  return response.protocol === "owner-replacement" && Number.isInteger(response.version) && Number(response.version) >= 1 &&
+    Array.isArray(response.commands) && response.commands.every((command) => typeof command === "string") &&
+    response.commands.includes("commit-retired-owner-replacement")
+}
+
+/**
+ * @param {string} diagnostic - Exact old generic-dispatch response.
+ * @returns {boolean} Whether this is the narrow old unknown-command dispatch signature.
+ */
+function isLegacyCapabilityDispatchDiagnostic(diagnostic) {
+  return diagnostic === "Guardian owner-replacement-capabilities requires a process key" ||
+    diagnostic === "Unknown guardian command: owner-replacement-capabilities"
 }
 
 /**

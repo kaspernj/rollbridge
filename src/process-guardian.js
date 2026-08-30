@@ -77,6 +77,8 @@ let ownerMutationId
 let retiringClient
 /** @type {string | undefined} */
 let retiringReplacementId
+/** @type {Promise<Error | undefined> | undefined} */
+let legacyOwnerClaim
 let shuttingDown = false
 /** @type {net.Socket | undefined} */
 let shutdownClient
@@ -117,11 +119,7 @@ const server = net.createServer((socket) => {
     }
     if (retiringClient === socket) finalizeReplacementRetirement()
     if (replacementClient === socket) {
-      replacementClient = undefined
-      replacementId = undefined
-      replacementAuthority = undefined
-      replacementOwnerState = undefined
-      if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: "replacement-aborted"})}\n`)
+      abortReplacement("Replacement candidate disconnected before commit")
     }
     if (shutdownClient === socket) void finishShutdown()
   })
@@ -180,6 +178,10 @@ async function handleLine(socket, line) {
 async function execute(request, socket) {
   if (shuttingDown) throw new Error("Process guardian is shutting down")
 
+  if (request.command === "owner-replacement-capabilities") {
+    return {commands: ["commit-retired-owner-replacement"], protocol: "owner-replacement", version: 1}
+  }
+
   if (request.command === "claim-owner") {
     if (!ownerClient) {
       if (ownerState !== undefined && !isDeepStrictEqual(request.authority, ownerAuthority(ownerState))) {
@@ -223,6 +225,26 @@ async function execute(request, socket) {
     shuttingDown = true
     beginSuccessfulShutdown(socket)
     return {abandoned: true}
+  }
+
+  if (request.command === "begin-legacy-owner-claim") {
+    if (!legacyGuardian) throw new Error("Guardian is not a legacy upgrade coordinator")
+    requireReplacement(socket, request)
+    if (legacyOwnerClaim) throw new Error("Legacy guardian owner claim is already pending")
+    legacyOwnerClaim = legacyGuardian.claimOwner(request.graceMs ?? 30000, ownerAuthority(ownerState)).then(
+      () => undefined,
+      (error) => error instanceof Error ? error : new Error(String(error))
+    )
+    return {prepared: true}
+  }
+
+  if (request.command === "complete-legacy-owner-claim") {
+    if (!legacyGuardian || !legacyOwnerClaim) throw new Error("Legacy guardian owner claim was not prepared")
+    requireReplacement(socket, request)
+    const claimError = await legacyOwnerClaim
+
+    if (claimError) throw claimError
+    return {claimed: true}
   }
 
   if (request.command === "publish-owner-state") {
@@ -470,7 +492,10 @@ function requireOwner(socket, command) {
 
 /** @param {string} reason - Abort diagnostic. */
 function abortReplacement(reason) {
-  if (replacementClient && !replacementClient.destroyed) replacementClient.write(`${JSON.stringify({event: "replacement-aborted", reason})}\n`)
+  const event = `${JSON.stringify({event: "replacement-aborted", reason})}\n`
+
+  if (replacementClient && !replacementClient.destroyed) replacementClient.write(event)
+  if (ownerClient && !ownerClient.destroyed) ownerClient.write(event)
   replacementClient = undefined
   replacementId = undefined
   replacementAuthority = undefined
