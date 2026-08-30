@@ -422,6 +422,100 @@ test("replacement transfers an unchanged fixed proxy listener without reusePort"
   }
 })
 
+test("owner replacement preserves committed generation metadata without firing lifecycle hooks", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-generation-"))
+  const oldSocketPath = path.join(root, "old.sock")
+  const newSocketPath = path.join(root, "new.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const releasePath = path.join(root, "v1")
+  const lifecycleLogPath = path.join(root, "generation.lifecycle")
+  let owner
+  let candidate
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await writeConfig(configPath, config({activationLogPath: lifecycleLogPath, controlPath: oldSocketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: oldSocketPath})
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\n")
+
+    await writeConfig(configPath, config({activationLogPath: lifecycleLogPath, controlPath: newSocketPath, extraCompanion: true, statePath}))
+    candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(candidate, "owner replacement committed")
+
+    const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
+    const generationTransition = status.generationTransition
+
+    assert.equal(status.activeReleaseId, "v1")
+    assert.ok(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))
+    assert.equal(generationTransition.phase, "committed")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\n", "owner replacement must not reactivate an already committed generation")
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
+    await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    for (const child of [owner, candidate]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("owner replacement preserves a failed generation transition without retrying its hook", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-failed-generation-"))
+  const oldSocketPath = path.join(root, "old.sock")
+  const newSocketPath = path.join(root, "new.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const lifecycleLogPath = path.join(root, "generation.lifecycle")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
+  let owner
+  let candidate
+  const failedConfig = (/** @type {string} */ controlPath, /** @type {boolean} */ extraCompanion) => {
+    const raw = config({activationLogPath: lifecycleLogPath, controlPath, extraCompanion, statePath})
+    const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (raw.processes)
+    const generationMain = processes.find((processConfig) => processConfig.id === "generation-main")
+    const lifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (generationMain?.lifecycle)
+
+    lifecycle.activateCommand = `[ "$ROLLBRIDGE_RELEASE_ID" != v2 ] || exit 24; printf 'activate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+    return raw
+  }
+
+  try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path)])
+    await Promise.all([makeFifo(path.join(v1Path, "worker.fifo")), makeFifo(path.join(v2Path, "worker.fifo"))])
+    await writeConfig(configPath, failedConfig(oldSocketPath, false))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
+    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath}), /activate command exited non-zero/)
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n")
+
+    await writeConfig(configPath, failedConfig(newSocketPath, true))
+    candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(candidate, "owner replacement committed")
+    const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
+    const generationTransition = status.generationTransition
+
+    assert.ok(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))
+    assert.equal(generationTransition.phase, "activating_candidate")
+    assert.match(String(generationTransition.error), /activate command exited non-zero/)
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n", "replacement must preserve, not retry, the failed activation")
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
+    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
+    await shutdown
+  } finally {
+    for (const child of [owner, candidate]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("replacement publishes an unchanged control path only after incumbent retirement", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-same-control-"))
   const socketPath = path.join(root, "rollbridge.sock")
@@ -518,10 +612,10 @@ test("prepared replacement fences incumbent mutations until abort", async () => 
 })
 
 /**
- * @param {{controlPath: string, extraCompanion: boolean, proxyPort?: number, statePath: string}} options - Fixture options.
+ * @param {{activationLogPath?: string, controlPath: string, extraCompanion: boolean, proxyPort?: number, statePath: string}} options - Fixture options.
  * @returns {Record<string, import("../src/json.js").JsonValue>} Raw fixture config.
  */
-function config({controlPath, extraCompanion, proxyPort = 0, statePath}) {
+function config({activationLogPath, controlPath, extraCompanion, proxyPort = 0, statePath}) {
   const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`
   const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ ([
     {
@@ -534,6 +628,17 @@ function config({controlPath, extraCompanion, proxyPort = 0, statePath}) {
     {command, health: {intervalMs: 25, path: "/ping", timeoutMs: 3000}, id: "web", policy: "proxied", port: {from: 0, to: 0}}
   ])
 
+  if (activationLogPath) processes.unshift({
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+    deployStrategy: "handoff",
+    id: "generation-main",
+    lifecycle: {
+      activateCommand: `printf 'activate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(activationLogPath)}`,
+      quietCommand: `printf 'retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(activationLogPath)}`
+    },
+    policy: "service",
+    port: {from: 23000, to: 23999}
+  })
   if (extraCompanion) processes.splice(1, 0, {command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`, id: "metrics", policy: "companion"})
   return {
     application: "owner-replacement-test",

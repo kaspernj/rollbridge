@@ -24,6 +24,7 @@ import ManagedProcess from "./managed-process.js"
  * @property {import("./json.js").JsonValue} [authority] - Expected current authority.
  * @property {import("./json.js").JsonValue} [nextAuthority] - Requested replacement authority.
  * @property {import("./managed-process.js").ManagedProcessStartReason} [reason] - Start reason.
+ * @property {import("./managed-process.js").LifecycleRole} [lifecycleRole] - Desired generation role restored during start.
  * @property {string} token - Authentication token.
  */
 
@@ -396,6 +397,9 @@ async function execute(request, socket) {
       ? legacyGuardian.process(request.key, managedDefinition)
       : new ManagedProcess(managedDefinition)
 
+    managedProcess.on("log", (entry) => {
+      broadcast({entry, event: "process-log", key: request.key, status: managedProcess.status()})
+    })
     if (recoversLegacyProcess && "recover" in managedProcess && typeof managedProcess.recover === "function") await managedProcess.recover()
 
     record.process = managedProcess
@@ -413,10 +417,18 @@ async function execute(request, socket) {
 
   if (request.command === "start") {
     record.desired = true
-    await record.process.start(request.reason)
+    await record.process.start(request.reason, request.lifecycleRole)
+  } else if (request.command === "activate") {
+    await record.process.activateStrict()
   } else if (request.command === "quiesce") {
     record.desired = false
     await record.process.quiesceStrict()
+  } else if (request.command === "requiesce") {
+    record.desired = false
+    await record.process.requiesceStrict()
+  } else if (request.command === "set-lifecycle-role") {
+    if (request.lifecycleRole !== "active" && request.lifecycleRole !== "candidate" && request.lifecycleRole !== "retired") throw new Error("Guardian lifecycle role is invalid")
+    await record.process.setLifecycleRole(request.lifecycleRole)
   } else if (request.command === "stop") {
     record.desired = false
     await record.process.stop(request.options)

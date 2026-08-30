@@ -54,10 +54,14 @@ export default {
       env: {
         NODE_ENV: "production",
         VELOCIOUS_BEACON_PORT: "{{ports.beacon}}",
-        VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}"
+        VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}",
+        VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET: "{{releasePath}}/tmp/background-jobs-main.sock"
       },
       command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- npx velocious background-jobs-main",
-      lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
+      lifecycle: {
+        activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+        quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
+      },
       port: {from: 7331, to: 7399}
     },
     {
@@ -91,8 +95,9 @@ export default {
 }
 ```
 
-`appctl` is a placeholder for a reviewed Velocious/application integration that
-quiesces jobs-main admission without terminating its worker/report endpoint.
+The lifecycle socket path must match the release's reviewed Velocious generation
+configuration. Rollbridge invokes the exact generation-scoped commands without
+polling, PID discovery, or an application-specific wrapper.
 
 Beacon keeps its fixed port because it is intentionally shared. Jobs-main uses a
 range because every release gets its own coordinator. Same-release
@@ -104,9 +109,16 @@ old endpoint while candidate workers use the candidate endpoint.
 Run backwards-compatible migrations before activation, then invoke
 `rollbridge deploy` with the prepared release. Rollbridge starts the candidate
 jobs-main, its complete worker pool, and the web process before health gating and
-activation. A candidate startup or health failure leaves the previous release
-active.
+activation. Velocious generation mode starts jobs-main quiescent; the exact
+`background-jobs:activate --generation … --socket …` acknowledgement is what
+makes that generation active. A candidate startup or health failure leaves the
+previous release active.
 
+For the opt-in lifecycle above, Rollbridge first waits for the old generation's
+retirement acknowledgement, then for candidate activation, and commits the active
+proxy target synchronously. On the first deploy there is no retirement step.
+If an active jobs-main process restarts, Rollbridge repeats that same exact,
+idempotent activation command once before reporting the process running.
 After successful activation, the deploy returns without waiting for any retired
 generation or HTTP/WebSocket connection to finish. The old and new release code
 may therefore overlap for hours. Keep schema, queue payloads, and external side

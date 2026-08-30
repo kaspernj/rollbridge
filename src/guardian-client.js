@@ -310,7 +310,7 @@ export default class GuardianClient {
 
       this.buffer = this.buffer.slice(newline + 1)
       if (message.event) {
-        if (message.event === "process" || message.event === "status") this.processes.get(message.key)?.onGuardianEvent(message)
+        if (message.event === "process" || message.event === "process-log" || message.event === "status") this.processes.get(message.key)?.onGuardianEvent(message)
         for (const handler of this.eventHandlers.get(message.event) || []) handler(message)
         const waiter = this.events.get(message.event)?.shift()
 
@@ -354,10 +354,15 @@ class GuardianProcess extends ManagedProcess {
     await this.ensureRegistered()
   }
 
-  async start(reason = "deploy") {
+  /**
+   * @param {import("./managed-process.js").ManagedProcessStartReason} [reason] - Start reason.
+   * @param {import("./managed-process.js").LifecycleRole} [lifecycleRole] - Desired role restored before running.
+   */
+  async start(reason = "deploy", lifecycleRole) {
     await this.ensureRegistered()
     await this.pendingUpdate
-    this.cachedStatus = asProcessStatus(await this.client.request({command: "start", key: this.key, reason}))
+    if (lifecycleRole) this.lifecycleRole = lifecycleRole
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "start", key: this.key, lifecycleRole, reason}))
   }
 
   /** @param {import("./managed-process.js").ManagedProcessDefinition} definition - Updated definition. */
@@ -383,6 +388,27 @@ class GuardianProcess extends ManagedProcess {
     await this.quiesce()
   }
 
+  async requiesceStrict() {
+    await this.ensureRegistered()
+    await this.pendingUpdate
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "requiesce", key: this.key}))
+  }
+
+  async activateStrict() {
+    await this.ensureRegistered()
+    await this.pendingUpdate
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "activate", key: this.key}))
+    this.lifecycleRole = "active"
+  }
+
+  /** @param {import("./managed-process.js").LifecycleRole} role - Exact generation role. */
+  async setLifecycleRole(role) {
+    await this.ensureRegistered()
+    await this.pendingUpdate
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "set-lifecycle-role", key: this.key, lifecycleRole: role}))
+    this.lifecycleRole = role
+  }
+
   async stop(options = {}) {
     await this.ensureRegistered()
     await this.pendingUpdate
@@ -396,6 +422,10 @@ class GuardianProcess extends ManagedProcess {
   /** @param {Record<string, import("./json.js").JsonValue>} event - Guardian event. */
   onGuardianEvent(event) {
     if (event.status) this.cachedStatus = asProcessStatus(event.status)
+    if (event.event === "process-log") {
+      this.emit("log", asProcessLog(event.entry))
+      return
+    }
     if (event.message === "process started") this.emit("started")
     if (event.message === "process exited") this.emit("exit", event.data)
     this.logger(typeof event.message === "string" ? event.message : "guardian process status", event.data && typeof event.data === "object" && !Array.isArray(event.data) ? event.data : {})
@@ -427,6 +457,14 @@ function serializableDefinition(definition) {
  * @returns {import("./managed-process.js").ManagedProcessStatus} Process status.
  */
 function asProcessStatus(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+/**
+ * @param {import("./json.js").JsonValue} value - Protocol value.
+ * @returns {import("./managed-process.js").ManagedProcessLog} Process output entry.
+ */
+function asProcessLog(value) {
   return JSON.parse(JSON.stringify(value))
 }
 

@@ -2,9 +2,9 @@
 //
 // Nginx should keep proxying the backend host to 127.0.0.1:4500. Rollbridge
 // binds that stable HTTP port, forwards to the active release's internal web
-// port and keeps Beacon daemon-wide. The jobs-main and worker controls below
-// are illustrative: replace appctl with application commands that quiesce new
-// admission without terminating the generation.
+// port and keeps Beacon daemon-wide. The lifecycle socket path must match the
+// reviewed release-local Velocious jobs-main configuration; the worker appctl
+// command remains an illustrative application-specific quiescence control.
 
 export default {
   application: "tensorbuzz",
@@ -47,10 +47,14 @@ export default {
         NODE_ENV: "production",
         VELOCIOUS_ENV: "production",
         VELOCIOUS_BEACON_PORT: "{{ports.beacon}}",
-        VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}"
+        VELOCIOUS_BACKGROUND_JOBS_PORT: "{{port}}",
+        VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET: "{{releasePath}}/tmp/background-jobs-main.sock"
       },
       command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- npx velocious background-jobs-main",
-      lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
+      lifecycle: {
+        activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+        quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
+      },
       port: {from: 7331, to: 7399}
     },
     {

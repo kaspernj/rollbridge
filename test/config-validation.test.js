@@ -204,6 +204,50 @@ test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values",
   assert.deepEqual(validateLifecycle({stopCommand: "kill -TERM $ROLLBRIDGE_PID"}).issues, [])
 })
 
+test("validateConfig accepts one durable handoff activation lifecycle and rejects unsafe placements", () => {
+  const base = {
+    application: "demo",
+    control: {path: "/tmp/demo.sock"},
+    ownerRecovery: {reconnectGraceMs: 30000},
+    processes: [
+      {command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}},
+      {
+        command: "run jobs",
+        deployStrategy: "handoff",
+        id: "jobs",
+        lifecycle: {activateCommand: "jobs activate", quietCommand: "jobs retire"},
+        policy: "service",
+        port: {from: 18100, to: 18199}
+      }
+    ],
+    proxy: {host: "127.0.0.1", port: 8182},
+    statePath: "/tmp/demo.state.json"
+  }
+  const valid = validateConfig(base)
+
+  assert.deepEqual(valid.issues, [])
+  assert.equal(valid.config.processes[1].lifecycle.activateCommand, "jobs activate")
+
+  const invalidType = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: 5, quietCommand: "jobs retire"}}]})
+  assert.ok(invalidType.issues.some((issue) => issue.message === "processes[1].lifecycle.activateCommand must be a string"))
+
+  const missingRetirement = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: "jobs activate"}}]})
+  assert.ok(missingRetirement.issues.some((issue) => /requires lifecycle\.quietCommand/.test(issue.message)))
+
+  const nonHandoff = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], deployStrategy: "persistent"}]})
+  assert.ok(nonHandoff.issues.some((issue) => /activateCommand.*handoff service/.test(issue.message)))
+
+  const withoutRecovery = validateConfig({...base, ownerRecovery: undefined, statePath: undefined})
+  assert.ok(withoutRecovery.issues.some((issue) => /activateCommand requires ownerRecovery and statePath/.test(issue.message)))
+
+  const duplicate = validateConfig({...base, processes: [
+    base.processes[0],
+    base.processes[1],
+    {...base.processes[1], id: "jobs-secondary", port: {from: 18200, to: 18299}}
+  ]})
+  assert.ok(duplicate.issues.some((issue) => /at most one lifecycle\.activateCommand/.test(issue.message)))
+})
+
 test("validateConfig accepts indefinite graceful stop windows", () => {
   const {config, issues} = validateConfig({
     application: "demo",

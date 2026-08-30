@@ -4,15 +4,18 @@ import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
 import {processGroupHasLiveMembers, processGroupMembers} from "./process-memory.js"
 
+const ACTIVATION_HOOK_TIMEOUT_MS = 30000
+
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
  * @typedef {"starting" | "running" | "quiesced" | "stopping" | "stopped" | "failed"} ManagedProcessState
  * @typedef {"deploy" | "crash" | "manual" | "memory"} ManagedProcessStartReason
+ * @typedef {"active" | "candidate" | "retired"} LifecycleRole
  * @typedef {import("node:child_process").ChildProcess["signalCode"]} ProcessExitSignal
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
  * @typedef {import("./config.js").StopTimeoutMs} StopTimeoutMs
  * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, lifecycle: import("./config.js").LifecycleConfig, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopSignal: string, stopTimeoutMs: StopTimeoutMs}} ManagedProcessDefinition
- * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
+ * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, lifecycleRole?: LifecycleRole, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
 export default class ManagedProcess extends EventEmitter {
@@ -62,6 +65,7 @@ export default class ManagedProcess extends EventEmitter {
     this.memoryWarned = false
     this.startedAtMs = /** @type {number | undefined} */ (undefined)
     this.intentionalStop = false
+    this.lifecycleRole = /** @type {LifecycleRole} */ ("candidate")
     this.intentionalStopSignal = /** @type {ProcessExitSignal | undefined} */ (undefined)
     this.quiescePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.quiesceError = /** @type {Error | undefined} */ (undefined)
@@ -76,9 +80,11 @@ export default class ManagedProcess extends EventEmitter {
 
   /**
    * @param {ManagedProcessStartReason} [reason] - Why the process is being started (deploy by default; "crash" on auto-restart, "manual" via the restart command).
-   * @returns {Promise<void>} Resolves after spawn.
+   * @param {LifecycleRole} [lifecycleRole] - Exact desired role to restore before reporting the process running.
+   * @returns {Promise<void>} Resolves after spawn and lifecycle-role restoration.
    */
-  async start(reason = "deploy") {
+  async start(reason = "deploy", lifecycleRole) {
+    if (lifecycleRole) this.lifecycleRole = lifecycleRole
     if (this.child) return
 
     this.intentionalStop = false
@@ -109,16 +115,35 @@ export default class ManagedProcess extends EventEmitter {
       })
 
       child.once("spawn", () => {
-        this.state = "running"
-        this.startedAtMs = Date.now()
-        this.lastStartReason = reason
-        this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null, reason})
-        this.startMemoryMonitor()
-        this.emit("started")
-        resolve(undefined)
+        void (async () => {
+          this.startedAtMs = Date.now()
+          this.lastStartReason = reason
+          try {
+            await this.restoreLifecycleRole()
+          } catch (error) {
+            this.state = "failed"
+            this.logger("process lifecycle role restoration failed", {error: error instanceof Error ? error.message : String(error), id: this.id, role: this.lifecycleRole})
+            reject(error)
+            return
+          }
+          if (this.child !== child) {
+            reject(new Error(`Process ${this.id} exited before lifecycle role ${this.lifecycleRole} was restored`))
+            return
+          }
+          this.state = "running"
+          this.logger("process started", {command: this.command, id: this.id, pid: child.pid || null, reason})
+          this.startMemoryMonitor()
+          this.emit("started")
+          resolve(undefined)
+        })()
       })
       child.once("error", (error) => {
         this.state = "failed"
+        if (this.child === child) {
+          this.child = undefined
+          this.pid = undefined
+          this.exitPromise = undefined
+        }
         reject(error)
       })
       child.stdout.setEncoding("utf8")
@@ -157,11 +182,14 @@ export default class ManagedProcess extends EventEmitter {
     for (const line of String(chunk).split(/\r?\n/)) {
       if (!line) continue
 
-      this.logs.push({at: new Date().toISOString(), line, stream})
+      const entry = {at: new Date().toISOString(), line, stream}
+
+      this.logs.push(entry)
 
       if (this.logs.length > this.outputLines) {
         this.logs.splice(0, this.logs.length - this.outputLines)
       }
+      this.emit("log", entry)
     }
   }
 
@@ -321,6 +349,7 @@ export default class ManagedProcess extends EventEmitter {
     if (this.memoryRestarting) return
 
     this.memoryRestarting = true
+    const lifecycleRole = this.lifecycleRole
 
     try {
       await this.stop()
@@ -333,7 +362,7 @@ export default class ManagedProcess extends EventEmitter {
       this.memoryRestarts += 1
       this.lastMemoryRestartAtMs = Date.now()
       this.memoryWarned = false
-      await this.start("memory")
+      await this.start("memory", lifecycleRole)
     } catch (error) {
       this.logger("memory restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
     } finally {
@@ -415,11 +444,15 @@ export default class ManagedProcess extends EventEmitter {
       }
       if (!this.child?.pid) {
         this.state = "stopped"
+        if (this.lifecycle.activateCommand) this.lifecycleRole = "retired"
         return
       }
       this.state = "stopping"
       if (this.lifecycle.quietCommand) this.quiesceError = await this.runHook(this.lifecycle.quietCommand, this.hookTimeoutMs(), "quiet command")
-      if (!this.quiesceError) this.state = "quiesced"
+      if (!this.quiesceError) {
+        this.state = "quiesced"
+        if (this.lifecycle.activateCommand) this.lifecycleRole = "retired"
+      }
     })()
     return await this.quiescePromise
   }
@@ -428,6 +461,44 @@ export default class ManagedProcess extends EventEmitter {
   async quiesceStrict() {
     await this.quiesce()
     if (this.quiesceError) throw this.quiesceError
+  }
+
+  /** Re-runs the idempotent quiet hook for an explicitly resumed durable transition. */
+  async requiesceStrict() {
+    this.quiescePromise = undefined
+    this.quiesceError = undefined
+    await this.quiesceStrict()
+  }
+
+  /** Runs the opt-in generation activation command and rejects on any hook failure. */
+  async activateStrict() {
+    const command = this.lifecycle.activateCommand
+
+    if (!command) return
+    const error = await this.runHook(command, ACTIVATION_HOOK_TIMEOUT_MS, "activate command", this.pid)
+
+    if (error) throw error
+    this.lifecycleRole = "active"
+  }
+
+  /**
+   * Records the durable desired role without firing a lifecycle command.
+   * @param {LifecycleRole} role - Exact role owned by this process generation.
+   */
+  async setLifecycleRole(role) {
+    this.lifecycleRole = role
+  }
+
+  /** Restores an active or retired role after this exact process starts. */
+  async restoreLifecycleRole() {
+    if (!this.lifecycle.activateCommand || this.lifecycleRole === "candidate") return
+    const command = this.lifecycleRole === "active" ? this.lifecycle.activateCommand : this.lifecycle.quietCommand
+
+    if (!command) throw new Error(`Process ${this.id} cannot restore lifecycle role ${this.lifecycleRole} without its paired command`)
+    const timeoutMs = this.lifecycleRole === "active" ? ACTIVATION_HOOK_TIMEOUT_MS : this.hookTimeoutMs()
+    const error = await this.runHook(command, timeoutMs, `${this.lifecycleRole === "active" ? "activate" : "quiet"} command`, this.pid)
+
+    if (error) throw error
   }
 
   /** @returns {number} Timeout used for lifecycle hooks. */
@@ -642,6 +713,7 @@ export default class ManagedProcess extends EventEmitter {
       id: this.id,
       lastMemoryRestartAt: this.lastMemoryRestartAtMs === undefined ? undefined : new Date(this.lastMemoryRestartAtMs).toISOString(),
       lastStartReason: this.lastStartReason,
+      ...(this.lifecycle.activateCommand ? {lifecycleRole: this.lifecycleRole} : {}),
       logs: this.logs.slice(-this.outputLines),
       memoryRestarts: this.memoryRestarts,
       pid: this.pid,

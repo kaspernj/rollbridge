@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
+import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -44,6 +45,44 @@ test("guardian inventory removes only an exact owned provenance", async () => {
     assert.equal((await fixture.client.inventory()).length, 1)
     await fixture.client.remove("candidate", candidate.provenance)
     assert.deepEqual(await fixture.client.inventory(), [])
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian runs a strict activation lifecycle command for the exact registered process", async () => {
+  const fixture = await createGuardian()
+  const activationPath = path.join(fixture.root, "activated")
+  const processInstance = fixture.client.process("candidate-activation", {
+    ...definition("candidate-activation"),
+    lifecycle: {activateCommand: `printf activated > ${JSON.stringify(activationPath)}`, drainTimeoutMs: 0}
+  })
+
+  try {
+    await processInstance.start()
+    await processInstance.activateStrict()
+    assert.equal(await fs.readFile(activationPath, "utf8"), "activated")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian forwards each retained output line to its exact process proxy", async () => {
+  const fixture = await createGuardian()
+  const marker = "guardian-output-ready"
+  const processInstance = fixture.client.process("output", {
+    ...definition("output"),
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`console.log(${JSON.stringify(marker)})`)}`
+  })
+  const logged = once(processInstance, "log")
+  const exitedFirst = once(processInstance, "exit").then(() => { throw new Error("Guardian process exited before forwarding retained output") })
+
+  try {
+    await processInstance.start()
+    const [entry] = await Promise.race([logged, exitedFirst])
+
+    assert.equal(entry.line, marker)
+    assert.ok(processInstance.status().logs.some((candidate) => candidate.line === marker))
   } finally {
     await cleanupGuardian(fixture)
   }
