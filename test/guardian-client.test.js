@@ -224,6 +224,29 @@ test("retired owner replacement commit carries its exact recovered process key",
   await client.commitRetiredOwnerReplacement(replacementId, processKey)
 })
 
+test("reserved process recovery rejects a reconstructed definition with different provenance", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const processKey = "release:v1:worker"
+
+  try {
+    await fixture.client.process(processKey, definition("worker")).recover()
+    const [registration] = await fixture.client.inventory()
+
+    assert.ok(registration)
+    await candidate.connect()
+    candidate.reserveProcessRecovery(processKey, registration.provenance)
+    await assert.rejects(
+      () => candidate.process(processKey, definition("different-worker")).recover(),
+      /provenance mismatch for reserved process/
+    )
+    assert.deepEqual((await fixture.client.inventory()).map(({key}) => key), [processKey])
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("retired owner replacement rejects a registered process absent from committed owner state", async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})

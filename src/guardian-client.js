@@ -21,6 +21,8 @@ export default class GuardianClient {
     this.idleWaiters = /** @type {(() => void)[]} */ ([])
     this.guardianExitPromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.processes = /** @type {Map<string, GuardianProcess>} */ (new Map())
+    this.reservedProcessKey = /** @type {string | undefined} */ (undefined)
+    this.reservedProcessProvenance = /** @type {string | undefined} */ (undefined)
     this.events = /** @type {Map<string, {reject: (error: Error) => void, resolve: (value: Record<string, import("./json.js").JsonValue>) => void}[]>} */ (new Map())
     this.eventHandlers = /** @type {Map<string, ((event: Record<string, import("./json.js").JsonValue>) => void)[]>} */ (new Map())
   }
@@ -109,6 +111,27 @@ export default class GuardianClient {
 
     this.processes.set(key, processInstance)
     return processInstance
+  }
+
+  /**
+   * @param {string} key - Exact committed-owner registration reserved until replacement commit.
+   * @param {string} provenance - Guardian-inventoried definition fence.
+   */
+  reserveProcessRecovery(key, provenance) {
+    if (this.reservedProcessKey) throw new Error(`Guardian process recovery ${this.reservedProcessKey} is already reserved`)
+    this.reservedProcessKey = key
+    this.reservedProcessProvenance = provenance
+  }
+
+  /** @param {string} key - Exact reserved registration to attach after authority commits. */
+  async recoverReservedProcess(key) {
+    if (this.reservedProcessKey !== key) throw new Error(`Guardian process recovery ${key} is not reserved`)
+    const processInstance = this.processes.get(key)
+
+    if (!processInstance) throw new Error(`Reserved guardian process ${key} was not reconstructed`)
+    await processInstance.attachReserved()
+    this.reservedProcessKey = undefined
+    this.reservedProcessProvenance = undefined
   }
 
   /**
@@ -354,6 +377,16 @@ class GuardianProcess extends ManagedProcess {
 
   /** Reconnects to an already registered guardian process without changing its desired state. */
   async recover() {
+    if (this.client.reservedProcessKey === this.key) {
+      if (this.client.reservedProcessProvenance !== this.provenance) throw new Error(`Guardian provenance mismatch for reserved process ${this.key}`)
+      this.cachedStatus = asProcessStatus(await this.client.request({command: "status", key: this.key}))
+      return
+    }
+    await this.ensureRegistered()
+  }
+
+  /** Attaches a reconstructed process whose incumbent-owned registration was reserved through commit. */
+  async attachReserved() {
     await this.ensureRegistered()
   }
 
