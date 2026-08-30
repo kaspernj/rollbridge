@@ -171,6 +171,37 @@ test("replacement staging rejects owner state published after prepare", async ()
   }
 })
 
+test("retired owner replacement requires unchanged authority and the exact control path absent", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const controlPath = path.join(fixture.root, "rollbridge.sock")
+  const authority = {configDigest: "incumbent", runtime: null}
+  const nextAuthority = {configDigest: "candidate", runtime: null}
+  const snapshot = {activeReleaseId: "v1", control: {path: controlPath}}
+
+  try {
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const changed = await candidate.prepareOwnerReplacement(authority, nextAuthority)
+
+    await candidate.stageOwnerReplacement(changed.replacementId, {authority: nextAuthority, snapshot})
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId), /unchanged owner authority/)
+    await candidate.abortOwnerReplacement(changed.replacementId)
+
+    const occupied = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(occupied.replacementId, {authority, snapshot})
+    await fs.writeFile(controlPath, "occupied\n")
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId), /control socket .* still exists/)
+    await candidate.abortOwnerReplacement(occupied.replacementId)
+    await fixture.client.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("first upgrade migrates a real pre-split guardian without replacing its owned process", async () => {
   const fixture = await createLegacyGuardian()
   const processDefinition = definition("legacy-worker")

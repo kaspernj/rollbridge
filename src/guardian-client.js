@@ -194,6 +194,11 @@ export default class GuardianClient {
     await this.request({command: "commit-owner-replacement", replacementId})
   }
 
+  /** @param {string} replacementId - Same-authority transaction whose incumbent listener is absent. */
+  async commitRetiredOwnerReplacement(replacementId) {
+    await this.request({command: "commit-retired-owner-replacement", replacementId})
+  }
+
   /** @param {string} replacementId - Committed transaction awaiting incumbent retirement. */
   async finalizeOwnerReplacement(replacementId) {
     await this.request({command: "finalize-owner-replacement", replacementId})
