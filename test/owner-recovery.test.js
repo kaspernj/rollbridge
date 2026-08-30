@@ -9,6 +9,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
+import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
@@ -20,6 +21,63 @@ const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 
 /** @typedef {import("../src/daemon.js").DaemonStatus} DaemonStatus */
 /** @typedef {DaemonStatus & {recovery: {configDigest: string}}} RecoveryState */
+
+test("external owner retirement releases guardian authority without losing its generation", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-retirement-recovery-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "rollbridge.state.json")
+  const drainPath = path.join(root, "drained")
+  const config = normalizeConfig({
+    application: "owner-retirement-recovery-test",
+    control: {path: socketPath},
+    ownerRecovery: {reconnectGraceMs: 50},
+    processes: [
+      {
+        command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
+        id: "worker",
+        lifecycle: {drainCommand: `while [ ! -f ${JSON.stringify(drainPath)} ]; do sleep 0.01; done`, drainTimeoutMs: 3000},
+        nonBlockingDrain: true,
+        policy: "companion"
+      },
+      {
+        command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
+        health: {intervalMs: 25, path: "/ping", timeoutMs: 3000},
+        id: "web",
+        policy: "proxied",
+        port: {from: 0, to: 0}
+      }
+    ],
+    proxy: {forceStopTimeoutMs: 500, healthPath: "/ping", healthTimeoutMs: 3000, host: "127.0.0.1", port: 0},
+    statePath
+  })
+  const retired = new RollbridgeDaemon({config, logger: () => {}})
+  let replacement
+
+  try {
+    await retired.start()
+    await retired.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
+    const before = retired.status()
+    const processPids = before.releases[0]?.processes.map(({pid}) => pid).filter((pid) => pid !== undefined)
+
+    assert.ok(processPids?.length)
+    await retired.retireOwner({attestation: `sha256:${"a".repeat(64)}`})
+
+    replacement = new RollbridgeDaemon({config, logger: () => {}})
+    await replacement.start({reportOrphans: false})
+    const recovered = replacement.status()
+
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath: root}])
+    assert.deepEqual(recovered.releases[0]?.processes.map(({pid}) => pid).filter((pid) => pid !== undefined), processPids)
+    for (const pid of processPids) assert.doesNotThrow(() => process.kill(pid, 0), `preserved process ${pid} must remain alive`)
+  } finally {
+    await fs.writeFile(drainPath, "drained\n").catch(() => {})
+    await replacement?.shutdown().catch(() => {})
+    retired.guardian?.disconnect()
+    await stopFixtureGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
 
 test("replacement owner reconstructs one active and two draining generations after abrupt daemon exit", async () => {
   const fixture = await createFixture()

@@ -1552,6 +1552,7 @@ export default class RollbridgeDaemon {
       ...[...this.startingReleases].map((release) => release.stop()),
       ...[...this.releases.values()].map((release) => release.stop())
     ])
+    this.guardian?.disconnect()
     this.logger("external owner retired", {attestation, status: "draining"})
   }
 
