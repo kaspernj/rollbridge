@@ -50,13 +50,13 @@ restart.
 | `proxy` | object | **required** | Proxy listener and shared defaults (see below). |
 | `processes` | array | **required** | Managed processes (see below). Exactly one must be `proxied`. |
 | `releaseRetention` | object | — | How many stopped releases the daemon retains (see below). |
-| `statePath` | string | unset (no persistence) | File the daemon persists its state to, enabling orphaned-process detection on the next startup (see [`statePath`](#statepath)). |
+| `statePath` | string | unset (no persistence) | File the daemon persists its state to, enabling orphaned-process detection on the next startup; relative paths resolve from the config file directory (see [`statePath`](#statepath)). |
 
 ## `control`
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `control.path` | string | `/tmp/rollbridge-<application>.sock` | Unix domain socket the CLI uses to talk to the daemon. |
+| `control.path` | string | `/tmp/rollbridge-<application>.sock` | Unix domain socket the CLI uses to talk to the daemon; relative paths resolve from the config file directory. |
 | `control.mode` | octal string (e.g. `"660"`) or octal number (`0o660`) | unset | `chmod` applied to the socket after it binds, to share it with a deploy group. When unset, the daemon umask applies. |
 | `control.owner` | non-negative integer uid or user name | unset | `chown` owner applied to the socket after it binds. |
 | `control.group` | non-negative integer gid or group name | unset | `chown` group applied to the socket after it binds, so a shared deploy group can use it. |
@@ -126,15 +126,20 @@ ownerRecovery: {reconnectGraceMs: 30000}
 The private guardian socket is derived from `statePath`; the atomic state file is
 written mode `0600` and contains its authentication capability. The guardian
 owns managed child processes, restart policy, lifecycle hooks, and exit events.
-After an unexpected daemon exit, an exact config/runtime replacement claims the
-guardian during `reconnectGraceMs`, restores active and draining releases with
-their allocated ports, and resumes proxy/control ownership. Concurrent matching
-starts are fenced: one claims ownership and losers attest that winner. A config
-identity mismatch or partial state fails closed without rewriting the snapshot.
-Owner disconnection alone never reclaims accepted work or transfers workers:
-guardian-owned processes and their generation-local connections continue during
-the grace, so the replacement reconnects to supervision rather than duplicating
-execution.
+After an unexpected daemon exit, an exact config/runtime replacement may claim
+the guardian during `reconnectGraceMs`. If none does, the guardian restarts the
+exact accepted daemon command and environment itself, retains startup fencing
+until that daemon publishes its ready listeners and PID file, and uses a nonzero
+retry backoff after failed starts. The replacement restores active and draining
+releases with their allocated ports and resumes proxy/control ownership.
+Concurrent matching starts are fenced: one claims ownership and losers attest
+that winner. The authenticated guardian's private committed state is
+authoritative when the public snapshot is stale or partially written; missing or
+corrupt guardian identity, authentication, or authority still fails closed
+without rewriting the snapshot. Owner disconnection alone never reclaims
+accepted work or transfers workers: guardian-owned processes and their
+generation-local connections continue during the grace, so the replacement
+reconnects to supervision rather than duplicating execution.
 
 For a responsive incompatible owner, `ensure-daemon` prepares the requested
 durable runtime, restores exact active and draining generation definitions from
@@ -160,6 +165,13 @@ The resulting status includes `ownerTransition: {disruptive: true, mode:
 identity; retry config or socket changes after the protocol upgrade, when the
 normal atomic handoff applies. Other guardian/auth/transport/identity failures
 remain fail-closed.
+
+An intermediate guardian which already supports atomic owner replacement but
+predates guardian-owned daemon recovery cannot be upgraded through that bridge.
+The candidate aborts before listener handoff, the incumbent resumes any paused
+drains and remains serving, and the command requests one explicit clean
+`shutdown` followed by `ensure-daemon` so the new guardian can become the OS
+supervisor.
 
 Without `ownerRecovery`, `statePath` retains the advisory orphan behavior above.
 

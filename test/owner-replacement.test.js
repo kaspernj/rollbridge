@@ -42,7 +42,7 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
     await fs.mkdir(releasePath)
     await makeFifo(path.join(releasePath, "worker.fifo"))
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, proxyPort, statePath}))
-    owner = spawn(process.execPath, [legacyDaemonPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    owner = spawn(process.execPath, [legacyDaemonPath, "daemon", "--config", path.basename(configPath)], {cwd: root, stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
     assert.ok(owner.pid)
     await fs.writeFile(daemonPidPath, `${owner.pid}\n`)
@@ -136,6 +136,63 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
   }
 })
 
+test("replacement-capable guardian without daemon recovery aborts before handoff and resumes incumbent drains", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-intermediate-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const daemonPidPath = path.join(root, "daemon.pid")
+  const daemonLogPath = path.join(root, "candidate.log")
+  const runtimePath = path.join(root, "runtime")
+  const intermediatePackagePath = path.join(root, "intermediate-package")
+  const abortedPath = path.join(root, "replacement-aborted")
+  const preparedPath = path.join(root, "replacement-prepared")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
+  let owner
+  let retainedConnection
+
+  try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path), prepareCandidatePackage(intermediatePackagePath)])
+    await Promise.all([makeFifo(path.join(v1Path, "worker.fifo")), makeFifo(path.join(v2Path, "worker.fifo"))])
+    await removeDaemonRecoveryCapability(intermediatePackagePath, {abortedPath, preparedPath})
+    await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [path.join(intermediatePackagePath, "bin", "rollbridge"), "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    assert.ok(owner.pid)
+    await fs.writeFile(daemonPidPath, `${owner.pid}\n`)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: socketPath})
+    const active = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    retainedConnection = await openWebSocket(/** @type {{port: number}} */ (active.proxy).port)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath})
+    const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const workerPid = releaseProcessPid(before, "v1", "worker")
+    const replacement = await runEnsureDaemon({configPath, daemonPidPath, logPath: daemonLogPath, packagePath: repoRoot, runtimePath})
+
+    assert.equal(replacement.code, 1)
+    assert.match(await fs.readFile(daemonLogPath, "utf8"), /persistent Rollbridge guardian predates daemon recovery/)
+    await waitForFile(abortedPath)
+    const preserved = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(preserved.daemonPid, before.daemonPid, "capability rejection must leave the incumbent daemon serving")
+    assert.equal(releaseProcessPid(preserved, "v1", "worker"), workerPid)
+    retainedConnection.destroy()
+    retainedConnection = undefined
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await waitForReleaseState(socketPath, "v1", "stopped")
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
+
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    retainedConnection?.destroy()
+    if (owner && owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("ensure-daemon owns and reports the exact candidate exit before readiness", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-candidate-exit-"))
   const configPath = path.join(root, "rollbridge.cjs")
@@ -144,6 +201,7 @@ test("ensure-daemon owns and reports the exact candidate exit before readiness",
   const runtimePath = path.join(root, "runtime")
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "state.json")
+  let candidate
 
   try {
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
@@ -154,15 +212,24 @@ test("ensure-daemon owns and reports the exact candidate exit before readiness",
       "--daemon-runtime-path", runtimePath, "--daemon-log-path", path.join(root, "daemon.log"),
       "--daemon-pid-path", path.join(root, "daemon.pid"), "--daemon-start-timeout-ms", "3000"
     ])
-    const candidate = JSON.parse(await fs.readFile(evidencePath, "utf8"))
+    candidate = JSON.parse(await fs.readFile(evidencePath, "utf8"))
 
     assert.equal(candidate.ppid, ensured.pid, "the recorded process must be the candidate spawned by this exact ensuring CLI")
     assert.notEqual(candidate.pid, ensured.pid)
-    assert.deepEqual(candidate.argv.slice(2), ["daemon", "--config", configPath])
+    assert.deepEqual(candidate.argv.slice(2), [
+      "daemon", "--config", configPath,
+      "--guardian-daemon-log-path", path.join(root, "daemon.log"),
+      "--guardian-daemon-pid-path", path.join(root, "daemon.pid"),
+      "--guardian-daemon-start-timeout-ms", "3000"
+    ])
     assert.equal(ensured.code, 1)
     assert.match(ensured.stderr, new RegExp(`Rollbridge daemon candidate ${candidate.pid} exited before readiness \\(code 47, signal none\\)`))
     assert.doesNotMatch(ensured.stderr, /did not become ready within/)
+    await waitForProcessExit(candidate.descendantPid)
   } finally {
+    if (candidate?.descendantPid) {
+      try { process.kill(candidate.descendantPid, "SIGKILL") } catch (_error) { /* Exact candidate descendant already exited. */ }
+    }
     await fs.rm(root, {force: true, recursive: true})
   }
 })
@@ -366,8 +433,8 @@ test("a committed replacement crash converges from stale public state", async ()
     await once(candidate, "exit")
     await fs.writeFile(statePath, staleState)
 
-    recovered = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
-    await waitForLog(recovered, "owner replacement committed")
+    recovered = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(recovered, "control socket listening")
     const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
 
     assert.equal(status.activeReleaseId, "v1")
@@ -576,6 +643,39 @@ async function prepareCandidatePackage(destination, options = {}) {
 }
 
 /**
+ * Models the immediately preceding guardian protocol: atomic replacement exists,
+ * but the daemon-recovery capability probe does not.
+ * @param {string} packagePath - Copied package root.
+ * @param {{abortedPath: string, preparedPath: string}} markers - Incumbent event-processing markers.
+ */
+async function removeDaemonRecoveryCapability(packagePath, {abortedPath, preparedPath}) {
+  const guardianPath = path.join(packagePath, "src", "process-guardian.js")
+  const daemonPath = path.join(packagePath, "src", "daemon.js")
+  const source = await fs.readFile(guardianPath, "utf8")
+  const capability = "  if (request.command === \"capabilities\") return {daemonRecovery: 1}\n\n"
+  const incumbentAbortNotification = "  if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: \"replacement-aborted\", reason})}\\n`)\n"
+  const legacyCapability = `  if (request.command === "capabilities") {
+    while (!fsSync.existsSync(${JSON.stringify(preparedPath)})) await new Promise((resolve) => setTimeout(resolve, 5))
+    throw new Error("Guardian capabilities requires a process key")
+  }
+
+`
+
+  assert.ok(source.includes(capability))
+  assert.ok(source.includes(incumbentAbortNotification))
+  await fs.writeFile(guardianPath, source.replace(capability, legacyCapability).replace(incumbentAbortNotification, ""))
+  const daemonSource = await fs.readFile(daemonPath, "utf8")
+  const preparedHandler = "    this.guardian.onEvent(\"replacement-prepared\", () => {\n      for (const release of this.releases.values()) release.pauseDrainForOwnerHandoff()\n"
+  const abortedHandler = "    this.guardian.onEvent(\"replacement-aborted\", () => {\n"
+
+  assert.ok(daemonSource.includes(preparedHandler))
+  assert.ok(daemonSource.includes(abortedHandler))
+  await fs.writeFile(daemonPath, daemonSource
+    .replace(preparedHandler, `${preparedHandler}      void fs.writeFile(${JSON.stringify(preparedPath)}, "paused\\n")\n`)
+    .replace(abortedHandler, `${abortedHandler}      void fs.writeFile(${JSON.stringify(abortedPath)}, "aborted\\n")\n`))
+}
+
+/**
  * Replaces only the copied package's daemon entry with an exact early-exit fixture.
  * @param {string} packagePath - Copied candidate package root.
  * @param {string} evidencePath - Exact candidate identity record.
@@ -586,9 +686,12 @@ async function installCandidateExit(packagePath, evidencePath, exitCode) {
   const binPath = path.join(packagePath, "bin", "rollbridge")
   const source = `#!/usr/bin/env node
 import fs from "node:fs"
+import {spawn} from "node:child_process"
 
 if (process.argv[2] === "daemon") {
-  fs.writeFileSync(${JSON.stringify(evidencePath)}, JSON.stringify({argv: process.argv, pid: process.pid, ppid: process.ppid}))
+  const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {stdio: "ignore"})
+  fs.writeFileSync(${JSON.stringify(evidencePath)}, JSON.stringify({argv: process.argv, descendantPid: descendant.pid, pid: process.pid, ppid: process.ppid}))
+  descendant.unref()
   process.exit(${exitCode})
 }
 
@@ -652,6 +755,57 @@ function releaseProcessPid(status, releaseId, processId) {
 
   if (typeof pid !== "number") throw new Error(`Missing ${processId} pid for release ${releaseId}`)
   return pid
+}
+
+/**
+ * Waits until the incumbent resumes and finishes a previously paused drain.
+ * @param {string} socketPath - Incumbent control socket.
+ * @param {string} releaseId - Draining release.
+ * @param {string} expectedState - Expected completed state.
+ */
+async function waitForReleaseState(socketPath, releaseId, expectedState) {
+  const deadline = Date.now() + 3000
+
+  while (Date.now() < deadline) {
+    const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const releases = /** @type {{releaseId: string, state: string}[]} */ (status.releases)
+
+    if (releases.find((release) => release.releaseId === releaseId)?.state === expectedState) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`Timed out waiting for release ${releaseId} to reach ${expectedState}`)
+}
+
+/** @param {number} pid - Exact fixture process expected to exit. */
+async function waitForProcessExit(pid) {
+  const deadline = Date.now() + 3000
+
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
+      throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`Timed out waiting for process ${pid} to exit`)
+}
+
+/** @param {string} filePath - Exact fixture marker. */
+async function waitForFile(filePath) {
+  const deadline = Date.now() + 3000
+
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(filePath)
+      return
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`Timed out waiting for ${filePath}`)
 }
 
 /**

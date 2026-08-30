@@ -89,8 +89,11 @@ rollbridge ensure-daemon [--config <path>]
 ```
 
 Starts the daemon as a detached process **only if** the control socket is not
-already accepting commands, waits until it responds, then prints the daemon
-status JSON. Idempotent — safe to call before every deploy.
+already accepting commands, waits until it responds and its guardian accepts
+the ready owner, then prints the daemon status JSON. Idempotent — safe to call
+before every deploy. The detached daemon uses the config file's directory as its
+working directory, rather than the invoking release, so release retention cannot
+remove the accepted recovery cwd.
 
 Before starting a detached daemon, Rollbridge atomically copies its runtime code
 and production dependency closure into a content-addressed directory outside
@@ -117,8 +120,8 @@ and authority failures do not qualify and fail before any deploy is sent.
   [`logging.md`](logging.md) for the log format and rotation guidance.
 - `--daemon-pid-path <path>` — file the detached daemon's PID is written to.
   Default: `/tmp/rollbridge-<application>.pid`. During replacement, the file
-  continues to name the incumbent until the reachable winner reports and
-  publishes its exact `daemonPid`.
+  continues to name the incumbent until the authenticated guardian atomically
+  publishes the ready winner's exact `daemonPid`.
 - `--daemon-runtime-path <path>` — parent directory for content-addressed daemon
   runtime snapshots. Default:
   `/tmp/rollbridge-<user-id>-<application-hash>-runtime`. The directory must be owned
@@ -230,6 +233,9 @@ Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
 `daemonRuntime` identifies the immutable Rollbridge runtime serving the proxy:
 its runtime `format`, package `version`, content `digest`, and absolute `path`.
 `ensure-daemon` uses this attestation before reusing a responsive daemon.
+With `ownerRecovery`, `ownerRecovery.ready` becomes `true` only after the
+guardian has accepted that daemon's listener readiness and atomically published
+its configured PID file; `ensure-daemon` does not return a pre-ready status.
 
 A foreground known-release daemon also reports the exact CLI bootstrap identity:
 

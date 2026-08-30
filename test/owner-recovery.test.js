@@ -172,6 +172,47 @@ test("replacement owner reconstructs one active and two draining generations aft
   }
 })
 
+test("guardian restarts an abruptly exited daemon without replacing managed processes", async () => {
+  const fixture = await createFixture()
+  const owner = spawnDaemon(fixture.configPath)
+  let recoveredDaemonPid
+  let workerPid
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const releasePath = await prepareRelease(fixture.root, "v1")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: fixture.socketPath})
+    const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    workerPid = releaseProcessPid(before, "v1", "worker")
+    const recoveredListenerLog = waitForLog(owner, "control socket listening", {allowChildExit: true})
+
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+    await recoveredListenerLog
+    const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    recoveredDaemonPid = recovered.daemonPid
+    assert.notEqual(recovered.daemonPid, before.daemonPid)
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(releaseProcessPid(recovered, "v1", "worker"), workerPid)
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+
+    await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    await killChild(owner)
+    if (recoveredDaemonPid && isAlive(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
+    if (workerPid) {
+      try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact managed group already exited. */ }
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("owner recovery rejects config identity mismatch without changing the valid snapshot", async () => {
   const fixture = await createFixture()
   let owner = spawnDaemon(fixture.configPath)
@@ -193,7 +234,7 @@ test("owner recovery rejects config identity mismatch without changing the valid
     const rejected = await runDaemon(fixture.configPath)
 
     assert.notEqual(rejected.code, 0)
-    assert.match(rejected.output, /config identity does not match/)
+    assert.match(rejected.output, /authority does not match/)
     assert.equal(await fs.readFile(fixture.statePath, "utf8"), validState)
 
     await writeConfig(fixture.configPath, fixture.config)
@@ -252,9 +293,10 @@ test("failed recovery bootstrap keeps the reconstructed active generation servin
   }
 })
 
-test("owner recovery fails closed on a partial snapshot and preserves it for repair", async () => {
+test("owner recovery repairs a partial public snapshot from committed guardian state", async () => {
   const fixture = await createFixture()
-  let owner = spawnDaemon(fixture.configPath)
+  const owner = spawnDaemon(fixture.configPath)
+  let recoveredDaemonPid
   let workerPid
 
   try {
@@ -271,21 +313,24 @@ test("owner recovery fails closed on a partial snapshot and preserves it for rep
     const partialState = {...validState, releases: []}
     await fs.writeFile(fixture.statePath, `${JSON.stringify(partialState, null, 2)}\n`)
 
-    const rejected = await runDaemon(fixture.configPath)
+    const repairedState = await waitForState(
+      fixture.statePath,
+      (state) => state.daemonPid !== validState.daemonPid && state.releases.some((release) => release.releaseId === "v1"),
+      AbortSignal.timeout(5000)
+    )
+    recoveredDaemonPid = repairedState.daemonPid
+    const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
 
-    assert.notEqual(rejected.code, 0)
-    assert.match(rejected.output, /does not contain active release v1/)
-    assert.deepEqual(JSON.parse(await fs.readFile(fixture.statePath, "utf8")), partialState)
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(releaseProcessPid(recovered, "v1", "worker"), workerPid)
+    assert.notDeepEqual(JSON.parse(await fs.readFile(fixture.statePath, "utf8")), partialState)
 
-    await fs.writeFile(fixture.statePath, `${JSON.stringify(validState, null, 2)}\n`)
-    owner = spawnDaemon(fixture.configPath)
-    await waitForLog(owner, "control socket listening")
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
     await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
     await shutdown
-    await once(owner, "exit")
   } finally {
     await killChild(owner)
+    if (recoveredDaemonPid && isAlive(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact group already exited. */ }
     }
@@ -569,6 +614,16 @@ test("ensure-daemon atomically replaces an incompatible owner without losing ret
     assert.equal(after.services[0]?.process.pid, before.services[0]?.process.pid)
     assert.equal(after.singletons[0]?.process.pid, before.singletons[0]?.process.pid)
     assert.equal(retainedConnectionClosed, false, "listener-owned WebSocket must remain supervised across replacement")
+    assert.ok(after.daemonPid)
+    await fs.writeFile(daemonLogPath, "")
+    process.kill(after.daemonPid, "SIGKILL")
+    const restartedState = await waitForState(fixture.statePath, (state) => state.daemonPid !== after.daemonPid, AbortSignal.timeout(5000))
+    const restarted = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: newControlPath}))
+
+    assert.equal(restarted.daemonPid, restartedState.daemonPid)
+    assert.equal(Number((await fs.readFile(daemonPidPath, "utf8")).trim()), restarted.daemonPid)
+    assert.deepEqual(restarted.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)), before.releases.map((release) => release.processes.map((processStatus) => processStatus.pid)))
+    assert.match(await fs.readFile(daemonLogPath, "utf8"), /owner state recovered/)
 
     const v3Path = await prepareRelease(fixture.root, "v3")
     await sendControlCommand({command: {command: "deploy", releaseId: "v3", releasePath: v3Path, revision: "v3"}, path: newControlPath})
@@ -737,10 +792,11 @@ async function stopFixtureGuardian(statePath) {
 /**
  * @param {string} statePath - State path.
  * @param {(state: RecoveryState) => boolean} predicate - Completion predicate.
+ * @param {AbortSignal} [signal] - Optional deadline signal.
  * @returns {Promise<RecoveryState>} Matching state.
  */
-async function waitForState(statePath, predicate) {
-  const watcher = fs.watch(path.dirname(statePath))
+async function waitForState(statePath, predicate, signal) {
+  const watcher = fs.watch(path.dirname(statePath), {signal})
 
   try {
     const initial = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(statePath, "utf8")))
@@ -911,14 +967,16 @@ async function runCli(args) {
 /**
  * @param {import("node:child_process").ChildProcess} child - Daemon child.
  * @param {string} message - Structured log message.
+ * @param {{allowChildExit?: boolean}} [options] - Whether inherited descriptors may outlive the original child.
  */
-async function waitForLog(child, message) {
+async function waitForLog(child, message, {allowChildExit = false} = {}) {
   assert.ok(child.stdout)
   child.stdout.setEncoding("utf8")
 
   await new Promise((resolve, reject) => {
     let buffer = ""
     let stderr = ""
+    const timer = setTimeout(() => finish(new Error(`Timed out waiting for daemon log ${message}: ${stderr.trim()}`)), 5000)
     const onErrorData = (/** @type {string} */ chunk) => { stderr += chunk }
     const onExit = () => finish(new Error(`Daemon exited before logging ${message}: ${stderr.trim()}`))
     /** @param {string} chunk - Output chunk. */
@@ -936,6 +994,7 @@ async function waitForLog(child, message) {
     }
     /** @param {Error} [error] - Failure. */
     const finish = (error) => {
+      clearTimeout(timer)
       child.off("exit", onExit)
       child.stdout?.off("data", onData)
       child.stderr?.off("data", onErrorData)
@@ -943,7 +1002,7 @@ async function waitForLog(child, message) {
       else resolve(undefined)
     }
 
-    child.once("exit", onExit)
+    if (!allowChildExit) child.once("exit", onExit)
     child.stdout?.on("data", onData)
     child.stderr?.setEncoding("utf8").on("data", onErrorData)
   })

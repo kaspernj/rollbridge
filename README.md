@@ -216,7 +216,13 @@ then runs a private local process guardian which remains the OS supervisor for
 managed processes if the control daemon exits unexpectedly. A replacement using
 the exact same normalized config/runtime reconnects within `reconnectGraceMs`,
 reconstructs active and draining generations and their ports, and fences
-concurrent replacements. `ensure-daemon` can also prepare a requested
+concurrent replacements. If no replacement reconnects during that grace, the
+guardian restarts the exact accepted daemon command and environment itself; the
+recovery definition is kept only in the guardian's private authenticated state
+and is refreshed atomically during a package/runtime replacement. A restart
+attempt which cannot claim ownership and publish ready listeners within the
+accepted startup timeout is terminated with its process group and retried with a
+nonzero backoff. `ensure-daemon` can also prepare a requested
 config/control-socket/package/runtime owner, prove it healthy, and atomically
 transfer guardian authority while every retained generation keeps its exact
 release reference and drains asynchronously. The old `statePath` is the durable
@@ -226,6 +232,15 @@ Prepared transactions fence owner mutations and compare a monotonic guardian
 state revision at staging. Existing HTTP/WebSocket connections remain owned by
 the retired listener process, while their counts transfer to the new daemon so
 later deploys continue to honor the original drain boundary.
+If that new daemon itself exits while a retired listener still owns connections,
+recovery conservatively retains the last authenticated transferred count until
+the configured drain timeout; it never guesses that the older sockets closed.
+An intermediate guardian which supports atomic owner replacement but predates
+daemon recovery cannot be hot-upgraded because it is the existing processes' OS
+supervisor. The upgrade fails before handoff and requires one explicit clean
+`shutdown` followed by `ensure-daemon`; subsequent package/runtime replacements
+remain atomic. A genuinely pre-replacement guardian still uses the separately
+documented one-time disruptive compatibility bridge below.
 
 There is one explicit compatibility boundary: the first upgrade from a genuine
 pre-owner-replacement Rollbridge guardian and daemon cannot share its listeners

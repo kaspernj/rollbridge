@@ -30,7 +30,7 @@ export default class GuardianClient {
    * @param {{legacyGuardian?: {pid?: number, socketPath: string, token: string}, ownerState?: import("./json.js").JsonValue}} [options] - Optional authenticated legacy backend migration.
    */
   async launch(options = {}) {
-    const child = spawn(process.execPath, [guardianPath, this.socketPath], {detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"]})
+    const child = spawn(process.execPath, [guardianPath, this.socketPath], {detached: true, stdio: ["ignore", "inherit", "inherit", "ipc"]})
 
     this.pid = child.pid
     this.guardianExitPromise = new Promise((resolve) => child.once("exit", () => resolve(undefined)))
@@ -76,6 +76,14 @@ export default class GuardianClient {
 
     socket.end()
     await closed
+  }
+
+  /**
+   * Atomically records the discoverable bridge identity while terminating the exact legacy daemon.
+   * @param {{incumbentPid: number, recoverySnapshot: import("./json.js").JsonValue, replacementId: string, statePath: string}} options - Verified legacy boundary state.
+   */
+  async crossLegacyUpgradeBoundary({incumbentPid, recoverySnapshot, replacementId, statePath}) {
+    await this.request({command: "cross-legacy-upgrade-boundary", incumbentPid, recoverySnapshot, replacementId, statePath})
   }
 
   /** Connects to an existing guardian. */
@@ -153,7 +161,17 @@ export default class GuardianClient {
    * @param {import("./json.js").JsonValue} authority - Exact owner authority.
    */
   async claimOwner(graceMs, authority) {
-    await this.request({authority, command: "claim-owner", graceMs})
+    await this.request({authority, command: "claim-owner", graceMs, ownerPid: process.pid})
+  }
+
+  /** Confirms that the claimed daemon has completed startup and published its listeners. */
+  async ownerReady() {
+    await this.request({command: "owner-ready", ownerPid: process.pid})
+  }
+
+  /** @returns {Promise<{daemonRecovery: number}>} Guardian protocol capabilities. */
+  async capabilities() {
+    return /** @type {{daemonRecovery: number}} */ (await this.request({command: "capabilities"}))
   }
 
   /** Starts graceful process retirement and relinquishes committed owner authority. */
@@ -172,7 +190,7 @@ export default class GuardianClient {
    * @returns {Promise<{ownerState: import("./json.js").JsonValue, replacementId: string}>} Prepared transaction.
    */
   async prepareOwnerReplacement(authority, nextAuthority) {
-    return /** @type {{ownerState: import("./json.js").JsonValue, replacementId: string}} */ (await this.request({authority, command: "prepare-owner-replacement", nextAuthority}))
+    return /** @type {{ownerState: import("./json.js").JsonValue, replacementId: string}} */ (await this.request({authority, command: "prepare-owner-replacement", nextAuthority, ownerPid: process.pid}))
   }
 
   /**

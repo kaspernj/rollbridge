@@ -1,11 +1,18 @@
 // @ts-check
 
+import fsSync from "node:fs"
 import fs from "node:fs/promises"
 import net from "node:net"
 import crypto from "node:crypto"
+import {spawn} from "node:child_process"
 import {isDeepStrictEqual} from "node:util"
+import path from "node:path"
 import GuardianClient from "./guardian-client.js"
 import ManagedProcess from "./managed-process.js"
+
+const OWNER_RESTART_RETRY_MS = 1000
+
+/** @typedef {import("node:child_process").ChildProcess["signalCode"]} ChildExitSignal */
 
 /**
  * @typedef {object} GuardianRequest
@@ -21,6 +28,10 @@ import ManagedProcess from "./managed-process.js"
  * @property {string} [replacementId] - Prepared replacement transaction id.
  * @property {string} [mutationId] - Owner mutation lease id.
  * @property {string} [operation] - Owner mutation diagnostic name.
+ * @property {number} [incumbentPid] - Exact legacy daemon PID crossed by the bridge.
+ * @property {number} [ownerPid] - Exact claimant process PID.
+ * @property {import("./json.js").JsonValue} [recoverySnapshot] - Public bridge recovery snapshot.
+ * @property {string} [statePath] - Exact public recovery state path.
  * @property {import("./json.js").JsonValue} [authority] - Expected current authority.
  * @property {import("./json.js").JsonValue} [nextAuthority] - Requested replacement authority.
  * @property {import("./managed-process.js").ManagedProcessStartReason} [reason] - Start reason.
@@ -52,8 +63,12 @@ const processes = new Map()
 const clients = new Set()
 /** @type {net.Socket | undefined} */
 let ownerClient
+/** @type {number | undefined} */
+let ownerClientPid
 /** @type {net.Socket | undefined} */
 let replacementClient
+/** @type {number | undefined} */
+let replacementOwnerPid
 /** @type {string | undefined} */
 let replacementId
 /** @type {string | undefined} */
@@ -68,6 +83,7 @@ let ownerRevision = ownerState === undefined ? 0 : 1
 /** @type {number | undefined} */
 let replacementRevision
 const legacyKeys = legacyGuardian ? legacyOwnerKeys(ownerState) : new Set()
+let legacyBoundaryCrossed = false
 /** @type {net.Socket | undefined} */
 let ownerMutationClient
 /** @type {string | undefined} */
@@ -82,7 +98,15 @@ let shutdownClient
 let shutdownFinalizing = false
 /** @type {Promise<void> | undefined} */
 let serverClosed
-/** @type {{reject: (error: Error) => void, resolve: (value: {claimed: boolean}) => void, socket: net.Socket, timer: ReturnType<typeof setTimeout>}[]} */
+/** @type {import("node:child_process").ChildProcess | undefined} */
+let ownerRestartChild
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let ownerRestartTimer
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let ownerRestartStartupTimer
+/** @type {number | undefined} */
+let ownerRestartRetryDelayMs
+/** @type {{authority: import("./json.js").JsonValue, ownerPid: number | undefined, reject: (error: Error) => void, resolve: (value: {claimed: boolean}) => void, socket: net.Socket, timer: ReturnType<typeof setTimeout>}[]} */
 const claimWaiters = []
 
 const server = net.createServer((socket) => {
@@ -103,11 +127,26 @@ const server = net.createServer((socket) => {
       waiter.reject(new Error("Owner claimant disconnected"))
     }
     if (ownerClient === socket) {
+      const incompleteRestartChild = ownerRestartChild?.pid === ownerClientPid ? ownerRestartChild : undefined
+
       ownerClient = undefined
+      ownerClientPid = undefined
       if (replacementClient && replacementOwnerState) commitReplacement()
       else {
-        if (replacementClient) abortReplacement("Committed owner disconnected before replacement candidate was ready")
-        if (!shuttingDown) grantNextOwner()
+        if (incompleteRestartChild) {
+          reportOwnerRestartFailure(ownerRecoveryDefinition(), {code: "OWNER_DISCONNECTED"})
+          killDetachedProcessGroup(incompleteRestartChild)
+          clearOwnerRestartTracking(incompleteRestartChild)
+          ownerRestartRetryDelayMs = OWNER_RESTART_RETRY_MS
+        }
+        if (replacementClient) abortReplacement("Committed owner disconnected before replacement candidate was ready", false)
+        if (!shuttingDown) {
+          grantNextOwner()
+          const retryDelayMs = ownerRestartRetryDelayMs
+
+          ownerRestartRetryDelayMs = undefined
+          scheduleOwnerRestart(retryDelayMs)
+        }
       }
     }
     if (ownerMutationClient === socket) {
@@ -120,7 +159,16 @@ const server = net.createServer((socket) => {
       replacementId = undefined
       replacementAuthority = undefined
       replacementOwnerState = undefined
-      if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: "replacement-aborted"})}\n`)
+      replacementOwnerPid = undefined
+      if (legacyGuardian && !legacyBoundaryCrossed && !ownerClient && !committedReplacementId) {
+        legacyGuardian.disconnect()
+        shuttingDown = true
+        beginSuccessfulShutdown(socket)
+      } else if (ownerClient && !ownerClient.destroyed) {
+        ownerClient.write(`${JSON.stringify({event: "replacement-aborted"})}\n`)
+      } else {
+        scheduleOwnerRestart()
+      }
     }
     if (shutdownClient === socket) void finishShutdown()
   })
@@ -179,12 +227,16 @@ async function handleLine(socket, line) {
 async function execute(request, socket) {
   if (shuttingDown) throw new Error("Process guardian is shutting down")
 
+  if (request.command === "capabilities") return {daemonRecovery: 1}
+
   if (request.command === "claim-owner") {
+    if (ownerState !== undefined && !isDeepStrictEqual(request.authority, ownerAuthority(ownerState))) {
+      throw new Error("Owner recovery authority does not match the guardian's committed authority")
+    }
     if (!ownerClient) {
-      if (ownerState !== undefined && !isDeepStrictEqual(request.authority, ownerAuthority(ownerState))) {
-        throw new Error("Owner recovery authority does not match the guardian's committed authority")
-      }
+      acceptOwnerClaim(request.ownerPid)
       ownerClient = socket
+      ownerClientPid = request.ownerPid
       return {claimed: true}
     }
     if (ownerClient === socket) return {claimed: true}
@@ -196,7 +248,7 @@ async function execute(request, socket) {
         reject(new Error("Durable owner is already claimed by another matching daemon"))
       }, request.graceMs ?? 30000)
 
-      claimWaiters.push({reject, resolve, socket, timer})
+      claimWaiters.push({authority: request.authority ?? null, ownerPid: request.ownerPid, reject, resolve, socket, timer})
     })
   }
 
@@ -206,6 +258,7 @@ async function execute(request, socket) {
     for (const entry of processes.values()) entry.desired = false
     void Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
     ownerClient = undefined
+    ownerClientPid = undefined
     ownerMutationClient = undefined
     ownerMutationId = undefined
     ownerRevision += 1
@@ -213,8 +266,37 @@ async function execute(request, socket) {
     return {retired: true}
   }
 
+  if (request.command === "owner-ready") {
+    requireOwner(socket, request.command)
+    if (!request.ownerPid || request.ownerPid !== ownerClientPid) throw new Error("Guardian owner readiness PID does not match the claimed owner")
+    const recovery = ownerRecoveryDefinition()
+    const pidPath = recovery?.command.pidPath
+
+    if (ownerRestartChild && ownerRestartChild.pid !== request.ownerPid) throw new Error("Guardian owner readiness does not match the tracked recovery child")
+    if (pidPath) {
+      let temporaryDirectory
+
+      fsSync.mkdirSync(path.dirname(pidPath), {recursive: true})
+      try {
+        temporaryDirectory = fsSync.mkdtempSync(path.join(path.dirname(pidPath), `.${path.basename(pidPath)}.`))
+        const temporaryPath = path.join(temporaryDirectory, "pid")
+
+        fsSync.writeFileSync(temporaryPath, `${request.ownerPid}\n`, {flag: "wx"})
+        fsSync.renameSync(temporaryPath, pidPath)
+      } finally {
+        if (temporaryDirectory) fsSync.rmSync(temporaryDirectory, {force: true, recursive: true})
+      }
+    }
+    if (ownerRestartChild) {
+      clearOwnerRestartTracking(ownerRestartChild)
+    }
+    ownerRestartRetryDelayMs = undefined
+    return {ready: true}
+  }
+
   if (request.command === "abandon-legacy-upgrade") {
     if (!legacyGuardian) throw new Error("Guardian is not a legacy upgrade coordinator")
+    if (legacyBoundaryCrossed) throw new Error("Guardian cannot abandon a legacy upgrade after crossing the disruptive boundary")
     if (ownerClient || committedReplacementId) throw new Error("Committed guardian authority cannot abandon its legacy backend")
     if (replacementClient && replacementClient !== socket) throw new Error("Only the prepared replacement can abandon the legacy upgrade")
     if (replacementClient) abortReplacement("Legacy guardian upgrade candidate abandoned before the disruptive boundary")
@@ -222,6 +304,34 @@ async function execute(request, socket) {
     shuttingDown = true
     beginSuccessfulShutdown(socket)
     return {abandoned: true}
+  }
+
+  if (request.command === "cross-legacy-upgrade-boundary") {
+    requireReplacement(socket, request)
+    if (!legacyGuardian) throw new Error("Guardian is not a legacy upgrade coordinator")
+    if (legacyBoundaryCrossed) throw new Error("Guardian already crossed the legacy disruptive boundary")
+    if (!request.incumbentPid || !Number.isSafeInteger(request.incumbentPid) || request.incumbentPid <= 0) throw new Error("Legacy disruptive boundary requires the exact incumbent PID")
+    if (!request.statePath || !path.isAbsolute(request.statePath)) throw new Error("Legacy disruptive boundary requires an absolute state path")
+    if (request.statePath !== ownerStatePath(ownerState)) throw new Error("Legacy disruptive boundary state path does not match the committed owner config")
+    assertBridgeRecoverySnapshot(request.recoverySnapshot)
+    const temporaryPath = `${request.statePath}.${process.pid}.${crypto.randomUUID()}.tmp`
+    const previousState = fsSync.readFileSync(request.statePath)
+
+    try {
+      fsSync.writeFileSync(temporaryPath, `${JSON.stringify(request.recoverySnapshot, null, 2)}\n`, {flag: "wx", mode: 0o600})
+      fsSync.renameSync(temporaryPath, request.statePath)
+      try {
+        process.kill(request.incumbentPid, "SIGKILL")
+        legacyBoundaryCrossed = true
+      } catch (error) {
+        fsSync.writeFileSync(temporaryPath, previousState, {flag: "wx", mode: 0o600})
+        fsSync.renameSync(temporaryPath, request.statePath)
+        throw error
+      }
+    } finally {
+      fsSync.rmSync(temporaryPath, {force: true})
+    }
+    return {crossed: true}
   }
 
   if (request.command === "publish-owner-state") {
@@ -272,8 +382,16 @@ async function execute(request, socket) {
       throw new Error("Owner replacement authority fence does not match the guardian's committed authority")
     }
     if (request.nextAuthority === undefined) throw new Error("Owner replacement requires the requested authority")
+    if (!ownerClient) {
+      cancelOwnerRestart()
+      const supersededRestartChild = ownerRestartChild
+
+      clearOwnerRestartTracking()
+      if (supersededRestartChild) killDetachedProcessGroup(supersededRestartChild)
+    }
     if (!replacementId) replacementId = crypto.randomUUID()
     replacementClient = socket
+    replacementOwnerPid = request.ownerPid
     replacementAuthority = request.nextAuthority
     replacementRevision = ownerRevision
     if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: "replacement-prepared", replacementId})}\n`)
@@ -455,14 +573,20 @@ function requireOwner(socket, command) {
   if (ownerClient !== socket) throw new Error(`Guardian ${command} requires the committed owner`)
 }
 
-/** @param {string} reason - Abort diagnostic. */
-function abortReplacement(reason) {
+/**
+ * @param {string} reason - Abort diagnostic.
+ * @param {boolean} [scheduleRecovery] - Whether this call owns recovery scheduling.
+ */
+function abortReplacement(reason, scheduleRecovery = true) {
   if (replacementClient && !replacementClient.destroyed) replacementClient.write(`${JSON.stringify({event: "replacement-aborted", reason})}\n`)
+  if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: "replacement-aborted", reason})}\n`)
   replacementClient = undefined
   replacementId = undefined
   replacementAuthority = undefined
   replacementOwnerState = undefined
+  replacementOwnerPid = undefined
   replacementRevision = undefined
+  if (scheduleRecovery && !ownerClient) scheduleOwnerRestart()
 }
 
 /** Atomically promotes the prepared client and its complete transferable state. */
@@ -472,7 +596,18 @@ function commitReplacement() {
   const committedClient = replacementClient
   const committedId = replacementId
 
+  cancelOwnerRestart()
+  const supersededRestartChild = ownerRestartChild
+
+  clearOwnerRestartTracking()
+  if (supersededRestartChild) killDetachedProcessGroup(supersededRestartChild)
+  for (const waiter of claimWaiters.splice(0)) {
+    clearTimeout(waiter.timer)
+    waiter.reject(new Error("Durable owner authority changed while the claim was queued"))
+  }
   ownerClient = committedClient
+  ownerClientPid = replacementOwnerPid
+  ownerRestartRetryDelayMs = undefined
   ownerState = replacementOwnerState
   ownerRevision += 1
   committedReplacementId = committedId
@@ -480,6 +615,7 @@ function commitReplacement() {
   replacementId = undefined
   replacementAuthority = undefined
   replacementOwnerState = undefined
+  replacementOwnerPid = undefined
   replacementRevision = undefined
   if (previousOwner && !previousOwner.destroyed) {
     retiringClient = previousOwner
@@ -543,6 +679,31 @@ function ownerControlPath(state) {
 }
 
 /**
+ * @param {import("./json.js").JsonValue | undefined} state - Committed transferable state.
+ * @returns {string} Exact configured public state path.
+ */
+function ownerStatePath(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state) || !("config" in state)) throw new Error("Guardian owner state is missing its committed config")
+  const config = state.config
+
+  if (!config || typeof config !== "object" || Array.isArray(config) || !("statePath" in config) || typeof config.statePath !== "string") throw new Error("Guardian owner config is missing its state path")
+  return config.statePath
+}
+
+/** @param {import("./json.js").JsonValue | undefined} snapshot - Candidate public recovery snapshot. */
+function assertBridgeRecoverySnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) || !("recovery" in snapshot)) throw new Error("Legacy disruptive boundary requires a recovery snapshot")
+  const recovery = snapshot.recovery
+
+  if (!recovery || typeof recovery !== "object" || Array.isArray(recovery) || !("guardian" in recovery)) throw new Error("Legacy disruptive boundary recovery snapshot is missing its guardian")
+  const guardian = recovery.guardian
+
+  if (!guardian || typeof guardian !== "object" || Array.isArray(guardian) || guardian.socketPath !== socketPath || guardian.token !== token) {
+    throw new Error("Legacy disruptive boundary recovery snapshot does not identify this guardian")
+  }
+}
+
+/**
  * Stops accepting connections and closes every authority channel except the response caller.
  * @param {net.Socket} caller - Shutdown requester retained until it receives the response.
  */
@@ -579,16 +740,189 @@ function broadcast(event) {
 
 /** @returns {void} Grants the next queued owner claim. */
 function grantNextOwner() {
-  const next = claimWaiters.shift()
+  let next = claimWaiters.shift()
+
+  while (next && ownerState !== undefined && !isDeepStrictEqual(next.authority, ownerAuthority(ownerState))) {
+    clearTimeout(next.timer)
+    next.reject(new Error("Owner recovery authority changed while the claim was queued"))
+    next = claimWaiters.shift()
+  }
 
   if (!next) return
   clearTimeout(next.timer)
+  acceptOwnerClaim(next.ownerPid)
   ownerClient = next.socket
+  ownerClientPid = next.ownerPid
   next.resolve({claimed: true})
   for (const waiter of claimWaiters.splice(0)) {
     clearTimeout(waiter.timer)
     waiter.reject(new Error("Durable owner was claimed by another matching daemon"))
   }
+}
+
+/** @param {number} [delayMs] - Explicit retry delay, otherwise the accepted reconnect grace. */
+function scheduleOwnerRestart(delayMs) {
+  if (shuttingDown || ownerClient || replacementClient || ownerRestartChild || ownerRestartTimer) return
+  const recovery = ownerRecoveryDefinition()
+
+  if (!recovery) return
+  ownerRestartTimer = setTimeout(() => {
+    ownerRestartTimer = undefined
+    if (shuttingDown || ownerClient || replacementClient || ownerRestartChild) return
+    const currentRecovery = ownerRecoveryDefinition()
+
+    if (!currentRecovery) return
+    let stdoutFd
+    let stderrFd
+    let child
+
+    try {
+      if (currentRecovery.command.logPath) {
+        fsSync.mkdirSync(path.dirname(currentRecovery.command.logPath), {recursive: true})
+        stdoutFd = fsSync.openSync(currentRecovery.command.logPath, "a")
+        stderrFd = fsSync.openSync(currentRecovery.command.logPath, "a")
+      }
+      child = spawn(currentRecovery.command.executable, currentRecovery.command.args, {
+        cwd: currentRecovery.command.cwd,
+        detached: true,
+        env: currentRecovery.command.env,
+        stdio: currentRecovery.command.logPath ? ["ignore", stdoutFd, stderrFd] : ["ignore", "inherit", "inherit"]
+      })
+    } catch (error) {
+      reportOwnerRestartFailure(currentRecovery, restartFailure(error instanceof Error ? error : String(error)))
+      scheduleOwnerRestart(OWNER_RESTART_RETRY_MS)
+      return
+    } finally {
+      if (stdoutFd !== undefined) fsSync.closeSync(stdoutFd)
+      if (stderrFd !== undefined) fsSync.closeSync(stderrFd)
+    }
+
+    ownerRestartChild = child
+    let settled = false
+    const retry = (/** @type {{code: string, exitCode?: number | null, signal?: ChildExitSignal}} */ failure) => {
+      if (settled || ownerRestartChild !== child) return
+      settled = true
+      killDetachedProcessGroup(child)
+      reportOwnerRestartFailure(currentRecovery, failure)
+      clearOwnerRestartTracking(child)
+      ownerRestartRetryDelayMs = OWNER_RESTART_RETRY_MS
+      if (ownerClient && ownerClientPid === child.pid) ownerClient.destroy()
+      else {
+        ownerRestartRetryDelayMs = undefined
+        scheduleOwnerRestart(OWNER_RESTART_RETRY_MS)
+      }
+    }
+
+    ownerRestartStartupTimer = setTimeout(() => {
+      if (ownerRestartChild !== child) return
+      retry({code: "STARTUP_TIMEOUT"})
+    }, currentRecovery.startupTimeoutMs)
+    ownerRestartStartupTimer.unref()
+    child.once("error", (error) => retry(restartFailure(error)))
+    child.once("exit", (code, signal) => retry({code: "EARLY_EXIT", exitCode: code, signal}))
+    child.unref()
+  }, delayMs ?? recovery.reconnectGraceMs)
+  ownerRestartTimer.unref()
+}
+
+/** Cancels recovery for a superseded owner command. */
+function cancelOwnerRestart() {
+  if (!ownerRestartTimer) return
+  clearTimeout(ownerRestartTimer)
+  ownerRestartTimer = undefined
+}
+
+/**
+ * Accepts an exact claimant and retires any different in-flight recovery child.
+ * @param {number | undefined} ownerPid - Exact claimant process PID.
+ */
+function acceptOwnerClaim(ownerPid) {
+  cancelOwnerRestart()
+  const child = ownerRestartChild
+
+  if (!child || child.pid === ownerPid) return
+  clearOwnerRestartTracking(child)
+  killDetachedProcessGroup(child)
+}
+
+/**
+ * Clears recovery-child startup tracking without disturbing a committed retired listener owner.
+ * @param {import("node:child_process").ChildProcess} [expectedChild] - Optional exact child fence.
+ * @returns {boolean} Whether matching tracking was cleared.
+ */
+function clearOwnerRestartTracking(expectedChild) {
+  if (expectedChild && ownerRestartChild !== expectedChild) return false
+  if (ownerRestartStartupTimer) clearTimeout(ownerRestartStartupTimer)
+  ownerRestartStartupTimer = undefined
+  ownerRestartChild = undefined
+  return true
+}
+
+/**
+ * Records an owner restart failure without exposing the private command or environment.
+ * @param {{command: {cwd?: string, logPath?: string, pidPath?: string}} | undefined} recovery - Accepted recovery definition.
+ * @param {{code: string, exitCode?: number | null, signal?: ChildExitSignal}} failure - Secret-safe startup failure.
+ */
+function reportOwnerRestartFailure(recovery, failure) {
+  const diagnostic = `${JSON.stringify({at: new Date().toISOString(), ...failure, message: "guardian failed to restart daemon"})}\n`
+
+  if (recovery?.command.logPath) {
+    try {
+      fsSync.appendFileSync(recovery.command.logPath, diagnostic)
+      return
+    } catch (logError) {
+      process.stderr.write(`${JSON.stringify({at: new Date().toISOString(), code: errorCode(logError instanceof Error ? logError : String(logError)), message: "guardian failed to write daemon restart diagnostic"})}\n`)
+      return
+    }
+  }
+  process.stderr.write(diagnostic)
+}
+
+/**
+ * Terminates a detached recovery candidate and all descendants in its process group.
+ * @param {import("node:child_process").ChildProcess} child - Exact detached process-group leader.
+ */
+function killDetachedProcessGroup(child) {
+  if (!child.pid) return
+  try {
+    process.kill(-child.pid, "SIGKILL")
+  } catch (error) {
+    const failure = error instanceof Error ? error : String(error)
+
+    if (errorCode(failure) === "ESRCH") return
+    child.kill("SIGKILL")
+    process.stderr.write(`${JSON.stringify({at: new Date().toISOString(), code: errorCode(failure), message: "guardian failed to kill daemon restart process group"})}\n`)
+  }
+}
+
+/**
+ * @param {Error | string} error - Spawn failure.
+ * @returns {{code: string}} Secret-safe failure.
+ */
+function restartFailure(error) {
+  return {code: errorCode(error)}
+}
+
+/**
+ * @param {Error | string} error - Error-like value.
+ * @returns {string} Stable non-secret error code.
+ */
+function errorCode(error) {
+  if (error && typeof error === "object" && "code" in error && (typeof error.code === "string" || typeof error.code === "number")) return String(error.code)
+  return "UNKNOWN"
+}
+
+/**
+ * @returns {{command: {args: string[], cwd: string, env: Record<string, string>, executable: string, logPath?: string, pidPath?: string}, reconnectGraceMs: number, startupTimeoutMs: number} | undefined} Recovery definition.
+ */
+function ownerRecoveryDefinition() {
+  if (!ownerState || typeof ownerState !== "object" || Array.isArray(ownerState) || !("recovery" in ownerState)) return
+  const recovery = ownerState.recovery
+
+  if (!recovery || typeof recovery !== "object" || Array.isArray(recovery) || !("command" in recovery) || !("reconnectGraceMs" in recovery)) {
+    throw new Error("Guardian owner recovery definition is incomplete")
+  }
+  return /** @type {{command: {args: string[], cwd: string, env: Record<string, string>, executable: string, logPath?: string, pidPath?: string}, reconnectGraceMs: number, startupTimeoutMs: number}} */ (recovery)
 }
 
 /**

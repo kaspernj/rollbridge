@@ -67,8 +67,12 @@ export async function parseConfigFile(configPath) {
  */
 export async function loadConfig(configPath) {
   const {absolutePath, rawConfig} = await parseConfigFile(configPath)
+  const config = normalizeConfig(rawConfig, absolutePath)
+  const configDirectory = path.dirname(absolutePath)
 
-  return normalizeConfig(rawConfig, absolutePath)
+  config.control.path = path.resolve(configDirectory, config.control.path)
+  if (config.statePath) config.statePath = path.resolve(configDirectory, config.statePath)
+  return config
 }
 
 /**

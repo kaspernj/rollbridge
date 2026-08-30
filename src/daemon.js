@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import http from "node:http"
 import net from "node:net"
 import crypto from "node:crypto"
+import path from "node:path"
 import {isDeepStrictEqual} from "node:util"
 import httpProxy from "http-proxy"
 import {loadConfig} from "./config.js"
@@ -23,7 +24,7 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
  * @typedef {{disruptive: true, mode: "legacy-first-upgrade", reason: string}} OwnerTransition
- * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, ownerRecovery: {configDigest: string} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, ownerRecovery: {configDigest: string, ready: boolean} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
  * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata}} OwnerRecoverySnapshot
  * @typedef {{boundaryCrossed: boolean, incumbentControl: Awaited<ReturnType<typeof openControlSession>>, incumbentStartTime: string, prepared: {ownerState: JsonValue, replacementId: string}, recoverySnapshot: OwnerRecoverySnapshot}} LegacyOwnerBridge
@@ -37,12 +38,14 @@ export default class RollbridgeDaemon {
    * @param {string} [args.configPath] - Config file path to reload before deploys.
    * @param {(message: string, data?: Record<string, JsonValue>) => void} [args.logger] - Logger.
    * @param {number} [args.legacyIncumbentPid] - Exact incumbent PID supplied by ensure-daemon.
+   * @param {{args: string[], cwd: string, env: Record<string, string>, executable: string, logPath?: string, pidPath?: string, startupTimeoutMs: number}} [args.recoveryCommand] - Exact command for guardian-owned daemon recovery.
    * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} [args.runtime] - Immutable daemon runtime identity.
    */
-  constructor({bootstrap, config, configPath, legacyIncumbentPid, logger, runtime}) {
+  constructor({bootstrap, config, configPath, legacyIncumbentPid, logger, recoveryCommand, runtime}) {
     this.bootstrap = bootstrap ? {...bootstrap} : undefined
     this.config = config
     this.configPath = configPath
+    this.recoveryCommand = recoveryCommand
     this.runtime = runtime
     this.legacyIncumbentPid = legacyIncumbentPid
     this.eventLog = new EventLog(EVENT_HISTORY_LIMIT)
@@ -89,6 +92,7 @@ export default class RollbridgeDaemon {
     this.startingReleases = /** @type {Set<ReleaseGroup>} */ (new Set())
     this.guardian = /** @type {GuardianClient | undefined} */ (undefined)
     this.guardianIdentity = /** @type {{pid?: number, socketPath: string, token: string} | undefined} */ (undefined)
+    this.ownerReady = false
     // Still-alive managed processes left by a previous daemon (from statePath), captured at
     // startup and surfaced in status(). The daemon cannot re-manage them, only report them.
     this.orphans = /** @type {{id: string, pid: number, releaseId: string | null}[]} */ ([])
@@ -114,13 +118,8 @@ export default class RollbridgeDaemon {
     const state = await readState(this.statePath)
     const snapshot = state && typeof state === "object" && !Array.isArray(state) ? /** @type {OwnerRecoverySnapshot} */ (state) : undefined
     const recovery = snapshot?.recovery
-    const configDigest = this.ownerRecoveryConfigDigest()
 
     if (snapshot && !recovery) throw new Error(`Owner recovery state ${this.statePath} is missing durable guardian identity; refusing to overwrite it.`)
-    if (recovery && recovery.configDigest !== configDigest) throw new Error("Owner recovery config identity does not match the persisted owner; refusing cross-authority adoption.")
-    if (snapshot && ((this.runtime?.digest ?? null) !== (snapshot.daemonRuntime?.digest ?? null))) {
-      throw new Error("Owner recovery runtime identity does not match the persisted owner; use the exact same Rollbridge runtime.")
-    }
 
     const guardianIdentity = recovery?.guardian || {
       socketPath: `${this.statePath}.guardian.sock`,
@@ -128,7 +127,10 @@ export default class RollbridgeDaemon {
     }
     this.guardianIdentity = guardianIdentity
     this.guardian = new GuardianClient(guardianIdentity)
-    if (recovery) await this.guardian.connect()
+    if (recovery) {
+      await this.guardian.connect()
+      await this.assertGuardianDaemonRecoveryCapability()
+    }
     else {
       await this.guardian.launch()
       guardianIdentity.pid = this.guardian.pid
@@ -137,7 +139,10 @@ export default class RollbridgeDaemon {
     this.watchOwnerReplacementEvents()
 
     if (snapshot) {
-      await this.restoreOwnerState(snapshot, {resumeDrains: false})
+      const transfer = /** @type {{config: import("./config.js").RollbridgeConfig, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, snapshot: OwnerRecoverySnapshot}} */ (await this.guardian.ownerState())
+
+      if (!transfer.config || !transfer.snapshot) throw new Error("Committed guardian published incomplete owner recovery state")
+      await this.restoreOwnerState(transfer.snapshot, {config: transfer.config, releaseConfigs: transfer.releaseConfigs, resumeDrains: false})
       await this.guardian.reconcileInventory()
       for (const release of this.releases.values()) {
         if (release.state === "draining") void this.drainAndPrune(release, release.config)
@@ -248,12 +253,29 @@ export default class RollbridgeDaemon {
   /** Publishes full normalized definitions only over the authenticated guardian channel. */
   async publishOwnerState() {
     if (!this.guardian) return
-    await this.guardian.publishOwnerState({
+    await this.guardian.publishOwnerState(this.transferableOwnerState())
+  }
+
+  /** Confirms guardian-owned startup only after every requested listener is available. */
+  async markOwnerReady() {
+    if (!this.guardian) return
+    await this.guardian.ownerReady()
+    this.ownerReady = true
+  }
+
+  /** @returns {Record<string, JsonValue>} Complete private guardian owner state. */
+  transferableOwnerState() {
+    return {
       authority: this.ownerAuthority(),
       config: this.config,
+      recovery: this.recoveryCommand ? {
+        command: this.recoveryCommand,
+        reconnectGraceMs: this.config.ownerRecovery?.reconnectGraceMs ?? 30000,
+        startupTimeoutMs: this.recoveryCommand.startupTimeoutMs
+      } : undefined,
       releaseConfigs: Object.fromEntries([...this.releases].map(([releaseId, release]) => [releaseId, release.config])),
       snapshot: this.status()
-    })
+    }
   }
 
   /**
@@ -287,6 +309,16 @@ export default class RollbridgeDaemon {
         persistedAuthority
       })
       prepared = legacyBridge.prepared
+    }
+    if (!legacyBridge) {
+      try {
+        await this.assertGuardianDaemonRecoveryCapability()
+      } catch (error) {
+        // The immediately preceding guardian protocol notifies the incumbent of
+        // an abort only when the prepared candidate disconnects.
+        this.guardian.disconnect()
+        throw error
+      }
     }
     const preparedStatus = await this.guardian.replacementStatus()
     const transfer = /** @type {{config: import("./config.js").RollbridgeConfig, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, snapshot: OwnerRecoverySnapshot}} */ (prepared.ownerState)
@@ -352,12 +384,7 @@ export default class RollbridgeDaemon {
         this.boundControlPath = this.config.control.path
       }
       const committed = this.guardian.waitForEvent("replacement-committed")
-      const staged = await this.guardian.stageOwnerReplacement(prepared.replacementId, {
-        authority: this.ownerAuthority(),
-        config: this.config,
-        releaseConfigs: Object.fromEntries([...this.releases].map(([releaseId, release]) => [releaseId, release.config])),
-        snapshot: this.status()
-      })
+      const staged = await this.guardian.stageOwnerReplacement(prepared.replacementId, this.transferableOwnerState())
 
       if (!staged.committed) {
         if (retiredIncumbentControl) {
@@ -433,6 +460,20 @@ export default class RollbridgeDaemon {
     } finally {
       if (!retainIncumbentControl) incumbentControl?.close()
     }
+  }
+
+  /** Requires the persistent guardian protocol which can restart an accepted daemon. */
+  async assertGuardianDaemonRecoveryCapability() {
+    if (!this.guardian) throw new Error("Owner recovery capability check requires the durable process guardian")
+    let capabilities
+
+    try {
+      capabilities = await this.guardian.capabilities()
+    } catch (error) {
+      if (!(error instanceof Error) || !["Guardian capabilities requires a process key", "Unknown guardian command: capabilities"].includes(error.message)) throw error
+      throw new Error("The persistent Rollbridge guardian predates daemon recovery. Perform one explicit clean Rollbridge shutdown and restart before retrying this package upgrade.", {cause: error})
+    }
+    if (capabilities.daemonRecovery !== 1) throw new Error("The persistent Rollbridge guardian does not support the required daemon recovery protocol")
   }
 
   /**
@@ -555,10 +596,15 @@ export default class RollbridgeDaemon {
       incumbentPid: this.legacyIncumbentPid,
       reason: "pre-split guardian and daemon lacked atomic replacement protocol"
     })
-    process.kill(this.legacyIncumbentPid, "SIGKILL")
+    if (!this.guardian) throw new Error("Legacy disruptive boundary is missing its bridge guardian")
+    await this.guardian.crossLegacyUpgradeBoundary({
+      incumbentPid: this.legacyIncumbentPid,
+      recoverySnapshot: bridge.recoverySnapshot,
+      replacementId: bridge.prepared.replacementId,
+      statePath: this.statePath
+    })
     bridge.boundaryCrossed = true
     await bridge.incumbentControl.closed()
-    await writeState(this.statePath, bridge.recoverySnapshot)
     this.ownerTransition = /** @type {OwnerTransition} */ ({
       disruptive: true,
       mode: "legacy-first-upgrade",
@@ -1685,7 +1731,7 @@ export default class RollbridgeDaemon {
       control: {...this.config.control},
       daemonPid: process.pid,
       daemonRuntime: this.runtime ? {...this.runtime} : undefined,
-      ownerRecovery: this.guardian ? {configDigest: this.ownerRecoveryConfigDigest()} : undefined,
+      ownerRecovery: this.guardian ? {configDigest: this.ownerRecoveryConfigDigest(), ready: this.ownerReady} : undefined,
       ownerTransition: this.ownerTransition ? {...this.ownerTransition} : undefined,
       orphans: [...this.orphans],
       proxy: {
@@ -1770,8 +1816,10 @@ async function verifyLegacyDaemonProcess(pid, configPath, socketPath) {
   const args = await processArguments(pid, "legacy daemon")
   const daemonIndex = args.indexOf("daemon")
   const configIndex = args.indexOf("--config")
+  const configuredPath = args[configIndex + 1]
+  const configuredAbsolutePath = configuredPath ? path.resolve(await fs.readlink(`/proc/${pid}/cwd`), configuredPath) : undefined
 
-  if (daemonIndex < 0 || configIndex < 0 || args[configIndex + 1] !== configPath) {
+  if (daemonIndex < 0 || configIndex < 0 || configuredAbsolutePath !== path.resolve(configPath)) {
     throw new Error(`Daemon PID ${pid} does not match the exact pre-split daemon config command`)
   }
   await verifyProcessUser(pid, "legacy daemon")
