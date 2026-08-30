@@ -68,7 +68,7 @@ let ownerState = bootstrap.ownerState
 let ownerRevision = ownerState === undefined ? 0 : 1
 /** @type {number | undefined} */
 let replacementRevision
-const legacyKeys = legacyGuardian ? legacyOwnerKeys(ownerState) : new Set()
+const legacyKeys = legacyGuardian ? committedOwnerProcessKeys(ownerState) : new Set()
 /** @type {net.Socket | undefined} */
 let ownerMutationClient
 /** @type {string | undefined} */
@@ -301,6 +301,9 @@ async function execute(request, socket) {
   if (request.command === "commit-retired-owner-replacement") {
     requireReplacement(socket, request)
     requireProcess(request)
+    if (!committedOwnerProcessKeys(ownerState).has(/** @type {string} */ (request.key))) {
+      throw new Error(`Guardian process ${request.key} does not belong to the committed owner`)
+    }
     if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
     if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
     const controlPath = ownerControlPath(ownerState)
@@ -622,11 +625,11 @@ function errorMessage(error) {
 }
 
 /**
- * Derives only exact process keys present in a committed pre-split durable snapshot.
- * @param {import("./json.js").JsonValue | undefined} state - Seeded owner state.
- * @returns {Set<string>} Exact legacy registrations eligible for recovery.
+ * Derives only exact process keys serialized by committed private owner state.
+ * @param {import("./json.js").JsonValue | undefined} state - Committed owner state.
+ * @returns {Set<string>} Exact committed registrations eligible as owner proof.
  */
-function legacyOwnerKeys(state) {
+function committedOwnerProcessKeys(state) {
   const keys = new Set()
 
   if (!state || typeof state !== "object" || Array.isArray(state) || !("snapshot" in state)) return keys
@@ -646,9 +649,18 @@ function legacyOwnerKeys(state) {
       if (service && typeof service === "object" && !Array.isArray(service) && typeof service.id === "string") keys.add(`service:${service.id}`)
     }
   }
-  if (typeof snapshot.activeReleaseId === "string" && Array.isArray(snapshot.singletons)) {
+  const singletonReleaseIds = "singletonReleaseIds" in state && state.singletonReleaseIds && typeof state.singletonReleaseIds === "object" && !Array.isArray(state.singletonReleaseIds)
+    ? state.singletonReleaseIds
+    : {}
+
+  if (Array.isArray(snapshot.singletons)) {
     for (const singleton of snapshot.singletons) {
-      if (singleton && typeof singleton === "object" && !Array.isArray(singleton) && typeof singleton.id === "string") keys.add(`singleton:${snapshot.activeReleaseId}:${singleton.id}`)
+      if (!singleton || typeof singleton !== "object" || Array.isArray(singleton) || typeof singleton.id !== "string") continue
+      const releaseId = singleton.id in singletonReleaseIds && typeof singletonReleaseIds[singleton.id] === "string"
+        ? singletonReleaseIds[singleton.id]
+        : snapshot.activeReleaseId
+
+      if (typeof releaseId === "string") keys.add(`singleton:${releaseId}:${singleton.id}`)
     }
   }
   return keys

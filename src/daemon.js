@@ -412,9 +412,11 @@ export default class RollbridgeDaemon {
 
       if (!staged.committed) {
         if (retiredIncumbentControl) {
-          const processKey = this.guardian.processes.keys().next().value
+          const recoveredProcesses = this.guardian.processes
+          const processKey = ownerSnapshotProcessKeys(transfer.snapshot, transfer.singletonReleaseIds)
+            .find((key) => recoveredProcesses.has(key))
 
-          if (!processKey) throw new Error("Retired owner replacement requires an exact recovered guardian process registration")
+          if (!processKey) throw new Error("Retired owner replacement requires an exact recovered process from committed owner state")
           await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, processKey)
         } else {
           try {
@@ -523,7 +525,7 @@ export default class RollbridgeDaemon {
    */
   async prepareLegacyOwnerReplacement({error, persisted, persistedAuthority}) {
     const diagnostic = error instanceof Error ? error.message : String(error)
-    const legacyProcessKey = legacyGuardianKeys(persisted)[0]
+    const legacyProcessKey = ownerSnapshotProcessKeys(persisted, persisted.singletonReleaseIds)[0]
 
     if (!isLegacyGuardianPrepareDiagnostic(diagnostic)) throw error
     if (!legacyProcessKey) throw new Error("Legacy disruptive owner replacement requires an exact guardian-owned process registration in durable state", {cause: error})
@@ -1975,18 +1977,21 @@ export function isLegacyGuardianPrepareDiagnostic(diagnostic) {
 }
 
 /**
- * @param {OwnerRecoverySnapshot} snapshot - Durable pre-split snapshot.
+ * @param {OwnerRecoverySnapshot} snapshot - Durable committed owner snapshot.
+ * @param {Record<string, string>} [singletonReleaseIds] - Exact singleton owner releases.
  * @returns {string[]} Exact guardian registration keys present in the snapshot.
  */
-function legacyGuardianKeys(snapshot) {
+function ownerSnapshotProcessKeys(snapshot, singletonReleaseIds = {}) {
   const keys = []
 
   for (const release of snapshot.releases) {
     for (const processStatus of release.processes) keys.push(`release:${release.releaseId}:${processStatus.id}`)
   }
   for (const service of snapshot.services) keys.push(`service:${service.id}`)
-  if (snapshot.activeReleaseId) {
-    for (const singleton of snapshot.singletons) keys.push(`singleton:${snapshot.activeReleaseId}:${singleton.id}`)
+  for (const singleton of snapshot.singletons) {
+    const releaseId = singletonReleaseIds[singleton.id] || snapshot.activeReleaseId
+
+    if (releaseId) keys.push(`singleton:${releaseId}:${singleton.id}`)
   }
   return keys
 }

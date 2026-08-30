@@ -256,6 +256,10 @@ test("same-authority replacement commits after a retired incumbent already remov
   const releasePath = path.join(root, "v1")
   const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath}))
   const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  const candidateProcessKey = "release:candidate:worker"
+  const committedOwnerProcessKey = "release:v1:worker"
+  let committedProcessKey
+  /** @type {RollbridgeDaemon | undefined} */
   let replacement
 
   try {
@@ -263,6 +267,16 @@ test("same-authority replacement commits after a retired incumbent already remov
     await makeFifo(path.join(releasePath, "worker.fifo"))
     await owner.start()
     await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    const ownerProcess = owner.guardian?.processes.values().next().value
+
+    assert.ok(owner.guardian)
+    assert.ok(ownerProcess)
+    await owner.guardian.request({
+      command: "register",
+      definition: ownerProcess.definition,
+      key: candidateProcessKey,
+      provenance: ownerProcess.provenance
+    })
     await Promise.all([...owner.releases.values()].map((release) => release.quiesce()))
     await owner.closeServer(owner.controlServer)
     await owner.removeControlSocket()
@@ -274,12 +288,29 @@ test("same-authority replacement commits after a retired incumbent already remov
     assert.equal((await owner.guardian?.replacementStatus())?.ownerClaimed, true)
     await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
 
-    replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    replacement = new RollbridgeDaemon({
+      config: daemonConfig,
+      logger: (message) => {
+        if (message !== "owner replacement candidate prepared" || !replacement?.guardian) return
+        const guardian = replacement.guardian
+        const recoveredProcess = guardian.processes.values().next().value
+
+        if (!recoveredProcess) throw new Error("Replacement did not reconstruct a guardian process")
+        guardian.processes = new Map([[candidateProcessKey, recoveredProcess], ...guardian.processes])
+        const commitRetiredOwnerReplacement = guardian.commitRetiredOwnerReplacement.bind(guardian)
+
+        guardian.commitRetiredOwnerReplacement = async (replacementId, processKey) => {
+          committedProcessKey = processKey
+          await commitRetiredOwnerReplacement(replacementId, processKey)
+        }
+      }
+    })
     await replacement.replaceIncompatibleOwner()
     const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const recoveredReleases = /** @type {{processes: {id: string, pid?: number, state: string}[]}[]} */ (recovered.releases)
 
     assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(committedProcessKey, committedOwnerProcessKey)
     assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
     assert.deepEqual(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state})), processState)
   } finally {
