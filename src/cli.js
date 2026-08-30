@@ -75,17 +75,30 @@ export async function runCli(argv) {
         },
         runtime
       })
+      let startupPromise = Promise.resolve()
+      let shutdownRequested = false
+      const shutdown = async () => {
+        shutdownRequested = true
+        await startupPromise.catch(() => undefined)
+        await daemon.shutdown()
+        process.exit(0)
+      }
+
+      process.once("SIGINT", () => { void shutdown() })
+      process.once("SIGTERM", () => { void shutdown() })
 
       if (options.takeoverOwner && (!bootstrap || !bootstrap.attestation)) throw new Error("Daemon --takeover-owner requires the complete bootstrap release tuple and --boot-attestation.")
 
       if (options.replaceOwner) {
         if (bootstrap || options.takeoverOwner) throw new Error("Daemon --replace-owner cannot be combined with bootstrap takeover options.")
-        await daemon.replaceIncompatibleOwner()
+        startupPromise = daemon.replaceIncompatibleOwner()
+        await startupPromise
       }
 
       if (!options.takeoverOwner && !options.replaceOwner) {
         try {
-          await daemon.start({exposeControl: !bootstrap})
+          startupPromise = daemon.start({exposeControl: !bootstrap})
+          await startupPromise
         } catch (error) {
           if (!config.ownerRecovery) throw error
 
@@ -100,14 +113,7 @@ export async function runCli(argv) {
           return
         }
       }
-
-      const shutdown = async () => {
-        await daemon.shutdown()
-        process.exit(0)
-      }
-
-      process.once("SIGINT", () => { void shutdown() })
-      process.once("SIGTERM", () => { void shutdown() })
+      if (shutdownRequested) return
 
       if (bootstrap) {
         try {
@@ -141,7 +147,7 @@ export async function runCli(argv) {
           return
         }
       }
-      await publishDaemonReadiness(daemon, recoveryPidPath)
+      if (!shutdownRequested) await publishDaemonReadiness(daemon, recoveryPidPath)
     })
 
   program

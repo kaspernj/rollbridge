@@ -9,8 +9,10 @@ process lifecycle, retained generations, ports, and recovery state.
 
 - One runtime generation is one release-scoped `background-jobs-main` plus its
   worker pool. Start the complete candidate generation before activation.
-- After activation, retire the old generation as one unit. Its main stops
-  schedules, new dispatch, and new ordinary worker handoffs; its workers stop
+- For an explicit candidate lifecycle, retire the old generation as one unit,
+  wait for its acknowledgement, then activate the candidate and commit traffic
+  synchronously. The old main stops schedules, new dispatch, and new ordinary
+  worker handoffs; its workers stop
   accepting handoffs. The old main remains running with those workers and owns
   their connections, lease fencing, report acceptance and acknowledgement, and
   durable store transitions. The worker/reporting side durably retries terminal
@@ -40,10 +42,13 @@ implemented. Do not claim production compliance when source/config still uses a
 fixed jobs-main, worker adoption by a new main, destructive orphan recovery, or
 synchronous cleanup.
 
-Current same-authority behavior quiesces configured handoff services after
-candidate activation, retains concurrent generations, reports live release
-references, and can opt into `ownerRecovery` so a durable process guardian
-preserves and reconstructs active/draining generations after daemon process
+Current same-authority behavior preserves activate-then-retire ordering when no
+activation hook is configured. An opt-in handoff-service `activateCommand`
+durably journals old-retire/new-activate ordering, retains concurrent generations,
+reports live release references, journals post-commit singleton completion, and
+restores an active coordinator's generation-scoped role after process restart.
+It requires `ownerRecovery` so a durable guardian preserves exact per-release
+definitions and reconstructs active/draining generations after daemon process
 exit. With `ownerRecovery` and the same `statePath` transaction anchor,
 `ensure-daemon` also replaces incompatible config, control-socket, package, and
 runtime owners through a guardian-fenced candidate-first handoff while retaining

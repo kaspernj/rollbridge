@@ -66,6 +66,21 @@ test("keeps every output line when fewer than the retention limit are produced",
   assert.deepEqual(logs.map((entry) => entry.line), ["one", "two"])
 })
 
+test("emits each output line after retaining it", () => {
+  const managed = buildProcess(50)
+  let observed
+
+  managed.once("log", (entry) => {
+    observed = {entry, retained: managed.status().logs}
+  })
+  managed.appendLog("stdout", "ready\n")
+
+  assert.deepEqual(observed, {
+    entry: managed.status().logs[0],
+    retained: managed.status().logs
+  })
+})
+
 test("reports zeroed restart and uptime fields before the process starts", () => {
   const status = buildProcess(50).status()
 
@@ -383,6 +398,70 @@ test("a hanging lifecycle hook is bounded so stop still completes", async () => 
   } finally {
     await managed.stop()
   }
+})
+
+test("activateStrict runs the configured activation command once per call and rejects failures", async () => {
+  const commands = /** @type {{command: string, label: string, pid: number | undefined, timeoutMs: number}[]} */ ([])
+  const managed = buildLongLived(() => false)
+
+  try {
+    await managed.start()
+    const pid = managed.pid
+
+    assert.ok(pid)
+    managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0}
+    managed.runHook = async (command, timeoutMs, label, hookPid) => {
+      commands.push({command, label, pid: hookPid, timeoutMs})
+      return undefined
+    }
+
+    await managed.activateStrict()
+    assert.deepEqual(commands, [{command: "jobs activate", label: "activate command", pid, timeoutMs: 30000}])
+
+    managed.runHook = async () => new Error("activation rejected")
+    await assert.rejects(() => managed.activateStrict(), /activation rejected/)
+  } finally {
+    await managed.stop()
+  }
+})
+
+test("activateStrict rejects when the activated process is replaced while its hook runs", async () => {
+  const managed = buildLongLived(() => false)
+
+  await managed.start()
+  const child = managed.child
+  const pid = managed.pid
+
+  try {
+    managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0}
+    managed.lifecycleRole = "candidate"
+    managed.runHook = async () => {
+      managed.child = undefined
+      managed.pid = undefined
+      return undefined
+    }
+
+    await assert.rejects(() => managed.activateStrict(), /exited before activation completed/)
+    assert.equal(managed.lifecycleRole, "candidate")
+  } finally {
+    managed.child = child
+    managed.pid = pid
+    await managed.stop()
+  }
+})
+
+test("activateStrict rejects an activation request when its process is not running", async () => {
+  const managed = buildLongLived(() => false)
+  let hookRan = false
+
+  managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0}
+  managed.runHook = async () => {
+    hookRan = true
+    return undefined
+  }
+
+  await assert.rejects(() => managed.activateStrict(), /is not running for activation/)
+  assert.equal(hookRan, false)
 })
 
 test("sends the configured stopSignal as the graceful stop signal", async () => {

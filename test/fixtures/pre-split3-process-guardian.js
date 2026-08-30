@@ -212,6 +212,20 @@ async function execute(request, socket) {
   } else if (request.command === "update") {
     if (!request.definition || !request.provenance) throw new Error("Guardian update requires definition and provenance")
     if (record.provenance !== request.previousProvenance) throw new Error(`Guardian provenance mismatch for ${request.key}`)
+    const updateGatePath = request.definition.env?.ROLLBRIDGE_TEST_UPDATE_GATE
+
+    if (updateGatePath) {
+      await fs.writeFile(`${updateGatePath}.waiting`, "waiting\n")
+      while (true) {
+        try {
+          await fs.access(updateGatePath)
+          break
+        } catch (error) {
+          if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+    }
     record.process.updateDefinition({
       ...request.definition,
       lifecycle: request.definition.lifecycle || {drainTimeoutMs: 0},

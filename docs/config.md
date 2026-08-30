@@ -132,6 +132,16 @@ exact accepted daemon command and environment itself, retains startup fencing
 until that daemon publishes its ready listeners and PID file, and uses a nonzero
 retry backoff after failed starts. The replacement restores active and draining
 releases with their allocated ports and resumes proxy/control ownership.
+An unfailed durable generation transition resumes under the guardian's mutation
+fence after those listeners and the recovered PID are ready, so a valid long
+lifecycle hook does not consume the daemon startup deadline. Status remains
+available during replay while competing mutations and terminal owner operations
+stay fenced. `SIGINT` and `SIGTERM` wait for that startup replay before beginning
+clean shutdown. Transition snapshots carry a monotonic journal revision; the
+public snapshot is considered only when it is strictly newer and contains every
+retained transition and singleton-owning release, while private guardian state
+remains authoritative on ties and for older released snapshots without a
+journal revision.
 Concurrent matching starts are fenced: one claims ownership and losers attest
 that winner. The authenticated guardian's private committed state is
 authoritative when the public snapshot is stale or partially written; missing or
@@ -267,13 +277,16 @@ range** so old and new instances can run at the same time:
   policy: "service",
   deployStrategy: "handoff",
   command: "npx velocious background-jobs-main",
-  lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
+  lifecycle: {
+    activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+    quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
+  },
   port: {from: 7331, to: 7399}
 }
 ```
 
-The `appctl` command is illustrative; the application must provide a reviewed
-equivalent that quiesces admission without terminating jobs-main.
+The lifecycle socket path is illustrative; set it to the reviewed release-local
+Velocious socket used by jobs-main.
 
 Reference it from same-release processes with `{{ports.background-jobs-main}}`.
 During a deploy, old workers keep the old port and new workers get the new port.
@@ -283,14 +296,40 @@ retirement must quiesce the old jobs-main's scheduling, dispatch, and new worker
 handoffs while keeping it with its workers until their accepted work settles.
 Workers are not adopted by the new service.
 
-Configure `lifecycle.quietCommand` on the handoff service to stop schedules,
-dispatch, and new handoffs without exiting. Immediately after activation,
-Rollbridge quiesces it with `nonBlockingDrain` companions, then returns without
-waiting for their drain. A failed hook leaves the generation alive, records
-`retirementError`, and emits `release retirement quiescence failed`. Durable
-same-authority recovery and guardian-fenced incompatible
-config/control-socket/package/runtime replacement are available with
-`ownerRecovery`.
+Configure `lifecycle.activateCommand` and `lifecycle.quietCommand` on one handoff
+service when the service starts as a quiescent candidate and requires an explicit
+generation transition. Rollbridge starts and health-checks the complete candidate,
+waits for the old generation's strict retirement acknowledgement, waits for the
+candidate's strict activation acknowledgement, then commits the active release and
+proxy target synchronously. Activation is always bounded to 30 seconds;
+retirement uses the process's `gracefulStopMs` bound (or 30 seconds when that
+window is `"indefinite"`). Both run with the process environment plus
+`ROLLBRIDGE_PID`.
+
+This opt-in mode requires `statePath` and `ownerRecovery`. Rollbridge journals the
+exact candidate, previous release, config authority, phase, and failure. An
+unresolved transition blocks a different deploy; an explicit deploy with the same
+release id, path, revision, and config may resume only its incomplete idempotent
+phase. Once the health-ready candidate is journaled, its exact config becomes the
+transition authority even if a later hook fails. A recorded failed hook is not
+retried merely because daemon ownership changes. Omit `activateCommand` to retain
+the existing activate-then-retire behavior. Adding, removing, or moving
+`activateCommand` changes the daemon's generation coordinator and therefore
+requires a daemon restart before the next deploy.
+
+The synchronous traffic assignment is persisted as `committed_pending` before
+Rollbridge awaits singleton replacement. Exact retry or unambiguous owner recovery
+finishes that idempotent post-commit work before the transition becomes
+`committed` and deploy reports success. Stop, restart, and rollback operations are
+rejected while any transition remains unresolved. Exact per-release definitions
+stay in the guardian's authenticated private recovery state; `statePath` remains a
+secret-safe status and transaction anchor.
+
+An activation-owning handoff service also carries a durable desired role. If its
+active process automatically or manually restarts, Rollbridge runs the exact
+generation-scoped `activateCommand` once before marking it running. A failed role
+restoration is surfaced and the process remains failed rather than being treated
+as active. Retired generations remain fenced and are not restarted.
 
 ### `processes[].lifecycle`
 
@@ -306,7 +345,8 @@ legitimate hours-long generation drains are valid.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lifecycle.quietCommand` | string | unset | Run first to tell the process to stop accepting new work. |
+| `lifecycle.activateCommand` | string | unset | For one handoff service, acknowledge activation of its already-started candidate generation after the previous generation has acknowledged retirement. Requires `quietCommand`, `statePath`, and `ownerRecovery`; bounded to 30 seconds. |
+| `lifecycle.quietCommand` | string | unset | Run first to tell the process to stop accepting new work. Bounded by `gracefulStopMs`, or 30 seconds when that window is `"indefinite"`. |
 | `lifecycle.drainCommand` | string | unset | Run after quieting to wait until the process has drained (it blocks until done). When unset, Rollbridge instead waits up to `drainTimeoutMs` for the process to exit on its own. Requires a positive `drainTimeoutMs` (which bounds it). |
 | `lifecycle.drainTimeoutMs` | non-negative number | `0` | Bounds the drain step. `0` **skips the drain step entirely** (no `drainCommand`, no wait). |
 | `lifecycle.stopCommand` | string | unset | Run to stop the process instead of sending `stopSignal`, if it is still running after draining. |
@@ -451,6 +491,6 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
-- `lifecycle.quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`. A `lifecycle.stopCommand` may not be combined with a custom `stopSignal` (the `stopCommand` runs instead of the signal, so the signal would be ignored).
+- `lifecycle.activateCommand`/`quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`. `activateCommand` is allowed on at most one handoff service, requires that service's `quietCommand`, and requires `statePath` plus `ownerRecovery`. A `lifecycle.stopCommand` may not be combined with a custom `stopSignal` (the `stopCommand` runs instead of the signal, so the signal would be ignored).
 - `nonBlockingDrain` must be a boolean, and is allowed only on a `companion` process.
 - `statePath` must be a string when set.

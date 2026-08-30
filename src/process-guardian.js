@@ -35,6 +35,7 @@ const OWNER_RESTART_RETRY_MS = 1000
  * @property {import("./json.js").JsonValue} [authority] - Expected current authority.
  * @property {import("./json.js").JsonValue} [nextAuthority] - Requested replacement authority.
  * @property {import("./managed-process.js").ManagedProcessStartReason} [reason] - Start reason.
+ * @property {import("./managed-process.js").LifecycleRole} [lifecycleRole] - Desired generation role restored during start.
  * @property {string} token - Authentication token.
  */
 
@@ -61,6 +62,8 @@ if (legacyGuardian) await legacyGuardian.connect()
 const processes = new Map()
 /** @type {Set<net.Socket>} */
 const clients = new Set()
+/** @type {Map<net.Socket, number>} */
+const ownerUpdatesInFlight = new Map()
 /** @type {net.Socket | undefined} */
 let ownerClient
 /** @type {number | undefined} */
@@ -126,30 +129,8 @@ const server = net.createServer((socket) => {
       clearTimeout(waiter.timer)
       waiter.reject(new Error("Owner claimant disconnected"))
     }
-    if (ownerClient === socket) {
-      const incompleteRestartChild = ownerRestartChild?.pid === ownerClientPid ? ownerRestartChild : undefined
-
-      ownerClient = undefined
-      ownerClientPid = undefined
-      if (replacementClient && replacementOwnerState) commitReplacement()
-      else {
-        if (incompleteRestartChild) {
-          reportOwnerRestartFailure(ownerRecoveryDefinition(), {code: "OWNER_DISCONNECTED"})
-          killDetachedProcessGroup(incompleteRestartChild)
-          clearOwnerRestartTracking(incompleteRestartChild)
-          ownerRestartRetryDelayMs = OWNER_RESTART_RETRY_MS
-        }
-        if (replacementClient) abortReplacement("Committed owner disconnected before replacement candidate was ready", false)
-        if (!shuttingDown) {
-          grantNextOwner()
-          const retryDelayMs = ownerRestartRetryDelayMs
-
-          ownerRestartRetryDelayMs = undefined
-          scheduleOwnerRestart(retryDelayMs)
-        }
-      }
-    }
-    if (ownerMutationClient === socket) {
+    if (ownerClient === socket && !ownerUpdatesInFlight.has(socket)) releaseClosedOwner(socket)
+    if (ownerMutationClient === socket && ownerClient !== socket) {
       ownerMutationClient = undefined
       ownerMutationId = undefined
     }
@@ -207,15 +188,22 @@ server.listen(socketPath, async () => {
 async function handleLine(socket, line) {
   /** @type {GuardianRequest | undefined} */
   let request
+  let ownerUpdate = false
 
   try {
     request = /** @type {GuardianRequest} */ (JSON.parse(line))
     if (request.token !== token) throw new Error("Guardian authentication failed")
+    if (ownerClient === socket && request.command === "update") {
+      ownerUpdate = true
+      ownerUpdatesInFlight.set(socket, (ownerUpdatesInFlight.get(socket) ?? 0) + 1)
+    }
     const result = await execute(request, socket)
 
     socket.write(`${JSON.stringify({id: request.id, result})}\n`)
   } catch (error) {
     if (!socket.destroyed) socket.write(`${JSON.stringify({error: error instanceof Error ? error.message : String(error), id: request?.id})}\n`)
+  } finally {
+    if (ownerUpdate) completeOwnerUpdate(socket)
   }
 }
 
@@ -514,6 +502,9 @@ async function execute(request, socket) {
       ? legacyGuardian.process(request.key, managedDefinition)
       : new ManagedProcess(managedDefinition)
 
+    managedProcess.on("log", (entry) => {
+      broadcast({entry, event: "process-log", key: request.key, status: managedProcess.status()})
+    })
     if (recoversLegacyProcess && "recover" in managedProcess && typeof managedProcess.recover === "function") await managedProcess.recover()
 
     record.process = managedProcess
@@ -531,17 +522,25 @@ async function execute(request, socket) {
 
   if (request.command === "start") {
     record.desired = true
-    await record.process.start(request.reason)
+    await record.process.start(request.reason, request.lifecycleRole)
+  } else if (request.command === "activate") {
+    await record.process.activateStrict()
   } else if (request.command === "quiesce") {
     record.desired = false
     await record.process.quiesceStrict()
+  } else if (request.command === "requiesce") {
+    record.desired = false
+    await record.process.requiesceStrict()
+  } else if (request.command === "set-lifecycle-role") {
+    if (request.lifecycleRole !== "active" && request.lifecycleRole !== "candidate" && request.lifecycleRole !== "retired") throw new Error("Guardian lifecycle role is invalid")
+    await record.process.setLifecycleRole(request.lifecycleRole)
   } else if (request.command === "stop") {
     record.desired = false
     await record.process.stop(request.options)
   } else if (request.command === "update") {
     if (!request.definition || !request.provenance) throw new Error("Guardian update requires definition and provenance")
     if (record.provenance !== request.previousProvenance) throw new Error(`Guardian provenance mismatch for ${request.key}`)
-    record.process.updateDefinition({
+    await record.process.updateDefinition({
       ...request.definition,
       lifecycle: request.definition.lifecycle || {drainTimeoutMs: 0},
       logger: record.process.logger,
@@ -551,6 +550,10 @@ async function execute(request, socket) {
       stopSignal: request.definition.stopSignal || "SIGTERM"
     })
     record.provenance = request.provenance
+    if (request.ownerState !== undefined) {
+      ownerState = request.ownerState
+      committedReplacementId = undefined
+    }
   } else if (request.command === "status") {
     return record.process.status()
   } else {
@@ -571,6 +574,54 @@ async function execute(request, socket) {
  */
 function requireOwner(socket, command) {
   if (ownerClient !== socket) throw new Error(`Guardian ${command} requires the committed owner`)
+}
+
+/**
+ * Releases authority only after every accepted request from the disconnected owner settles.
+ * @param {net.Socket} socket - Disconnected owner socket.
+ */
+function releaseClosedOwner(socket) {
+  if (ownerClient !== socket) return
+  const incompleteRestartChild = ownerRestartChild?.pid === ownerClientPid ? ownerRestartChild : undefined
+
+  ownerClient = undefined
+  ownerClientPid = undefined
+  if (ownerMutationClient === socket) {
+    ownerMutationClient = undefined
+    ownerMutationId = undefined
+  }
+  if (replacementClient && replacementOwnerState) commitReplacement()
+  else {
+    if (incompleteRestartChild) {
+      reportOwnerRestartFailure(ownerRecoveryDefinition(), {code: "OWNER_DISCONNECTED"})
+      killDetachedProcessGroup(incompleteRestartChild)
+      clearOwnerRestartTracking(incompleteRestartChild)
+      ownerRestartRetryDelayMs = OWNER_RESTART_RETRY_MS
+    }
+    if (replacementClient) abortReplacement("Committed owner disconnected before replacement candidate was ready", false)
+    if (!shuttingDown) {
+      grantNextOwner()
+      const retryDelayMs = ownerRestartRetryDelayMs
+
+      ownerRestartRetryDelayMs = undefined
+      scheduleOwnerRestart(retryDelayMs)
+    }
+  }
+}
+
+/**
+ * Completes one accepted owner update and applies a deferred disconnect boundary.
+ * @param {net.Socket} socket - Requesting owner socket.
+ */
+function completeOwnerUpdate(socket) {
+  const remaining = (ownerUpdatesInFlight.get(socket) ?? 1) - 1
+
+  if (remaining > 0) {
+    ownerUpdatesInFlight.set(socket, remaining)
+    return
+  }
+  ownerUpdatesInFlight.delete(socket)
+  if (socket.destroyed) releaseClosedOwner(socket)
 }
 
 /**

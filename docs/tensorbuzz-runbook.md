@@ -24,10 +24,12 @@ while a newer generation is active.
 1. Prepare the candidate release and run backwards-compatible migrations.
 2. Start the candidate jobs-main on a new port, then its worker pool and web
    process. Health-check web before activation.
-3. Activate the candidate release and switch new traffic.
-4. Retire the previous jobs-main and workers as one generation. Jobs-main stops
+3. Retire the previous jobs-main and workers as one generation and wait for its
+   exact lifecycle-socket acknowledgement. Jobs-main stops
    schedule ownership, new dispatch, and new handoffs; workers stop accepting
    handoffs.
+4. Activate the candidate with its exact generation and lifecycle socket, then
+   synchronously switch new traffic.
 5. Return deploy success and release the deploy lock. Do not wait for old jobs,
    workers, jobs-main, HTTP/WebSocket connections, or other retained services.
 

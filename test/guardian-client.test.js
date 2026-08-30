@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
+import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -47,6 +48,63 @@ test("guardian inventory removes only an exact owned provenance", async () => {
     assert.equal((await fixture.client.inventory()).length, 1)
     await fixture.client.remove("candidate", candidate.provenance)
     assert.deepEqual(await fixture.client.inventory(), [])
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian runs a strict activation lifecycle command for the exact registered process", async () => {
+  const fixture = await createGuardian()
+  const activationPath = path.join(fixture.root, "activated")
+  const processInstance = fixture.client.process("candidate-activation", {
+    ...definition("candidate-activation"),
+    lifecycle: {activateCommand: `printf activated > ${JSON.stringify(activationPath)}`, drainTimeoutMs: 0}
+  })
+
+  try {
+    await processInstance.start()
+    await processInstance.activateStrict()
+    assert.equal(await fs.readFile(activationPath, "utf8"), "activated")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian atomically updates process provenance with private owner state", async () => {
+  const fixture = await createGuardian()
+  const processInstance = fixture.client.process("service", definition("service"))
+  const previousOwnerState = {authority: null, serviceReleaseIds: {service: "v1"}}
+  const nextOwnerState = {authority: null, serviceReleaseIds: {service: "v2"}}
+
+  try {
+    await fixture.client.publishOwnerState(previousOwnerState)
+    await processInstance.start()
+    const previousProvenance = (await fixture.client.inventory())[0]?.provenance
+
+    await processInstance.updateDefinition({...definition("service"), env: {RELEASE: "v2"}}, nextOwnerState)
+    assert.deepEqual(await fixture.client.ownerState(), nextOwnerState)
+    assert.notEqual((await fixture.client.inventory())[0]?.provenance, previousProvenance)
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian forwards each retained output line to its exact process proxy", async () => {
+  const fixture = await createGuardian()
+  const marker = "guardian-output-ready"
+  const processInstance = fixture.client.process("output", {
+    ...definition("output"),
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`console.log(${JSON.stringify(marker)})`)}`
+  })
+  const logged = once(processInstance, "log")
+  const exitedFirst = once(processInstance, "exit").then(() => { throw new Error("Guardian process exited before forwarding retained output") })
+
+  try {
+    await processInstance.start()
+    const [entry] = await Promise.race([logged, exitedFirst])
+
+    assert.equal(entry.line, marker)
+    assert.ok(processInstance.status().logs.some((candidate) => candidate.line === marker))
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -651,6 +709,106 @@ test("first upgrade migrates a real pre-split guardian without replacing its own
   }
 })
 
+test("split guardian rejects an owner-state update when its nested legacy definition update fails", async () => {
+  const fixture = await createLegacyGuardian()
+  const processDefinition = definition("legacy-worker")
+  const legacyProcess = fixture.client.process("release:v1:legacy-worker", processDefinition)
+  const authority = {configDigest: "legacy-config", runtime: {digest: "legacy-runtime", format: 1, path: "/legacy", version: "0.1.28"}}
+  const nextAuthority = {...authority, runtime: {...authority.runtime, digest: "candidate-runtime", path: "/candidate"}}
+  const ownerState = {
+    authority,
+    snapshot: {activeReleaseId: "v1", releases: [{processes: [{id: "legacy-worker"}], releaseId: "v1"}], services: [], singletons: []}
+  }
+  let upgraded
+
+  try {
+    await legacyProcess.start()
+    upgraded = await fixture.client.upgradeLegacyGuardian({
+      ownerState,
+      socketPath: path.join(fixture.root, "guardian-v2.sock"),
+      token: "candidate-guardian-capability"
+    })
+    const prepared = await upgraded.prepareOwnerReplacement(authority, nextAuthority)
+    const committedOwnerState = {authority: nextAuthority, snapshot: ownerState.snapshot}
+
+    await upgraded.stageOwnerReplacement(prepared.replacementId, committedOwnerState)
+    const restored = upgraded.process("release:v1:legacy-worker", processDefinition)
+
+    await restored.recover()
+    await legacyProcess.updateDefinition({...processDefinition, env: {REVISION: "external"}})
+    await assert.rejects(
+      () => restored.updateDefinition({...processDefinition, env: {REVISION: "candidate"}}, {authority: nextAuthority, snapshot: {...ownerState.snapshot, serviceReleaseIds: {service: "v2"}}}),
+      /provenance mismatch/
+    )
+    assert.deepEqual(await upgraded.ownerState(), committedOwnerState)
+  } finally {
+    await legacyProcess.stop().catch(() => {})
+    upgraded?.disconnect()
+    fixture.client.disconnect()
+    if (upgraded?.pid) killExactProcessGroup(upgraded.pid)
+    if (fixture.child.exitCode === null && fixture.child.signalCode === null) fixture.child.kill("SIGKILL")
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("split guardian defers owner handoff until a nested legacy definition update commits", async () => {
+  const fixture = await createLegacyGuardian()
+  const processDefinition = definition("legacy-worker")
+  const legacyProcess = fixture.client.process("release:v1:legacy-worker", processDefinition)
+  const authority = {configDigest: "legacy-config", runtime: {digest: "legacy-runtime", format: 1, path: "/legacy", version: "0.1.28"}}
+  const nextAuthority = {...authority, runtime: {...authority.runtime, digest: "candidate-runtime", path: "/candidate"}}
+  const ownerState = {
+    authority,
+    snapshot: {activeReleaseId: "v1", releases: [{processes: [{id: "legacy-worker"}], releaseId: "v1"}], services: [], singletons: []}
+  }
+  const socketPath = path.join(fixture.root, "guardian-v2.sock")
+  const token = "candidate-guardian-capability"
+  const gatePath = path.join(fixture.root, "legacy-update.allow")
+  const committedOwnerState = {authority: nextAuthority, snapshot: {...ownerState.snapshot, update: "committed"}}
+  const contender = new GuardianClient({socketPath, token})
+  let upgraded
+
+  try {
+    await legacyProcess.start()
+    upgraded = await fixture.client.upgradeLegacyGuardian({ownerState, socketPath, token})
+    const prepared = await upgraded.prepareOwnerReplacement(authority, nextAuthority)
+
+    await upgraded.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: ownerState.snapshot})
+    const restored = upgraded.process("release:v1:legacy-worker", processDefinition)
+
+    await restored.recover()
+    await contender.connect()
+    const updateResult = restored.updateDefinition({...processDefinition, env: {ROLLBRIDGE_TEST_UPDATE_GATE: gatePath}}, committedOwnerState)
+      .then(() => undefined, (error) => error)
+
+    await waitForFileText(`${gatePath}.waiting`)
+    const claim = contender.claimOwner(1000, nextAuthority)
+    let claimSettled = false
+
+    void claim.finally(() => { claimSettled = true })
+    upgraded.disconnect()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(claimSettled, false, "owner handoff must wait for the nested definition update")
+
+    await fs.writeFile(gatePath, "allow\n")
+    await claim
+    const updateError = await updateResult
+
+    assert.match(String(updateError), /connection closed while awaiting update/)
+    assert.deepEqual(await contender.ownerState(), committedOwnerState)
+  } finally {
+    await fs.writeFile(gatePath, "allow\n").catch(() => {})
+    await contender.shutdown().catch(() => {})
+    contender.disconnect()
+    upgraded?.disconnect()
+    await legacyProcess.stop().catch(() => {})
+    fixture.client.disconnect()
+    if (upgraded?.pid) killExactProcessGroup(upgraded.pid)
+    if (fixture.child.exitCode === null && fixture.child.signalCode === null) fixture.child.kill("SIGKILL")
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("a disconnected legacy upgrade candidate does not strand its bridge guardian", async () => {
   const fixture = await createLegacyGuardian()
   const authority = {configDigest: "legacy-config", runtime: {digest: "legacy-runtime", format: 1, path: "/legacy", version: "0.1.28"}}
@@ -924,7 +1082,7 @@ async function reconnectAndShutdownGuardian(fixture, authority) {
 
 /**
  * @param {string} id - Process id.
- * @returns {Parameters<GuardianClient["process"]>[1]} Managed process definition.
+ * @returns {Parameters<GuardianClient["process"]>[1] & import("../src/managed-process.js").ManagedProcessDefinition} Managed process definition.
  */
 function definition(id) {
   return {
@@ -934,6 +1092,7 @@ function definition(id) {
     id,
     lifecycle: {drainTimeoutMs: 0},
     logger: () => {},
+    memory: undefined,
     outputLines: 10,
     restart: {backoffFactor: 1, maxDelayMs: 0, maxRestarts: 0, windowMs: 0},
     restartDelayMs: 0,

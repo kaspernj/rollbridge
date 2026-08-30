@@ -21,7 +21,7 @@ const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
 const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 
 /** @typedef {import("../src/daemon.js").DaemonStatus} DaemonStatus */
-/** @typedef {DaemonStatus & {recovery: {configDigest: string}}} RecoveryState */
+/** @typedef {DaemonStatus & {recovery: {configDigest: string}, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>}} RecoveryState */
 
 test("external owner retirement releases guardian authority without losing its generation", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-retirement-recovery-"))
@@ -209,6 +209,610 @@ test("guardian restarts an abruptly exited daemon without replacing managed proc
     if (workerPid) {
       try { process.kill(-workerPid, "SIGKILL") } catch (_error) { /* The exact managed group already exited. */ }
     }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("guardian recovers a persistent service after its final active release stops", async () => {
+  const fixture = await createFixture()
+  const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const jobs = processes.find((processConfig) => processConfig.id === "jobs")
+  const worker = processes.find((processConfig) => processConfig.id === "worker")
+
+  assert.ok(jobs && worker)
+  jobs.port = {from: 17000, to: 17001}
+  worker.lifecycle = {drainCommand: "true", drainTimeoutMs: 1000}
+  fixture.config.processes = processes.filter((processConfig) => processConfig.id !== "singleton")
+  await writeConfig(fixture.configPath, fixture.config)
+  const owner = spawnDaemon(fixture.configPath)
+  let recoveredDaemonPid
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const releasePath = await prepareRelease(fixture.root, "v1")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: fixture.socketPath})
+    await sendControlCommand({command: {command: "stop", releaseId: "v1"}, path: fixture.socketPath})
+    const before = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+    const servicePid = before.services[0]?.process.pid
+
+    assert.equal(before.activeReleaseId, null)
+    assert.equal(typeof servicePid, "number")
+    const persisted = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(fixture.statePath, "utf8")))
+
+    assert.equal(persisted.serviceReleaseIds?.beacon, "v1")
+    const recoveredListenerLog = waitForLog(owner, "control socket listening", {allowChildExit: true})
+
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+    await recoveredListenerLog
+    const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    recoveredDaemonPid = recovered.daemonPid
+    assert.equal(recovered.activeReleaseId, null)
+    assert.equal(recovered.services[0]?.process.pid, servicePid)
+    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
+    const nextReleasePath = await prepareRelease(fixture.root, "v2")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: nextReleasePath, revision: "v2"}, path: fixture.socketPath})
+    const finalReleasePath = await prepareRelease(fixture.root, "v3")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v3", releasePath: finalReleasePath, revision: "v3"}, path: fixture.socketPath})
+    assert.equal((await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})).activeReleaseId, "v3")
+    await sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+  } finally {
+    await killChild(owner)
+    if (recoveredDaemonPid && isProcessRunning(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner state omits a new persistent service until its defining release is retained", async () => {
+  const fixture = await createFixture()
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  const releasePath = await prepareRelease(fixture.root, "v1", {holdJobsBind: true})
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deploy
+
+  try {
+    await owner.start()
+    deploy = owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    await waitForFile(path.join(releasePath, "jobs.bind-waiting"), 3000)
+    await owner.persistState({throwOnError: true})
+    const persisted = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(fixture.statePath, "utf8")))
+    const guardianState = /** @type {Record<string, import("../src/json.js").JsonValue> | undefined} */ (await owner.guardian?.ownerState())
+    const guardianSnapshot = /** @type {RecoveryState | undefined} */ (guardianState?.snapshot)
+
+    assert.deepEqual(persisted.releases, [])
+    assert.deepEqual(persisted.services, [])
+    assert.deepEqual(persisted.serviceReleaseIds, {})
+    assert.deepEqual(guardianSnapshot?.releases, [])
+    assert.deepEqual(guardianSnapshot?.services, [])
+    assert.deepEqual(guardianState?.serviceReleaseIds, {})
+
+    await fs.writeFile(path.join(releasePath, "jobs.bind"), "ready\n")
+    await deploy
+    assert.equal(owner.status().services.find(({id}) => id === "beacon")?.process.state, "running")
+    assert.equal(owner.serviceReleaseIds.get("beacon"), "v1")
+  } finally {
+    await fs.writeFile(path.join(releasePath, "jobs.bind"), "ready\n").catch(() => {})
+    await deploy?.catch(() => {})
+    await Promise.all([
+      fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => {}),
+      owner.shutdown().catch(() => {})
+    ])
+    owner.guardian?.disconnect()
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery accepts released format-2 state without journal revision or service owner metadata", async () => {
+  const fixture = await createFixture()
+  const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const worker = processes.find((processConfig) => processConfig.id === "worker")
+
+  assert.ok(worker)
+  worker.lifecycle = {drainCommand: "true", drainTimeoutMs: 1000}
+  await writeConfig(fixture.configPath, fixture.config)
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  const releasePath = await prepareRelease(fixture.root, "v1")
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    if (owner.pendingWrite) await owner.pendingWrite
+    const publicState = JSON.parse(await fs.readFile(fixture.statePath, "utf8"))
+    const privateOwnerState = owner.transferableOwnerState()
+    const privateSnapshot = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (privateOwnerState.snapshot)
+    const privateTransition = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (privateSnapshot.generationTransition)
+
+    delete publicState.generationTransition.journalRevision
+    delete publicState.serviceReleaseIds
+    delete privateTransition.journalRevision
+    delete privateOwnerState.serviceReleaseIds
+    await owner.guardian?.publishOwnerState(privateOwnerState)
+    await fs.writeFile(fixture.statePath, `${JSON.stringify(publicState, null, 2)}\n`)
+    await owner.retireCommittedOwner(undefined)
+    owner.guardian?.disconnect()
+
+    recovered = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+    await recovered.start()
+
+    assert.equal(recovered.status().activeReleaseId, "v1")
+    assert.equal(recovered.status().generationTransition?.journalRevision, undefined)
+    assert.equal(recovered.serviceReleaseIds.get("beacon"), "v1")
+  } finally {
+    if (recovered) await recovered.shutdown().catch(() => {})
+    else await owner.shutdown().catch(() => {})
+    owner.guardian?.disconnect()
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("guardian recovery becomes ready before replaying a gated generation hook", async () => {
+  const fixture = await createFixture()
+  const retirementGatePath = path.join(fixture.root, "retirement.allow")
+  const retirementWaitingPath = path.join(fixture.root, "retirement.waiting")
+  const daemonPidPath = path.join(fixture.root, "daemon.pid")
+  const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const jobs = processes.find((processConfig) => processConfig.id === "jobs")
+  const worker = processes.find((processConfig) => processConfig.id === "worker")
+  const lifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (jobs?.lifecycle)
+
+  assert.ok(jobs && worker)
+  jobs.gracefulStopMs = 5000
+  lifecycle.quietCommand = `printf 'waiting\n' >> ${JSON.stringify(retirementWaitingPath)}; while [ ! -f ${JSON.stringify(retirementGatePath)} ]; do sleep 0.02; done; printf 'retire:%s\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(fixture.lifecycleLogPath)}`
+  worker.lifecycle = {drainCommand: "true", drainTimeoutMs: 1000}
+  await writeConfig(fixture.configPath, fixture.config)
+  const owner = spawnDaemon(fixture.configPath, undefined, {daemonPidPath, startupTimeoutMs: 3000})
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  let recoveredDaemonPid
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    const interruptedDeploy = sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
+
+    void interruptedDeploy.catch(() => {})
+    await waitForFile(retirementWaitingPath)
+    await fs.rm(daemonPidPath, {force: true})
+    const recoveredListenerLog = waitForLog(owner, "control socket listening", {allowChildExit: true})
+
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+    await recoveredListenerLog
+    await waitForFile(daemonPidPath, 3000)
+    recoveredDaemonPid = Number((await fs.readFile(daemonPidPath, "utf8")).trim())
+    const recovering = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+    const guardianPid = JSON.parse(await fs.readFile(fixture.statePath, "utf8")).recovery?.guardian?.pid
+
+    assert.equal(recovering.daemonPid, recoveredDaemonPid)
+    assert.equal(recovering.ownerRecovery?.ready, true)
+    assert.equal(recovering.generationTransition?.phase, "retiring_previous")
+    assert.equal(typeof guardianPid, "number")
+    await assert.rejects(
+      sendControlCommand({command: {command: "stop", releaseId: "v1"}, path: fixture.socketPath}),
+      /Another owner mutation/
+    )
+    await assert.rejects(
+      sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath}),
+      /Cannot shut down while generation transition recovery is in progress/
+    )
+    await assert.rejects(
+      sendControlCommand({command: {attestation: `sha256:${"a".repeat(64)}`, command: "retire-owner"}, path: fixture.socketPath}),
+      /Cannot retire owner while generation transition recovery is in progress/
+    )
+
+    process.kill(recoveredDaemonPid, "SIGTERM")
+    await fs.writeFile(retirementGatePath, "release retirement\n")
+    await waitForProcessExit(recoveredDaemonPid, 5000)
+    await waitForProcessExit(guardianPid, 5000)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v1", "activate:v2", "retire:v2"])
+  } finally {
+    await fs.writeFile(retirementGatePath, "release retirement\n").catch(() => undefined)
+    await sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath}).catch(() => undefined)
+    await killChild(owner)
+    if (recoveredDaemonPid && isProcessRunning(recoveredDaemonPid)) process.kill(recoveredDaemonPid, "SIGKILL")
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery preserves a failed generation transition without firing hooks until exact resume", async () => {
+  const fixture = await createFixture({activationFailureRelease: "v2"})
+  let owner = spawnDaemon(fixture.configPath)
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const v1Path = await prepareRelease(fixture.root, "v1")
+    const v2Path = await prepareRelease(fixture.root, "v2")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    await assert.rejects(
+      sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath}),
+      /activate command exited non-zero/
+    )
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1"])
+
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+    owner = spawnDaemon(fixture.configPath)
+    await waitForLog(owner, "control socket listening")
+
+    const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    assert.equal(recovered.generationTransition?.phase, "activating_candidate")
+    assert.match(String(recovered.generationTransition?.error), /activate command exited non-zero/)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1"], "owner recovery alone must not retry a failed hook")
+
+    await fs.writeFile(fixture.activationGatePath, "allow\n")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
+    await shutdown
+  } finally {
+    await killChild(owner)
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery replays one journaled ambiguous activation by exact generation identity", async () => {
+  const fixture = await createFixture({activationFailureRelease: "v2"})
+  let owner = spawnDaemon(fixture.configPath)
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    const v1Path = await prepareRelease(fixture.root, "v1")
+    const v2Path = await prepareRelease(fixture.root, "v2")
+
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath}))
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+
+    const ambiguous = JSON.parse(await fs.readFile(fixture.statePath, "utf8"))
+
+    delete ambiguous.generationTransition.error
+    ambiguous.generationTransition.journalRevision += 1
+    await fs.writeFile(fixture.statePath, `${JSON.stringify(ambiguous, null, 2)}\n`)
+    await fs.writeFile(fixture.activationGatePath, "allow\n")
+    owner = spawnDaemon(fixture.configPath)
+    const recoverySettled = waitForLog(owner, "release generation transition recovery settled")
+
+    await waitForLog(owner, "control socket listening")
+    await waitForState(fixture.statePath, (state) => state.generationTransition?.phase === "committed", AbortSignal.timeout(5000))
+    await recoverySettled
+
+    const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
+
+    assert.equal(recovered.activeReleaseId, "v2")
+    assert.equal(recovered.generationTransition?.phase, "committed")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
+    await shutdown
+  } finally {
+    await killChild(owner)
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery preserves complete private transition authority across a candidate config change", async () => {
+  const fixture = await createFixture()
+  const initialProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const initialWorker = initialProcesses.find((processConfig) => processConfig.id === "worker")
+
+  assert.ok(initialWorker)
+  initialWorker.lifecycle = {drainCommand: "true", drainTimeoutMs: 1000}
+  await writeConfig(fixture.configPath, fixture.config)
+  const initialConfig = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config: initialConfig, configPath: fixture.configPath, logger: () => {}})
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    const changedConfig = structuredClone(fixture.config)
+    const processes = Array.isArray(changedConfig.processes) ? changedConfig.processes : []
+    const jobsValue = processes.find((processConfig) => processConfig && typeof processConfig === "object" && !Array.isArray(processConfig) && processConfig.id === "jobs")
+
+    assert.ok(jobsValue && typeof jobsValue === "object" && !Array.isArray(jobsValue))
+    const jobs = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (jobsValue)
+
+    jobs.env = {.../** @type {Record<string, import("../src/json.js").JsonValue>} */ (jobs.env), RELEASE_CONFIG_AUTHORITY: "v2"}
+    await writeConfig(fixture.configPath, changedConfig)
+
+    // Simulate an abrupt owner loss at the durable candidate_ready boundary, before
+    // retirement refreshes the previous generation's guardian definition.
+    owner.resumeGenerationTransition = async () => ({pausedAt: "candidate_ready"})
+    await owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    assert.equal(owner.status().generationTransition?.phase, "candidate_ready")
+
+    await owner.retireCommittedOwner(undefined)
+    owner.guardian?.disconnect()
+    const partialPublicState = JSON.parse(await fs.readFile(fixture.statePath, "utf8"))
+
+    partialPublicState.generationTransition.phase = "committed"
+    partialPublicState.releases = partialPublicState.releases.filter((/** @type {{releaseId: string}} */ release) => release.releaseId !== "v2")
+    partialPublicState.releaseReferences = partialPublicState.releaseReferences.filter((/** @type {{releaseId: string}} */ release) => release.releaseId !== "v2")
+    await fs.writeFile(fixture.statePath, `${JSON.stringify(partialPublicState, null, 2)}\n`)
+
+    recovered = new RollbridgeDaemon({config: normalizeConfig(changedConfig, fixture.configPath), configPath: fixture.configPath, logger: () => {}})
+    await recovered.start()
+
+    assert.equal(recovered.status().activeReleaseId, "v2")
+    assert.equal(recovered.status().generationTransition?.phase, "committed")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+  } finally {
+    if (recovered) await recovered.shutdown().catch(() => {})
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery reconstructs a stopped release that still owns a committed-pending singleton", async () => {
+  const fixture = await createFixture()
+
+  fixture.config.releaseRetention = {keep: 0, maxAgeMs: 0}
+  await writeConfig(fixture.configPath, fixture.config)
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  const replacementPause = pauseSingletonReplacement(owner, "v2")
+  const capturedDrain = captureReleaseDrain(owner, "v1")
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deployPromise
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    deployPromise = owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    void deployPromise.catch(() => {})
+    await replacementPause.started
+    await capturedDrain.started
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await capturedDrain.completed
+    if (owner.pendingWrite) await owner.pendingWrite
+    const pending = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(fixture.statePath, "utf8")))
+
+    assert.equal(pending.activeReleaseId, "v2")
+    assert.equal(pending.generationTransition?.phase, "committed_pending")
+    assert.equal(pending.serviceReleaseIds?.beacon, "v2")
+    assert.equal(pending.singletonReleaseIds?.singleton, "v1")
+    const stoppedRelease = pending.releases.find((release) => release.releaseId === "v1" && release.state === "stopped")
+
+    assert.ok(stoppedRelease)
+    assert.deepEqual(pending.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2"])
+    await owner.retireCommittedOwner(undefined)
+    owner.guardian?.disconnect()
+
+    recovered = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+    await recovered.start()
+
+    assert.equal(recovered.status().generationTransition?.phase, "committed")
+    assert.equal(recovered.singletonReleaseIds.get("singleton"), "v2")
+    assert.ok(!recovered.releases.has("v1"), "the stopped singleton owner may be pruned after replacement commits")
+    assert.equal(recovered.portReservations.has(stoppedRelease.ports.jobs), false)
+    assert.equal(recovered.portReservations.has(stoppedRelease.ports.web), false)
+  } finally {
+    replacementPause.continue()
+    await deployPromise?.catch(() => {})
+    if (recovered) {
+      const shutdown = recovered.shutdown()
+
+      await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => {})
+      recovered.guardian?.disconnect()
+    } else {
+      const shutdown = owner.shutdown()
+
+      await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => {})
+      owner.guardian?.disconnect()
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery uses the owning release singleton definition during a committed-pending config change", async () => {
+  const fixture = await createFixture()
+  const initialProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const initialSingleton = initialProcesses.find((processConfig) => processConfig.id === "singleton")
+
+  assert.ok(initialSingleton)
+  initialSingleton.env = {SINGLETON_CONFIG_AUTHORITY: "v1"}
+  await writeConfig(fixture.configPath, fixture.config)
+  const initialConfig = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config: initialConfig, configPath: fixture.configPath, logger: () => {}})
+  const replacementPause = pauseSingletonReplacement(owner, "v2")
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deployPromise
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    const changedConfig = structuredClone(fixture.config)
+    const changedProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (changedConfig.processes)
+    const changedSingleton = changedProcesses.find((processConfig) => processConfig.id === "singleton")
+
+    assert.ok(changedSingleton)
+    changedSingleton.env = {SINGLETON_CONFIG_AUTHORITY: "v2"}
+    await writeConfig(fixture.configPath, changedConfig)
+    deployPromise = owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    void deployPromise.catch(() => {})
+    await replacementPause.started
+    const pending = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(fixture.statePath, "utf8")))
+
+    assert.equal(pending.activeReleaseId, "v2")
+    assert.equal(pending.generationTransition?.phase, "committed_pending")
+    assert.equal(pending.singletonReleaseIds?.singleton, "v1")
+    await owner.retireCommittedOwner(undefined)
+    owner.guardian?.disconnect()
+
+    const nextConfig = normalizeConfig(changedConfig, fixture.configPath)
+
+    recovered = new RollbridgeDaemon({config: nextConfig, configPath: fixture.configPath, logger: () => {}})
+    await recovered.start()
+
+    assert.equal(recovered.status().generationTransition?.phase, "committed")
+    assert.equal(recovered.singletonReleaseIds.get("singleton"), "v2")
+    assert.equal(recovered.singletons.get("singleton")?.env.SINGLETON_CONFIG_AUTHORITY, "v2")
+  } finally {
+    replacementPause.continue()
+    await deployPromise?.catch(() => {})
+    if (recovered) {
+      const shutdown = recovered.shutdown()
+
+      await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)))
+      await shutdown.catch(() => {})
+      recovered.guardian?.disconnect()
+    } else {
+      const shutdown = owner.shutdown()
+
+      await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)))
+      await shutdown.catch(() => {})
+      owner.guardian?.disconnect()
+    }
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery retains a stopped previous release until committed-pending singleton work completes", async () => {
+  const fixture = await createFixture()
+  const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const worker = processes.find((processConfig) => processConfig.id === "worker")
+
+  assert.ok(worker)
+  worker.lifecycle = {drainCommand: "true", drainTimeoutMs: 1000}
+  await writeConfig(fixture.configPath, fixture.config)
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  const replaceSingletons = owner.replaceSingletons.bind(owner)
+  /** @type {() => void} */
+  let continueReplacement = () => {}
+  /** @type {() => void} */
+  let markReplacementComplete = () => {}
+  const replacementGate = new Promise((resolve) => { continueReplacement = () => resolve(undefined) })
+  const replacementComplete = new Promise((resolve) => { markReplacementComplete = () => resolve(undefined) })
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
+  let deployPromise
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+
+  owner.replaceSingletons = async (release) => {
+    await replaceSingletons(release)
+    if (release.releaseId === "v2") {
+      markReplacementComplete()
+      await replacementGate
+    }
+  }
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    deployPromise = owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    void deployPromise.catch(() => {})
+    await replacementComplete
+    const pending = await waitForState(fixture.statePath, (state) => state.generationTransition?.phase === "committed_pending" && state.releases?.some((release) => release.releaseId === "v1" && release.state === "stopped"), AbortSignal.timeout(5000))
+
+    assert.deepEqual(pending.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2"])
+    assert.equal(pending.singletonReleaseIds?.singleton, "v2")
+    await owner.retireCommittedOwner(undefined)
+    owner.guardian?.disconnect()
+
+    recovered = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+    await recovered.start()
+
+    assert.equal(recovered.status().generationTransition?.phase, "committed")
+    assert.equal(recovered.status().activeReleaseId, "v2")
+  } finally {
+    continueReplacement()
+    await deployPromise?.catch(() => {})
+    if (recovered) await recovered.shutdown().catch(() => {})
+    else await owner.shutdown().catch(() => {})
+    owner.guardian?.disconnect()
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery replays ambiguous retirement with the previous release's exact definition", async () => {
+  const fixture = await createFixture()
+  const retirementGatePath = path.join(fixture.root, "retirement.allow")
+  const retirementWaitingPath = path.join(fixture.root, "retirement.waiting")
+  const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const jobs = processes.find((processConfig) => processConfig.id === "jobs")
+  const lifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (jobs?.lifecycle)
+  let owner
+
+  lifecycle.quietCommand = `printf 'waiting\n' >> ${JSON.stringify(retirementWaitingPath)}; while [ ! -f ${JSON.stringify(retirementGatePath)} ]; do sleep 0.02; done; printf 'retire:%s\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(fixture.lifecycleLogPath)}`
+  await writeConfig(fixture.configPath, fixture.config)
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+
+  try {
+    owner = spawnDaemon(fixture.configPath)
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    const changedConfig = structuredClone(fixture.config)
+    const changedProcesses = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (changedConfig.processes)
+    const changedJobs = changedProcesses.find((processConfig) => processConfig.id === "jobs")
+
+    assert.ok(changedJobs)
+    changedJobs.env = {.../** @type {Record<string, import("../src/json.js").JsonValue>} */ (changedJobs.env), RELEASE_CONFIG_AUTHORITY: "v2"}
+    await writeConfig(fixture.configPath, changedConfig)
+    const interruptedDeploy = sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
+    void interruptedDeploy.catch(() => {})
+    await waitForFile(retirementWaitingPath)
+
+    owner.kill("SIGKILL")
+    await once(owner, "exit")
+    await fs.writeFile(retirementGatePath, "release retirement\n")
+
+    owner = spawnDaemon(fixture.configPath)
+    const recoverySettled = waitForLog(owner, "release generation transition recovery settled")
+
+    await waitForLog(owner, "control socket listening")
+    await waitForState(fixture.statePath, (state) => state.generationTransition?.phase === "committed", AbortSignal.timeout(5000))
+    await recoverySettled
+    assert.equal((await fs.readFile(retirementWaitingPath, "utf8")).trim().split("\n").length, 2, "ambiguous retirement must replay exactly once")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v1", "activate:v2"])
+    assert.equal((await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})).activeReleaseId, "v2")
+
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+
+    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)))
+    await shutdown
+  } finally {
+    await killChild(owner)
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -473,8 +1077,9 @@ test("deploy rejects a live ownerRecovery mode change", async () => {
 
   try {
     await waitForLog(owner, "control socket listening")
-    const changedConfig = {...fixture.config}
+    const changedConfig = /** @type {import("../src/config.js").RollbridgeConfig} */ (structuredClone(fixture.config))
     delete changedConfig.ownerRecovery
+    for (const processConfig of changedConfig.processes) if (processConfig.lifecycle) delete processConfig.lifecycle.activateCommand
     await writeConfig(fixture.configPath, changedConfig)
 
     await assert.rejects(
@@ -487,6 +1092,75 @@ test("deploy rejects a live ownerRecovery mode change", async () => {
     await once(owner, "exit")
   } finally {
     await killChild(owner)
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("deploy rejects a live activation lifecycle mode change", async () => {
+  const fixture = await createFixture()
+  const owner = spawnDaemon(fixture.configPath)
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+
+  try {
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
+    const changedConfig = structuredClone(fixture.config)
+    const jobs = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (changedConfig.processes).find((processConfig) => processConfig.id === "jobs")
+    const lifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (jobs?.lifecycle)
+
+    delete lifecycle.activateCommand
+    await writeConfig(fixture.configPath, changedConfig)
+    await assert.rejects(
+      sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath}),
+      /lifecycle\.activateCommand.*cannot be applied live/
+    )
+
+    await writeConfig(fixture.configPath, fixture.config)
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
+
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    await killChild(owner)
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("public state does not advance when private guardian publication fails", async () => {
+  const fixture = await createFixture()
+  const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+  const worker = processes.find((processConfig) => processConfig.id === "worker")
+
+  assert.ok(worker)
+  worker.lifecycle = {drainCommand: "true", drainTimeoutMs: 1000}
+  await writeConfig(fixture.configPath, fixture.config)
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const owner = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  const releasePath = await prepareRelease(fixture.root, "v1")
+
+  try {
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    if (owner.pendingWrite) await owner.pendingWrite
+    const before = await fs.readFile(fixture.statePath, "utf8")
+    const publishOwnerState = owner.publishOwnerState.bind(owner)
+
+    owner.ownerReady = true
+    owner.publishOwnerState = async () => { throw new Error("injected guardian publication failure") }
+    const write = owner.persistState({throwOnError: true})
+
+    assert.ok(write)
+    await assert.rejects(write, /injected guardian publication failure/)
+    assert.equal(await fs.readFile(fixture.statePath, "utf8"), before)
+    owner.publishOwnerState = publishOwnerState
+    await owner.persistState({throwOnError: true})
+    await owner.shutdown()
+  } finally {
+    owner.publishOwnerState = RollbridgeDaemon.prototype.publishOwnerState.bind(owner)
+    await owner.shutdown().catch(() => {})
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -664,13 +1338,18 @@ test("ensure-daemon atomically replaces an incompatible owner without losing ret
   }
 })
 
-/** @returns {Promise<{config: Record<string, import("../src/json.js").JsonValue>, configPath: string, root: string, socketPath: string, statePath: string}>} Fixture paths. */
-async function createFixture() {
+/**
+ * @param {{activationFailureRelease?: string}} [options] - Lifecycle fault injection.
+ * @returns {Promise<{activationGatePath: string, config: Record<string, import("../src/json.js").JsonValue>, configPath: string, lifecycleLogPath: string, root: string, socketPath: string, statePath: string}>} Fixture paths.
+ */
+async function createFixture(options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-recovery-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const configPath = path.join(root, "rollbridge.cjs")
   const statePath = path.join(root, "rollbridge.state.json")
   const serviceLogPath = path.join(root, "service.log")
+  const lifecycleLogPath = path.join(root, "generation.lifecycle")
+  const activationGatePath = path.join(root, "activation.allow")
   const config = {
     application: "owner-recovery-test",
     control: {path: socketPath},
@@ -692,7 +1371,10 @@ async function createFixture() {
           ROLLBRIDGE_SERVICE_LOG: serviceLogPath
         },
         id: "jobs",
-        lifecycle: {quietCommand: "exit 0"},
+        lifecycle: {
+          activateCommand: `${options.activationFailureRelease ? `[ "$ROLLBRIDGE_RELEASE_ID" != ${JSON.stringify(options.activationFailureRelease)} ] || [ -f ${JSON.stringify(activationGatePath)} ] || exit 24; ` : ""}printf 'activate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`,
+          quietCommand: `printf 'retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+        },
         policy: "service",
         port: {from: 17000, to: 17020}
       },
@@ -722,7 +1404,15 @@ async function createFixture() {
 
   await writeConfig(configPath, config)
 
-  return {config, configPath, root, socketPath, statePath}
+  return {activationGatePath, config, configPath, lifecycleLogPath, root, socketPath, statePath}
+}
+
+/**
+ * @param {string} lifecycleLogPath - Fixture lifecycle log.
+ * @returns {Promise<string[]>} Ordered lifecycle events.
+ */
+async function lifecycleEvents(lifecycleLogPath) {
+  return (await fs.readFile(lifecycleLogPath, "utf8")).trim().split("\n").filter(Boolean)
 }
 
 /**
@@ -748,6 +1438,65 @@ async function prepareRelease(root, releaseId, {holdJobsBind = false} = {}) {
  */
 async function writeConfig(configPath, config) {
   await fs.writeFile(configPath, `module.exports = ${JSON.stringify(config, null, 2)}\n`)
+}
+
+/**
+ * Pauses only one candidate's post-commit singleton replacement at an exact promise boundary.
+ * @param {RollbridgeDaemon} daemon - Current owner.
+ * @param {string} releaseId - Candidate release to pause.
+ * @returns {{continue: () => void, started: Promise<void>}} Pause controls.
+ */
+function pauseSingletonReplacement(daemon, releaseId) {
+  const replaceSingletons = daemon.replaceSingletons.bind(daemon)
+  /** @type {() => void} */
+  let markStarted = () => {}
+  /** @type {() => void} */
+  let continueReplacement = () => {}
+  const started = new Promise((resolve) => { markStarted = () => resolve(undefined) })
+  const gate = new Promise((resolve) => { continueReplacement = () => resolve(undefined) })
+
+  daemon.replaceSingletons = async (release) => {
+    if (release.releaseId === releaseId) {
+      markStarted()
+      await gate
+    }
+    await replaceSingletons(release)
+  }
+  return {continue: continueReplacement, started}
+}
+
+/**
+ * Captures one background release drain through its package-owned promise.
+ * @param {RollbridgeDaemon} daemon - Current owner.
+ * @param {string} releaseId - Release whose drain completion is required.
+ * @returns {{completed: Promise<void>, started: Promise<void>}} Drain boundaries.
+ */
+function captureReleaseDrain(daemon, releaseId) {
+  const drainAndPrune = daemon.drainAndPrune.bind(daemon)
+  /** @type {() => void} */
+  let markStarted = () => {}
+  /** @type {(error: Error | string) => void} */
+  let rejectCompleted = () => {}
+  /** @type {() => void} */
+  let resolveCompleted = () => {}
+  const started = new Promise((resolve) => { markStarted = () => resolve(undefined) })
+  const completed = new Promise((resolve, reject) => {
+    resolveCompleted = () => resolve(undefined)
+    rejectCompleted = reject
+  })
+
+  daemon.drainAndPrune = async (release, config) => {
+    if (release.releaseId !== releaseId) return await drainAndPrune(release, config)
+    markStarted()
+    try {
+      await drainAndPrune(release, config)
+      resolveCompleted()
+    } catch (error) {
+      rejectCompleted(error instanceof Error ? error : String(error))
+      throw error
+    }
+  }
+  return {completed, started}
 }
 
 /**
@@ -891,12 +1640,15 @@ function releaseProcessPid(status, releaseId, processId) {
 /**
  * @param {string} configPath - Config path.
  * @param {{releaseId: string, releasePath: string, revision: string}} [bootstrap] - Optional bootstrap tuple.
+ * @param {{daemonPidPath?: string, startupTimeoutMs?: number}} [options] - Recovery command options.
  * @returns {import("node:child_process").ChildProcess} Daemon process.
  */
-function spawnDaemon(configPath, bootstrap) {
+function spawnDaemon(configPath, bootstrap, options = {}) {
   const args = [binPath, "daemon", "--config", configPath]
 
   if (bootstrap) args.push("--release-id", bootstrap.releaseId, "--release-path", bootstrap.releasePath, "--revision", bootstrap.revision)
+  if (options.daemonPidPath) args.push("--guardian-daemon-pid-path", options.daemonPidPath)
+  if (options.startupTimeoutMs) args.push("--guardian-daemon-start-timeout-ms", String(options.startupTimeoutMs))
   return spawn(process.execPath, args, {stdio: ["ignore", "pipe", "pipe"]})
 }
 

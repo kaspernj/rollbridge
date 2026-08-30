@@ -116,8 +116,9 @@ export default class ReleaseGroup extends EventEmitter {
   /**
    * Reconstructs this release around processes still owned by the durable guardian.
    * @param {ReleaseStatus} snapshot - Persisted release snapshot.
+   * @param {{synchronizeLifecycleRole?: boolean}} [options] - Guardian role synchronization options.
    */
-  async restore(snapshot) {
+  async restore(snapshot, {synchronizeLifecycleRole = true} = {}) {
     if (!snapshot || snapshot.releaseId !== this.releaseId || snapshot.releasePath !== this.releasePath || snapshot.revision !== this.revision) {
       throw new Error(`Persisted release identity mismatch for ${this.releaseId}`)
     }
@@ -140,14 +141,17 @@ export default class ReleaseGroup extends EventEmitter {
       .filter((processConfig) => processConfig.port && (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff"))
       .map((processConfig) => snapshot.ports[processConfig.id])
     const distinctGenerationPorts = new Set(generationPorts)
+    const ownsGenerationPorts = snapshot.state === "starting" || snapshot.state === "active" || snapshot.state === "draining"
 
     if (distinctGenerationPorts.size !== generationPorts.length) throw new Error(`Persisted release ${this.releaseId} reuses a port within one live generation`)
-    for (const port of distinctGenerationPorts) {
-      if (this.portReservations.has(port)) throw new Error(`Persisted release ${this.releaseId} port ${port} is already reserved by another live generation`)
-    }
-    for (const port of distinctGenerationPorts) {
-      this.portReservations.add(port)
-      this.ownedPortReservations.add(port)
+    if (ownsGenerationPorts) {
+      for (const port of distinctGenerationPorts) {
+        if (this.portReservations.has(port)) throw new Error(`Persisted release ${this.releaseId} port ${port} is already reserved by another live generation`)
+      }
+      for (const port of distinctGenerationPorts) {
+        this.portReservations.add(port)
+        this.ownedPortReservations.add(port)
+      }
     }
 
     this.ports = {...snapshot.ports}
@@ -175,6 +179,17 @@ export default class ReleaseGroup extends EventEmitter {
       if (processConfig.nonBlockingDrain) this.nonBlockingDrainIds.add(processStatus.id)
       if ("recover" in processInstance && typeof processInstance.recover === "function") await processInstance.recover()
     }
+    if (synchronizeLifecycleRole) await this.synchronizeLifecycleRoles()
+  }
+
+  /** Synchronizes only the activation owner's durable role without firing its hook. */
+  async synchronizeLifecycleRoles() {
+    const processConfig = this.config.processes.find((candidate) => candidate.lifecycle.activateCommand !== undefined)
+
+    if (!processConfig) return
+    const lifecycleRole = this.state === "active" ? "active" : this.state === "draining" ? "retired" : "candidate"
+
+    await Promise.all(this.getProcesses(processConfig.id).map(({process}) => process.setLifecycleRole(lifecycleRole)))
   }
 
   /**
@@ -253,6 +268,17 @@ export default class ReleaseGroup extends EventEmitter {
     this.activatedAt = new Date().toISOString()
   }
 
+  /** Runs the configured release-generation activation acknowledgement, if any. */
+  async activateGeneration() {
+    const processConfig = this.config.processes.find((candidate) => candidate.lifecycle.activateCommand !== undefined)
+
+    if (!processConfig) return
+    const [instance] = this.getProcesses(processConfig.id)
+
+    if (!instance) throw new Error(`Generation activation process ${processConfig.id} is not running for release ${this.releaseId}`)
+    await instance.process.activateStrict()
+  }
+
   /** @returns {Promise<void>} Allocates all configured per-process ports. */
   async allocatePorts() {
     if (this.portsAllocated) return
@@ -295,12 +321,12 @@ export default class ReleaseGroup extends EventEmitter {
   }
 
   /**
-   * Builds a managed process from config.
+   * Builds one rendered managed-process definition without registering ownership.
    * @param {import("./config.js").ProcessConfig} processConfig - Process config.
    * @param {BuildProcessOptions} [options] - Build options.
-   * @returns {ManagedProcess} Managed process.
+   * @returns {ConstructorParameters<typeof ManagedProcess>[0] & import("./managed-process.js").ManagedProcessDefinition} Managed process definition.
    */
-  buildProcess(processConfig, options = {}) {
+  processDefinition(processConfig, options = {}) {
     const index = options.index ?? 0
     const count = options.count ?? 1
     const instanceId = options.instanceId ?? processConfig.id
@@ -311,12 +337,12 @@ export default class ReleaseGroup extends EventEmitter {
       ...renderedEnv
     }
 
-    const definition = /** @type {ConstructorParameters<typeof ManagedProcess>[0]} */ ({
+    return {
       command: renderTemplate(processConfig.command, context),
       cwd: processConfig.cwd ? renderTemplate(processConfig.cwd, context) : this.releasePath,
       env: processEnv,
       id: instanceId,
-      lifecycle: processConfig.lifecycle,
+      lifecycle: processConfig.lifecycle || {drainTimeoutMs: 0},
       logger: (message, data = {}) => this.logger(message, {processId: instanceId, releaseId: this.releaseId, ...data}),
       memory: processConfig.memory,
       outputLines: processConfig.outputLines,
@@ -325,7 +351,18 @@ export default class ReleaseGroup extends EventEmitter {
       shouldRestart: options.shouldRestart || (() => this.state === "active" || this.state === "starting"),
       stopSignal: processConfig.stopSignal,
       stopTimeoutMs: processConfig.gracefulStopMs
-    })
+    }
+  }
+
+  /**
+   * Builds a managed process from config.
+   * @param {import("./config.js").ProcessConfig} processConfig - Process config.
+   * @param {BuildProcessOptions} [options] - Build options.
+   * @returns {ManagedProcess} Managed process.
+   */
+  buildProcess(processConfig, options = {}) {
+    const definition = this.processDefinition(processConfig, options)
+    const instanceId = options.instanceId ?? processConfig.id
 
     return this.processFactory
       ? this.processFactory(options.guardianKey || `release:${this.releaseId}:${instanceId}`, definition)
@@ -347,7 +384,7 @@ export default class ReleaseGroup extends EventEmitter {
 
       for (let index = 0; index < instances.length; index += 1) {
         const instance = instances[index]
-        const nextDefinition = this.buildProcess(processConfig, {
+        const nextDefinition = this.processDefinition(processConfig, {
           count: processConfig.replicas,
           index,
           instanceId: instance.id
@@ -543,21 +580,25 @@ export default class ReleaseGroup extends EventEmitter {
   /**
    * Marks the generation retired and quiesces its jobs-main and non-blocking workers as one unit.
    * @param {import("./config.js").RollbridgeConfig} [config] - Refreshed retirement config.
+   * @param {{retry?: boolean}} [options] - Explicit durable-transition resume options.
    * @returns {Promise<void>} Resolves when retirement quiescence succeeds.
    */
-  async beginRetirement(config = this.config) {
+  async beginRetirement(config = this.config, {retry = false} = {}) {
     if (this.state === "draining") {
-      if (this.retirementError) throw new Error(this.retirementError)
-      return
+      if (!retry) {
+        if (this.retirementError) throw new Error(this.retirementError)
+        return
+      }
+    } else {
+      this.state = "draining"
+      this.drainStartedAt = new Date().toISOString()
     }
 
-    this.state = "draining"
-    this.drainStartedAt = new Date().toISOString()
     this.refreshProcessDefinitions(config)
     const generationIds = new Set([...this.handoffServiceIds, ...this.nonBlockingDrainIds])
     const results = await Promise.allSettled([...this.processes.entries()]
       .filter(([id]) => generationIds.has(id))
-      .map(([, processInstance]) => processInstance.quiesceStrict()))
+      .map(([, processInstance]) => retry ? processInstance.requiesceStrict() : processInstance.quiesceStrict()))
     const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
 
     if (errors.length > 0) {
@@ -565,6 +606,7 @@ export default class ReleaseGroup extends EventEmitter {
       this.retirementError = `${failure.message}: ${errors.map((error) => error instanceof Error ? error.message : String(error)).join("; ")}`
       throw failure
     }
+    this.retirementError = undefined
   }
 
   /** @returns {Promise<void>} Stops all release-owned processes. */

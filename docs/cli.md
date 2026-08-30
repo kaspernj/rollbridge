@@ -152,16 +152,25 @@ for old workers, jobs, or HTTP/WebSocket connections to finish. Prints
 If the new release fails to start or health-check, the previous release stays
 active and the command errors.
 
-After activation, deploy waits for bounded quiet hooks of old handoff services
-and `nonBlockingDrain` companions, then returns without waiting for their drains.
-A failure is logged and exposed as `retirementError`; the generation stays alive.
-The successful activation response also includes
-`retirement: {status: "quiescence_failed", releaseId, error}` so callers cannot
-mistake the retirement failure for an unqualified transition.
-`status.releaseReferences` lists `{releaseId, releasePath}` for every active or
-draining release and excludes fully stopped history.
+With an opt-in handoff-service `lifecycle.activateCommand`, deploy journals the
+exact transition, waits for old retirement acknowledgement, waits for candidate
+activation acknowledgement, and synchronously commits the active proxy target.
+An unresolved failure blocks different deploys; only the exact same release,
+path, revision, and config authority may explicitly resume its incomplete
+idempotent phase. A durable `committed_pending` phase keeps exact retry from
+reporting success until singleton replacement finishes. Stop, restart, and
+rollback mutations are rejected while the transition is unresolved. Automatic
+replay also fences `shutdown` and `retire-owner` until the replay attempt settles.
+An owner replacement may change runtime/package identity during an unresolved
+transition, but it cannot change config authority until that transition commits;
+the incumbent owner remains in place when such a replacement is rejected.
+Hook-free configs retain the existing post-activation quiet behavior and
+retirement result. `status.releaseReferences` lists `{releaseId, releasePath}`
+for every active or draining release and for a stopped release that still owns a
+persistent service definition, pending singleton, or unresolved generation
+transition; unrelated fully stopped history is excluded.
 
-After candidate activation, `Daemon.deploy()` begins old-generation retirement
+For hook-free configs, after candidate activation `Daemon.deploy()` begins old-generation retirement
 and asynchronous drain before awaiting singleton replacement. A singleton
 replacement failure can therefore return non-zero while the candidate remains
 active, but it cannot leave the old jobs generation dispatching.
@@ -294,7 +303,9 @@ Targeting it (by id or `--policy proxied`) is an error; use `rollbridge deploy`
 for a zero-downtime replacement. `--process <id>` with an id that is not a
 managed process (unknown, or a companion with no active release) is also an
 error. Restarting a `service` bounces a shared broker (for example Velocious
-Beacon), which briefly disrupts every process that depends on it.
+Beacon), which briefly disrupts every process that depends on it. For a handoff
+service, restart targets only the active release's instance and restores its
+active lifecycle role before reporting success.
 
 ## `predeploy-cleanup`
 
