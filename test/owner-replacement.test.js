@@ -249,7 +249,7 @@ test("ensure-daemon atomically replaces incompatible config, socket, and package
   }
 })
 
-test("cross-version replacement commits through a retained process-key guardian after the public socket is removed", async () => {
+test("cross-version replacement fails closed without dropping a retained WebSocket after the public socket is removed", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-retired-control-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "state.json")
@@ -259,8 +259,11 @@ test("cross-version replacement commits through a retained process-key guardian 
   const compatibilitySockets = new Set()
   let compatibilityGuardian
   let committedProcessKey
-  let owner
-  let replacement
+  let owner = /** @type {import("node:child_process").ChildProcess | undefined} */ (undefined)
+  let replacement = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let retainedConnection
+  let retainedConnectionClosed = false
+  let transactionAudit
 
   try {
     await fs.mkdir(releasePath)
@@ -272,8 +275,12 @@ test("cross-version replacement commits through a retained process-key guardian 
     const retired = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const retiredReleases = /** @type {{processes: {id: string, pid?: number, state: string}[]}[]} */ (retired.releases)
     const processState = retiredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
+    const proxyPort = /** @type {{port?: number}} */ (retired.proxy).port
 
     assert.deepEqual(processState?.map(({state}) => state), ["running", "running"])
+    if (typeof proxyPort !== "number") throw new Error("Retained owner proxy is missing its port")
+    retainedConnection = await openWebSocket(proxyPort)
+    retainedConnection.once("close", () => { retainedConnectionClosed = true })
     await fs.rm(socketPath)
     await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
     const state = JSON.parse(await fs.readFile(statePath, "utf8"))
@@ -287,8 +294,14 @@ test("cross-version replacement commits through a retained process-key guardian 
       compatibilitySockets.add(candidateSocket)
       compatibilitySockets.add(guardianSocket)
       candidateSocket.setEncoding("utf8")
-      candidateSocket.once("close", () => compatibilitySockets.delete(candidateSocket))
-      guardianSocket.once("close", () => compatibilitySockets.delete(guardianSocket))
+      candidateSocket.once("close", () => {
+        compatibilitySockets.delete(candidateSocket)
+        guardianSocket.destroy()
+      })
+      guardianSocket.once("close", () => {
+        compatibilitySockets.delete(guardianSocket)
+        candidateSocket.destroy()
+      })
       guardianSocket.on("data", (chunk) => candidateSocket.write(chunk))
       candidateSocket.on("data", (chunk) => {
         buffer += chunk
@@ -318,26 +331,37 @@ test("cross-version replacement commits through a retained process-key guardian 
     state.recovery.guardian.socketPath = compatibilitySocketPath
     await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
 
-    assert.ok(owner.pid)
-    replacement = new RollbridgeDaemon({
+    const incumbentPid = owner.pid
+
+    assert.ok(incumbentPid)
+    const candidate = new RollbridgeDaemon({
       config: normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath})),
       configPath,
-      legacyIncumbentPid: owner.pid,
+      legacyIncumbentPid: incumbentPid,
       logger: () => {}
     })
-    await replacement.replaceIncompatibleOwner()
-    if (owner.exitCode === null && owner.signalCode === null) await once(owner, "exit")
-    const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
-    const recoveredReleases = /** @type {{processes: {id: string, pid?: number, state: string}[]}[]} */ (recovered.releases)
-
-    assert.equal(recovered.activeReleaseId, "v1")
-    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
-    assert.deepEqual(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state})), processState)
+    replacement = candidate
+    await assert.rejects(
+      () => candidate.replaceIncompatibleOwner(),
+      /cannot safely complete atomic owner replacement through the older retained guardian while the incumbent control socket is absent; incumbent owner and connections were preserved/i
+    )
     assert.equal(committedProcessKey, expectedProcessKey)
+    assert.equal(owner.exitCode, null)
+    assert.equal(owner.signalCode, null)
+    assert.doesNotThrow(() => process.kill(incumbentPid, 0))
+    assert.equal(retainedConnectionClosed, false, "failed compatibility handoff must leave retained connections serving")
+    assert.equal(retainedConnection.destroyed, false, "failed compatibility handoff must preserve the incumbent listener")
     for (const {pid} of processState || []) {
       if (typeof pid !== "number") throw new Error("Retained process is missing its PID")
       assert.doesNotThrow(() => process.kill(pid, 0))
     }
+    transactionAudit = new GuardianClient(state.recovery.guardian)
+    await transactionAudit.connect()
+    const transactionStatus = /** @type {{committedReplacementId: string | null, ownerClaimed: boolean, retirementPending?: boolean}} */ (await transactionAudit.replacementStatus())
+
+    assert.equal(transactionStatus.committedReplacementId, null)
+    assert.equal(transactionStatus.ownerClaimed, true)
+    assert.equal(transactionStatus.retirementPending, false)
   } finally {
     if (replacement?.controlCommandsReady) {
       await Promise.all([
@@ -345,6 +369,8 @@ test("cross-version replacement commits through a retained process-key guardian 
         replacement.shutdown().catch(() => {})
       ])
     }
+    transactionAudit?.disconnect()
+    retainedConnection?.destroy()
     if (owner && owner.exitCode === null && owner.signalCode === null) {
       owner.kill("SIGKILL")
       await once(owner, "exit")
