@@ -412,7 +412,10 @@ export default class RollbridgeDaemon {
 
       if (!staged.committed) {
         if (retiredIncumbentControl) {
-          await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId)
+          const processKey = this.guardian.processes.keys().next().value
+
+          if (!processKey) throw new Error("Retired owner replacement requires an exact recovered guardian process registration")
+          await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, processKey)
         } else {
           try {
             if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
