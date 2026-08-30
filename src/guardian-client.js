@@ -156,6 +156,11 @@ export default class GuardianClient {
     await this.request({authority, command: "claim-owner", graceMs})
   }
 
+  /** Starts graceful process retirement and relinquishes committed owner authority. */
+  async retireOwner() {
+    await this.request({command: "retire-owner"})
+  }
+
   /** @param {import("./json.js").JsonValue} ownerState - Private transferable owner state. */
   async publishOwnerState(ownerState) {
     await this.request({command: "publish-owner-state", ownerState})
@@ -187,6 +192,11 @@ export default class GuardianClient {
   /** @param {string} replacementId - Prepared transaction id. */
   async commitOwnerReplacement(replacementId) {
     await this.request({command: "commit-owner-replacement", replacementId})
+  }
+
+  /** @param {string} replacementId - Same-authority transaction whose incumbent listener is absent. */
+  async commitRetiredOwnerReplacement(replacementId) {
+    await this.request({command: "commit-retired-owner-replacement", replacementId})
   }
 
   /** @param {string} replacementId - Committed transaction awaiting incumbent retirement. */

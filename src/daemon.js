@@ -347,6 +347,7 @@ export default class RollbridgeDaemon {
     let stagingControlPath
     let finalControlPublished = false
     let listenersYielded = false
+    let retiredIncumbentControl = false
     let retainIncumbentControl = false
     let incumbentControl = legacyBridge?.incumbentControl
 
@@ -372,22 +373,31 @@ export default class RollbridgeDaemon {
       if (legacyBridge) {
         await this.crossLegacyDisruptiveBoundary(legacyBridge)
       } else if (preparedStatus.ownerClaimed) {
-        incumbentControl = await openControlSession(transfer.snapshot.control.path)
-        const listenerSession = incumbentControl
+        try {
+          incumbentControl = await openControlSession(transfer.snapshot.control.path)
+        } catch (error) {
+          if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+          retiredIncumbentControl = true
+        }
+        if (incumbentControl) {
+          const listenerSession = incumbentControl
 
-        incumbentControl.onEvent((event) => this.handleIncumbentListenerEvent(event, listenerSession))
-        await incumbentControl.request({
-          command: "yield-owner-listeners",
-          control: transfer.snapshot.control.path === this.config.control.path,
-          proxy: true,
-          replacementId: prepared.replacementId
-        })
-        listenersYielded = true
+          incumbentControl.onEvent((event) => this.handleIncumbentListenerEvent(event, listenerSession))
+          await incumbentControl.request({
+            command: "yield-owner-listeners",
+            control: transfer.snapshot.control.path === this.config.control.path,
+            proxy: true,
+            replacementId: prepared.replacementId
+          })
+          listenersYielded = true
+        }
       }
       if (sharedFixedProxy) await this.startProxy()
-      await fs.rename(stagingControlPath, this.config.control.path)
-      finalControlPublished = true
-      this.boundControlPath = this.config.control.path
+      if (!retiredIncumbentControl) {
+        await fs.rename(stagingControlPath, this.config.control.path)
+        finalControlPublished = true
+        this.boundControlPath = this.config.control.path
+      }
       const committed = this.guardian.waitForEvent("replacement-committed")
       const staged = await this.guardian.stageOwnerReplacement(prepared.replacementId, {
         authority: this.ownerAuthority(),
@@ -398,18 +408,27 @@ export default class RollbridgeDaemon {
       })
 
       if (!staged.committed) {
-        try {
-          if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
-          await incumbentControl.request({command: "commit-owner-replacement", replacementId: prepared.replacementId})
-        } catch (error) {
-          const status = await this.guardian.replacementStatus()
+        if (retiredIncumbentControl) {
+          await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId)
+        } else {
+          try {
+            if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
+            await incumbentControl.request({command: "commit-owner-replacement", replacementId: prepared.replacementId})
+          } catch (error) {
+            const status = await this.guardian.replacementStatus()
 
-          if (status.committedReplacementId !== prepared.replacementId || !status.ownerClaimed) throw error
-          this.logger("owner replacement commit response lost; guardian commit confirmed", {replacementId: prepared.replacementId})
+            if (status.committedReplacementId !== prepared.replacementId || !status.ownerClaimed) throw error
+            this.logger("owner replacement commit response lost; guardian commit confirmed", {replacementId: prepared.replacementId})
+          }
         }
       }
       await committed
       committedAuthority = true
+      if (retiredIncumbentControl) {
+        await fs.rename(stagingControlPath, this.config.control.path)
+        finalControlPublished = true
+        this.boundControlPath = this.config.control.path
+      }
       await Promise.all([...this.releases.values()].map((release) => release.synchronizeLifecycleRoles()))
       if (!legacyBridge && incumbentControl && [...this.releases.values()].some((release) => release.hasTransferredConnections())) {
         this.incumbentListenerControl = incumbentControl
@@ -1664,11 +1683,11 @@ export default class RollbridgeDaemon {
   /**
    * Persists a state snapshot (status plus recent events) to statePath, atomically and
    * fire-and-forget unless the caller awaits the returned write. A failed write is logged.
-   * @param {{throwOnError?: boolean}} [options] - Whether a write failure rejects the returned promise.
+   * @param {{allowStopping?: boolean, throwOnError?: boolean}} [options] - Write behavior.
    * @returns {Promise<void> | undefined} The queued write, or undefined when persistence is disabled.
    */
-  persistState({throwOnError = false} = {}) {
-    if (!this.statePath || !this.persistenceEnabled || this.stopping) return
+  persistState({allowStopping = false, throwOnError = false} = {}) {
+    if (!this.statePath || !this.persistenceEnabled || (this.stopping && !allowStopping)) return
 
     const statePath = this.statePath
     const status = /** @type {Record<string, JsonValue>} */ (secretSafeStateValue(this.status()))
@@ -1702,7 +1721,7 @@ export default class RollbridgeDaemon {
 
   /** @returns {boolean} Whether the current authority uses explicit generation activation. */
   hasActivationLifecycle() {
-    return Boolean(this.generationTransition) || this.config.processes.some((processConfig) => processConfig.lifecycle.activateCommand !== undefined) || [...this.releases.values()].some((release) => release.config.processes.some((processConfig) => processConfig.lifecycle.activateCommand !== undefined))
+    return Boolean(this.generationTransition) || this.config.processes.some((processConfig) => processConfig.lifecycle?.activateCommand !== undefined) || [...this.releases.values()].some((release) => release.config.processes.some((processConfig) => processConfig.lifecycle?.activateCommand !== undefined))
   }
 
   /**
@@ -1766,25 +1785,35 @@ export default class RollbridgeDaemon {
       clearInterval(this.persistTimer)
       this.persistTimer = undefined
     }
-    this.persistenceEnabled = false
     if (this.pendingWrite) await this.pendingWrite
     this.stateCleanupEnabled = false
     this.controlClosePromise = this.closeServer(this.controlServer)
     for (const socket of this.controlSockets) if (socket !== completionSocket) socket.destroy()
+    if (this.activeRelease) {
+      await this.activeRelease.beginRetirement(this.activeRelease.config)
+      this.activeRelease = undefined
+    }
     await Promise.all([
       ...[...this.services.values()].map((processInstance) => processInstance.quiesce()),
       ...[...this.singletons.values()].map((processInstance) => processInstance.quiesce()),
       ...[...this.startingReleases].map((release) => release.quiesce()),
       ...[...this.releases.values()].map((release) => release.quiesce())
     ])
+    await this.persistState({allowStopping: true, throwOnError: true})
+    this.persistenceEnabled = false
     await this.removeControlSocket()
     void this.closeServer(this.proxyServer)
-    void Promise.allSettled([
-      ...[...this.services.values()].map((processInstance) => processInstance.stop()),
-      ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
-      ...[...this.startingReleases].map((release) => release.stop()),
-      ...[...this.releases.values()].map((release) => release.stop())
-    ])
+    if (this.guardian) {
+      await this.guardian.retireOwner()
+      this.guardian.disconnect()
+    } else {
+      void Promise.allSettled([
+        ...[...this.services.values()].map((processInstance) => processInstance.stop()),
+        ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
+        ...[...this.startingReleases].map((release) => release.stop()),
+        ...[...this.releases.values()].map((release) => release.stop())
+      ])
+    }
     this.logger("external owner retired", {attestation, status: "draining"})
   }
 

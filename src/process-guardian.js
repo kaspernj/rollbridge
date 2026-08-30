@@ -201,6 +201,19 @@ async function execute(request, socket) {
     })
   }
 
+  if (request.command === "retire-owner") {
+    requireOwner(socket, request.command)
+    if (replacementClient) throw new Error("Committed owner cannot retire while an owner replacement is prepared")
+    for (const entry of processes.values()) entry.desired = false
+    void Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
+    ownerClient = undefined
+    ownerMutationClient = undefined
+    ownerMutationId = undefined
+    ownerRevision += 1
+    grantNextOwner()
+    return {retired: true}
+  }
+
   if (request.command === "abandon-legacy-upgrade") {
     if (!legacyGuardian) throw new Error("Guardian is not a legacy upgrade coordinator")
     if (ownerClient || committedReplacementId) throw new Error("Committed guardian authority cannot abandon its legacy backend")
@@ -283,6 +296,23 @@ async function execute(request, socket) {
     requireReplacement(socket, request)
     abortReplacement("Replacement candidate aborted the prepared transaction")
     return {aborted: true}
+  }
+
+  if (request.command === "commit-retired-owner-replacement") {
+    requireReplacement(socket, request)
+    if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
+    if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
+    const controlPath = ownerControlPath(ownerState)
+
+    try {
+      await fs.lstat(controlPath)
+      throw new Error(`Retired owner control socket ${controlPath} still exists`)
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+    }
+    commitReplacement()
+    finalizeReplacementRetirement()
+    return {committed: true}
   }
 
   if (request.command === "commit-owner-replacement") {
@@ -504,6 +534,21 @@ function requireReplacement(socket, request) {
 function ownerAuthority(state) {
   if (!state || typeof state !== "object" || Array.isArray(state) || !("authority" in state)) throw new Error("Guardian owner state is missing its authority fence")
   return state.authority
+}
+
+/**
+ * @param {import("./json.js").JsonValue | undefined} state - Committed transferable state.
+ * @returns {string} Exact incumbent public control path.
+ */
+function ownerControlPath(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state) || !("snapshot" in state)) throw new Error("Guardian owner state is missing its committed snapshot")
+  const snapshot = state.snapshot
+
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) || !("control" in snapshot)) throw new Error("Guardian owner snapshot is missing its control identity")
+  const control = snapshot.control
+
+  if (!control || typeof control !== "object" || Array.isArray(control) || !("path" in control) || typeof control.path !== "string") throw new Error("Guardian owner snapshot has an invalid control identity")
+  return control.path
 }
 
 /**
