@@ -318,12 +318,12 @@ export default class ReleaseGroup extends EventEmitter {
   }
 
   /**
-   * Builds a managed process from config.
+   * Builds one rendered managed-process definition without registering ownership.
    * @param {import("./config.js").ProcessConfig} processConfig - Process config.
    * @param {BuildProcessOptions} [options] - Build options.
-   * @returns {ManagedProcess} Managed process.
+   * @returns {ConstructorParameters<typeof ManagedProcess>[0] & import("./managed-process.js").ManagedProcessDefinition} Managed process definition.
    */
-  buildProcess(processConfig, options = {}) {
+  processDefinition(processConfig, options = {}) {
     const index = options.index ?? 0
     const count = options.count ?? 1
     const instanceId = options.instanceId ?? processConfig.id
@@ -334,12 +334,12 @@ export default class ReleaseGroup extends EventEmitter {
       ...renderedEnv
     }
 
-    const definition = /** @type {ConstructorParameters<typeof ManagedProcess>[0]} */ ({
+    return {
       command: renderTemplate(processConfig.command, context),
       cwd: processConfig.cwd ? renderTemplate(processConfig.cwd, context) : this.releasePath,
       env: processEnv,
       id: instanceId,
-      lifecycle: processConfig.lifecycle,
+      lifecycle: processConfig.lifecycle || {drainTimeoutMs: 0},
       logger: (message, data = {}) => this.logger(message, {processId: instanceId, releaseId: this.releaseId, ...data}),
       memory: processConfig.memory,
       outputLines: processConfig.outputLines,
@@ -348,7 +348,18 @@ export default class ReleaseGroup extends EventEmitter {
       shouldRestart: options.shouldRestart || (() => this.state === "active" || this.state === "starting"),
       stopSignal: processConfig.stopSignal,
       stopTimeoutMs: processConfig.gracefulStopMs
-    })
+    }
+  }
+
+  /**
+   * Builds a managed process from config.
+   * @param {import("./config.js").ProcessConfig} processConfig - Process config.
+   * @param {BuildProcessOptions} [options] - Build options.
+   * @returns {ManagedProcess} Managed process.
+   */
+  buildProcess(processConfig, options = {}) {
+    const definition = this.processDefinition(processConfig, options)
+    const instanceId = options.instanceId ?? processConfig.id
 
     return this.processFactory
       ? this.processFactory(options.guardianKey || `release:${this.releaseId}:${instanceId}`, definition)
@@ -370,7 +381,7 @@ export default class ReleaseGroup extends EventEmitter {
 
       for (let index = 0; index < instances.length; index += 1) {
         const instance = instances[index]
-        const nextDefinition = this.buildProcess(processConfig, {
+        const nextDefinition = this.processDefinition(processConfig, {
           count: processConfig.replicas,
           index,
           instanceId: instance.id

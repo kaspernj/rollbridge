@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
+import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -61,6 +62,27 @@ test("guardian runs a strict activation lifecycle command for the exact register
     await processInstance.start()
     await processInstance.activateStrict()
     assert.equal(await fs.readFile(activationPath, "utf8"), "activated")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian forwards each retained output line to its exact process proxy", async () => {
+  const fixture = await createGuardian()
+  const marker = "guardian-output-ready"
+  const processInstance = fixture.client.process("output", {
+    ...definition("output"),
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`console.log(${JSON.stringify(marker)})`)}`
+  })
+  const logged = once(processInstance, "log")
+  const exitedFirst = once(processInstance, "exit").then(() => { throw new Error("Guardian process exited before forwarding retained output") })
+
+  try {
+    await processInstance.start()
+    const [entry] = await Promise.race([logged, exitedFirst])
+
+    assert.equal(entry.line, marker)
+    assert.ok(processInstance.status().logs.some((candidate) => candidate.line === marker))
   } finally {
     await cleanupGuardian(fixture)
   }

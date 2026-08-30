@@ -310,7 +310,7 @@ export default class GuardianClient {
 
       this.buffer = this.buffer.slice(newline + 1)
       if (message.event) {
-        if (message.event === "process" || message.event === "status") this.processes.get(message.key)?.onGuardianEvent(message)
+        if (message.event === "process" || message.event === "process-log" || message.event === "status") this.processes.get(message.key)?.onGuardianEvent(message)
         for (const handler of this.eventHandlers.get(message.event) || []) handler(message)
         const waiter = this.events.get(message.event)?.shift()
 
@@ -422,6 +422,10 @@ class GuardianProcess extends ManagedProcess {
   /** @param {Record<string, import("./json.js").JsonValue>} event - Guardian event. */
   onGuardianEvent(event) {
     if (event.status) this.cachedStatus = asProcessStatus(event.status)
+    if (event.event === "process-log") {
+      this.emit("log", asProcessLog(event.entry))
+      return
+    }
     if (event.message === "process started") this.emit("started")
     if (event.message === "process exited") this.emit("exit", event.data)
     this.logger(typeof event.message === "string" ? event.message : "guardian process status", event.data && typeof event.data === "object" && !Array.isArray(event.data) ? event.data : {})
@@ -453,6 +457,14 @@ function serializableDefinition(definition) {
  * @returns {import("./managed-process.js").ManagedProcessStatus} Process status.
  */
 function asProcessStatus(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+/**
+ * @param {import("./json.js").JsonValue} value - Protocol value.
+ * @returns {import("./managed-process.js").ManagedProcessLog} Process output entry.
+ */
+function asProcessLog(value) {
   return JSON.parse(JSON.stringify(value))
 }
 

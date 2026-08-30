@@ -66,6 +66,21 @@ test("keeps every output line when fewer than the retention limit are produced",
   assert.deepEqual(logs.map((entry) => entry.line), ["one", "two"])
 })
 
+test("emits each output line after retaining it", () => {
+  const managed = buildProcess(50)
+  let observed
+
+  managed.once("log", (entry) => {
+    observed = {entry, retained: managed.status().logs}
+  })
+  managed.appendLog("stdout", "ready\n")
+
+  assert.deepEqual(observed, {
+    entry: managed.status().logs[0],
+    retained: managed.status().logs
+  })
+})
+
 test("reports zeroed restart and uptime fields before the process starts", () => {
   const status = buildProcess(50).status()
 

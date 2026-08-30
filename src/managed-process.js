@@ -182,11 +182,14 @@ export default class ManagedProcess extends EventEmitter {
     for (const line of String(chunk).split(/\r?\n/)) {
       if (!line) continue
 
-      this.logs.push({at: new Date().toISOString(), line, stream})
+      const entry = {at: new Date().toISOString(), line, stream}
+
+      this.logs.push(entry)
 
       if (this.logs.length > this.outputLines) {
         this.logs.splice(0, this.logs.length - this.outputLines)
       }
+      this.emit("log", entry)
     }
   }
 

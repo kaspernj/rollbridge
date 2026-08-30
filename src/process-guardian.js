@@ -397,6 +397,9 @@ async function execute(request, socket) {
       ? legacyGuardian.process(request.key, managedDefinition)
       : new ManagedProcess(managedDefinition)
 
+    managedProcess.on("log", (entry) => {
+      broadcast({entry, event: "process-log", key: request.key, status: managedProcess.status()})
+    })
     if (recoversLegacyProcess && "recover" in managedProcess && typeof managedProcess.recover === "function") await managedProcess.recover()
 
     record.process = managedProcess

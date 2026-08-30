@@ -748,15 +748,27 @@ test("retired generation coordinator remains fenced after exit", async () => {
     socket = await openWebSocket(daemon)
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
     const coordinator = statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")
+    const coordinatorProcess = daemon.releases.get("v1")?.getProcess("beacon")
 
     assert.ok(coordinator?.pid)
+    assert.ok(coordinatorProcess)
     assert.equal(coordinator.lifecycleRole, "retired")
-    process.kill(-coordinator.pid, "SIGKILL")
-    await waitFor(() => statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")?.state === "stopped")
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(daemon.guardian?.processes.get("release:v1:beacon"), coordinatorProcess, "retirement refresh must preserve exact guardian event routing")
+    const exited = once(coordinatorProcess, "exit")
 
+    process.kill(-coordinator.pid, "SIGKILL")
+    const [exit] = await exited
+    const stopped = coordinatorProcess.status()
+
+    assert.equal(exit.code, null)
+    assert.equal(exit.id, "beacon")
+    assert.equal(exit.signal, "SIGKILL")
     assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
-    assert.equal(statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")?.state, "stopped")
+    assert.equal(stopped.lifecycleRole, "retired")
+    assert.equal(stopped.pid, undefined)
+    assert.equal(stopped.restarts, 0)
+    assert.equal(stopped.state, "stopped")
+    assert.equal(coordinatorProcess.restartTimer, undefined, "retired process must not queue a restart")
   } finally {
     socket?.close()
     await daemon.shutdown()
@@ -1078,7 +1090,11 @@ test("persisted daemon state excludes process commands, environment values, and 
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await waitFor(() => Boolean(daemon.activeRelease?.getProcess("web")?.status().logs.some((entry) => entry.line === secret)))
+    const webProcess = daemon.activeRelease?.getProcess("web")
+
+    assert.ok(webProcess)
+    await recordedLogLine(webProcess, secret)
+    assert.ok(webProcess.status().logs.some((entry) => entry.line === secret), "secret output must be retained before persistence")
 
     daemon.persistState()
     await waitFor(async () => (await fs.readFile(fixture.statePath, "utf8")).includes('"activeReleaseId": "v1"'))
@@ -1880,6 +1896,39 @@ async function waitFor(callback, timeoutMs = 3000) {
   }
 
   throw new Error("Timed out waiting for condition")
+}
+
+/**
+ * Resolves from retained output or the exact event that records it, and rejects if the
+ * supervised process exits first.
+ * @param {import("../src/managed-process.js").default} processInstance - Exact managed process.
+ * @param {string} line - Complete output line to observe.
+ * @returns {Promise<import("../src/managed-process.js").ManagedProcessLog>} Recorded log entry.
+ */
+async function recordedLogLine(processInstance, line) {
+  const retained = processInstance.status().logs.find((entry) => entry.line === line)
+
+  if (retained) return retained
+  return await new Promise((resolve, reject) => {
+    /** @param {import("../src/managed-process.js").ManagedProcessLog} entry - Newly retained output. */
+    const onLog = (entry) => {
+      if (entry.line !== line) return
+      cleanup()
+      resolve(entry)
+    }
+    /** @param {{code: number | null, signal: import("node:child_process").ChildProcess["signalCode"]}} exit - Exact process exit. */
+    const onExit = (exit) => {
+      cleanup()
+      reject(new Error(`Process ${processInstance.id} exited before recording expected output ${JSON.stringify(line)}: ${JSON.stringify(exit)}`))
+    }
+    const cleanup = () => {
+      processInstance.off("log", onLog)
+      processInstance.off("exit", onExit)
+    }
+
+    processInstance.on("log", onLog)
+    processInstance.once("exit", onExit)
+  })
 }
 
 /**
