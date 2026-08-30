@@ -393,16 +393,24 @@ test("cross-version replacement fails closed without dropping a retained WebSock
   }
 })
 
-test("same-authority replacement commits with committed-owner proof after the incumbent control socket is removed", async () => {
+test("cross-version replacement preserves committed-owner proof until commit then recovers every process", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-committed-proof-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "state.json")
+  const compatibilitySocketPath = path.join(root, "retained-guardian.sock")
   const releasePath = path.join(root, "v1")
   const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath}))
   const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  const compatibilitySockets = new Set()
   const candidateProcessKey = "release:candidate:worker"
   const committedOwnerProcessKey = "release:v1:worker"
+  const candidateRecoveredKeys = new Set()
+  let compatibilityGuardian
   let committedProcessKey
+  let recoveredKeysAtCommit = /** @type {Set<string> | undefined} */ (undefined)
+  let retainedConnection
+  let retainedConnectionClosed = false
+  let retainedGuardianSocketPath = /** @type {string | undefined} */ (undefined)
   /** @type {RollbridgeDaemon | undefined} */
   let replacement
 
@@ -421,14 +429,66 @@ test("same-authority replacement commits with committed-owner proof after the in
       key: candidateProcessKey,
       provenance: ownerProcess.provenance
     })
-    await Promise.all([...owner.releases.values()].map((release) => release.quiesce()))
+    const running = owner.status()
+    const processState = running.releases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
+    const expectedProcessKeys = new Set(running.releases[0]?.processes.map(({id}) => `release:v1:${id}`))
+    const proxyPort = /** @type {{port?: number}} */ (running.proxy).port
+
+    assert.deepEqual(processState?.map(({state}) => state), ["running", "running"])
+    if (typeof proxyPort !== "number") throw new Error("Retained owner proxy is missing its port")
+    retainedConnection = await openWebSocket(proxyPort)
+    retainedConnection.once("close", () => { retainedConnectionClosed = true })
     await owner.closeServer(owner.controlServer)
     await owner.removeControlSocket()
-    await owner.closeServer(owner.proxyServer)
-    const retired = owner.status()
-    const processState = retired.releases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+    const guardianSocketPath = state.recovery.guardian.socketPath
 
-    assert.deepEqual(processState?.map(({state}) => state), ["quiesced", "quiesced"])
+    if (typeof guardianSocketPath !== "string") throw new Error("Retained guardian state is missing its socket path")
+    retainedGuardianSocketPath = guardianSocketPath
+    compatibilityGuardian = net.createServer((candidateSocket) => {
+      const guardianSocket = net.createConnection(guardianSocketPath)
+      let buffer = ""
+
+      compatibilitySockets.add(candidateSocket)
+      compatibilitySockets.add(guardianSocket)
+      candidateSocket.setEncoding("utf8")
+      candidateSocket.once("close", () => {
+        compatibilitySockets.delete(candidateSocket)
+        guardianSocket.destroy()
+      })
+      guardianSocket.once("close", () => {
+        compatibilitySockets.delete(guardianSocket)
+        candidateSocket.destroy()
+      })
+      guardianSocket.on("data", (chunk) => candidateSocket.write(chunk))
+      candidateSocket.on("data", (chunk) => {
+        buffer += chunk
+        let newline = buffer.indexOf("\n")
+
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          const request = JSON.parse(line)
+
+          buffer = buffer.slice(newline + 1)
+          if (request.command === "register") candidateRecoveredKeys.add(request.key)
+          if (request.command === "commit-retired-owner-replacement") {
+            committedProcessKey = request.key
+            recoveredKeysAtCommit = new Set(candidateRecoveredKeys)
+            if (candidateRecoveredKeys.has(request.key)) {
+              candidateSocket.write(`${JSON.stringify({error: `Guardian ${request.command} requires the committed owner`, id: request.id})}\n`)
+              newline = buffer.indexOf("\n")
+              continue
+            }
+          }
+          guardianSocket.write(`${line}\n`)
+          newline = buffer.indexOf("\n")
+        }
+      })
+    })
+    await listenUnix(compatibilityGuardian, compatibilitySocketPath)
+    state.recovery.guardian.socketPath = compatibilitySocketPath
+    await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+
     assert.equal((await owner.guardian?.replacementStatus())?.ownerClaimed, true)
     await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
 
@@ -455,14 +515,33 @@ test("same-authority replacement commits with committed-owner proof after the in
 
     assert.equal(recovered.activeReleaseId, "v1")
     assert.equal(committedProcessKey, committedOwnerProcessKey)
+    assert.equal(recoveredKeysAtCommit?.has(committedOwnerProcessKey), false)
+    assert.deepEqual(candidateRecoveredKeys, expectedProcessKeys)
+    assert.equal([...replacement.guardian?.processes.keys() || []][0], candidateProcessKey)
+    assert.equal(retainedConnectionClosed, false, "successful compatibility handoff must preserve retained connections")
+    assert.equal(retainedConnection.destroyed, false, "successful compatibility handoff must leave the retained listener serving")
     assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
     assert.deepEqual(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state})), processState)
+    for (const {pid} of processState || []) {
+      if (typeof pid !== "number") throw new Error("Retained process is missing its PID")
+      assert.doesNotThrow(() => process.kill(pid, 0))
+    }
   } finally {
+    if (retainedGuardianSocketPath) {
+      const cleanupState = JSON.parse(await fs.readFile(statePath, "utf8"))
+
+      cleanupState.recovery.guardian.socketPath = retainedGuardianSocketPath
+      await fs.writeFile(statePath, `${JSON.stringify(cleanupState)}\n`)
+    }
     const shutdown = replacement?.controlCommandsReady ? replacement.shutdown().catch(() => {}) : owner.shutdown().catch(() => {})
 
+    retainedConnection?.destroy()
+    await owner.closeServer(owner.proxyServer)
     await Promise.all([fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => {}), shutdown])
     owner.guardian?.disconnect()
     replacement?.guardian?.disconnect()
+    for (const socket of compatibilitySockets) socket.destroy()
+    if (compatibilityGuardian?.listening) await closeServer(compatibilityGuardian)
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }

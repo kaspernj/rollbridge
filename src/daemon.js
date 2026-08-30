@@ -342,6 +342,11 @@ export default class RollbridgeDaemon {
     const transfer = /** @type {PrivateOwnerState} */ (prepared.ownerState)
 
     if (!transfer?.config || !transfer.snapshot) throw new Error("Committed owner published incomplete replacement state")
+    const registeredProcesses = new Map((await this.guardian.inventory()).map(({key, provenance}) => [key, provenance]))
+    const reservedProcessKey = legacyBridge ? undefined : ownerSnapshotProcessKeys(transfer.snapshot, transfer.singletonReleaseIds)
+      .find((key) => registeredProcesses.has(key))
+
+    if (reservedProcessKey) this.guardian.reserveProcessRecovery(reservedProcessKey, /** @type {string} */ (registeredProcesses.get(reservedProcessKey)))
     await this.restoreOwnerState(transfer.snapshot, {config: transfer.config, releaseConfigs: transfer.releaseConfigs, resumeDrains: false, singletonReleaseIds: transfer.singletonReleaseIds, synchronizeLifecycleRoles: false})
     for (const release of this.releases.values()) release.preserveConfigOnRetirement = true
     this.logger("owner replacement candidate prepared", {activeReleaseId: this.activeRelease?.releaseId ?? null, replacementId: prepared.replacementId})
@@ -386,6 +391,7 @@ export default class RollbridgeDaemon {
         if (incumbentControl) {
           const listenerSession = incumbentControl
 
+          if (reservedProcessKey) await this.guardian.recoverReservedProcess(reservedProcessKey)
           incumbentControl.onEvent((event) => this.handleIncumbentListenerEvent(event, listenerSession))
           await incumbentControl.request({
             command: "yield-owner-listeners",
@@ -414,15 +420,20 @@ export default class RollbridgeDaemon {
         snapshot: this.status()
       })
 
+      if (staged.committed && reservedProcessKey) {
+        committedAuthority = true
+        await this.guardian.recoverReservedProcess(reservedProcessKey)
+      }
+
       if (!staged.committed) {
         if (retiredIncumbentControl) {
-          const recoveredProcesses = this.guardian.processes
-          const processKey = ownerSnapshotProcessKeys(transfer.snapshot, transfer.singletonReleaseIds)
-            .find((key) => recoveredProcesses.has(key))
+          const processKey = reservedProcessKey
 
-          if (!processKey) throw new Error("Retired owner replacement requires an exact recovered process from committed owner state")
+          if (!processKey || !this.guardian.processes.has(processKey)) throw new Error("Retired owner replacement requires an exact reserved process from committed owner state")
           try {
             await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, processKey)
+            committedAuthority = true
+            await this.guardian.recoverReservedProcess(processKey)
           } catch (error) {
             if (!(error instanceof Error) || error.message !== "Guardian commit-retired-owner-replacement requires the committed owner") throw error
             throw new Error(
