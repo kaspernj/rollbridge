@@ -259,6 +259,7 @@ test("cross-version replacement fails closed without dropping a retained WebSock
   const compatibilitySockets = new Set()
   let compatibilityGuardian
   let committedProcessKey
+  let retainedGuardianSocketPath = /** @type {string | undefined} */ (undefined)
   let owner = /** @type {import("node:child_process").ChildProcess | undefined} */ (undefined)
   let replacement = /** @type {RollbridgeDaemon | undefined} */ (undefined)
   let retainedConnection
@@ -286,6 +287,9 @@ test("cross-version replacement fails closed without dropping a retained WebSock
     const state = JSON.parse(await fs.readFile(statePath, "utf8"))
     const guardianSocketPath = state.recovery.guardian.socketPath
     const expectedProcessKey = "release:v1:worker"
+
+    if (typeof guardianSocketPath !== "string") throw new Error("Retained guardian state is missing its socket path")
+    retainedGuardianSocketPath = guardianSocketPath
 
     compatibilityGuardian = net.createServer((candidateSocket) => {
       const guardianSocket = net.createConnection(guardianSocketPath)
@@ -378,6 +382,87 @@ test("cross-version replacement fails closed without dropping a retained WebSock
     replacement?.guardian?.disconnect()
     for (const socket of compatibilitySockets) socket.destroy()
     if (compatibilityGuardian?.listening) await closeServer(compatibilityGuardian)
+    if (retainedGuardianSocketPath) {
+      const cleanupState = JSON.parse(await fs.readFile(statePath, "utf8"))
+
+      cleanupState.recovery.guardian.socketPath = retainedGuardianSocketPath
+      await fs.writeFile(statePath, `${JSON.stringify(cleanupState)}\n`)
+    }
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("same-authority replacement commits with committed-owner proof after the incumbent control socket is removed", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-committed-proof-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const releasePath = path.join(root, "v1")
+  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath}))
+  const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  const candidateProcessKey = "release:candidate:worker"
+  const committedOwnerProcessKey = "release:v1:worker"
+  let committedProcessKey
+  /** @type {RollbridgeDaemon | undefined} */
+  let replacement
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    const ownerProcess = owner.guardian?.processes.values().next().value
+
+    assert.ok(owner.guardian)
+    assert.ok(ownerProcess)
+    await owner.guardian.request({
+      command: "register",
+      definition: ownerProcess.definition,
+      key: candidateProcessKey,
+      provenance: ownerProcess.provenance
+    })
+    await Promise.all([...owner.releases.values()].map((release) => release.quiesce()))
+    await owner.closeServer(owner.controlServer)
+    await owner.removeControlSocket()
+    await owner.closeServer(owner.proxyServer)
+    const retired = owner.status()
+    const processState = retired.releases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
+
+    assert.deepEqual(processState?.map(({state}) => state), ["quiesced", "quiesced"])
+    assert.equal((await owner.guardian?.replacementStatus())?.ownerClaimed, true)
+    await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
+
+    replacement = new RollbridgeDaemon({
+      config: daemonConfig,
+      logger: (message) => {
+        if (message !== "owner replacement candidate prepared" || !replacement?.guardian) return
+        const guardian = replacement.guardian
+        const recoveredProcess = guardian.processes.values().next().value
+
+        if (!recoveredProcess) throw new Error("Replacement did not reconstruct a guardian process")
+        guardian.processes = new Map([[candidateProcessKey, recoveredProcess], ...guardian.processes])
+        const commitRetiredOwnerReplacement = guardian.commitRetiredOwnerReplacement.bind(guardian)
+
+        guardian.commitRetiredOwnerReplacement = async (replacementId, processKey) => {
+          committedProcessKey = processKey
+          await commitRetiredOwnerReplacement(replacementId, processKey)
+        }
+      }
+    })
+    await replacement.replaceIncompatibleOwner()
+    const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const recoveredReleases = /** @type {{processes: {id: string, pid?: number, state: string}[]}[]} */ (recovered.releases)
+
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(committedProcessKey, committedOwnerProcessKey)
+    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
+    assert.deepEqual(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state})), processState)
+  } finally {
+    const shutdown = replacement?.controlCommandsReady ? replacement.shutdown().catch(() => {}) : owner.shutdown().catch(() => {})
+
+    await Promise.all([fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => {}), shutdown])
+    owner.guardian?.disconnect()
+    replacement?.guardian?.disconnect()
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }

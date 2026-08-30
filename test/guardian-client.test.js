@@ -224,6 +224,42 @@ test("retired owner replacement commit carries its exact recovered process key",
   await client.commitRetiredOwnerReplacement(replacementId, processKey)
 })
 
+test("retired owner replacement rejects a registered process absent from committed owner state", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const committedProcessKey = "release:v1:worker"
+  const candidateProcessKey = "release:candidate:worker"
+  const authority = {configDigest: "owner", runtime: null}
+  const snapshot = {
+    activeReleaseId: "v1",
+    control: {path: path.join(fixture.root, "rollbridge.sock")},
+    releases: [{processes: [{id: "worker"}], releaseId: "v1"}],
+    services: [],
+    singletons: []
+  }
+  const candidateSnapshot = {
+    ...snapshot,
+    releases: [...snapshot.releases, {processes: [{id: "worker"}], releaseId: "candidate"}]
+  }
+
+  try {
+    await fixture.client.process(committedProcessKey, definition("worker")).recover()
+    await fixture.client.process(candidateProcessKey, definition("candidate-worker")).recover()
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {authority, snapshot: candidateSnapshot})
+    await assert.rejects(
+      () => candidate.commitRetiredOwnerReplacement(prepared.replacementId, candidateProcessKey),
+      /process .* does not belong to the committed owner/
+    )
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("retired owner replacement requires unchanged authority and the exact control path absent", async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
@@ -232,7 +268,13 @@ test("retired owner replacement requires unchanged authority and the exact contr
   const processKey = "release:v1:worker"
   const authority = {configDigest: "incumbent", runtime: null}
   const nextAuthority = {configDigest: "candidate", runtime: null}
-  const snapshot = {activeReleaseId: "v1", control: {path: controlPath}}
+  const snapshot = {
+    activeReleaseId: "v1",
+    control: {path: controlPath},
+    releases: [{processes: [{id: "worker"}], releaseId: "v1"}],
+    services: [],
+    singletons: []
+  }
 
   try {
     await fixture.client.process(processKey, definition("worker")).recover()
@@ -258,6 +300,10 @@ test("retired owner replacement requires unchanged authority and the exact contr
     await contender.connect()
     await assert.rejects(
       () => contender.request({command: "commit-retired-owner-replacement", key: processKey, replacementId: ready.replacementId}),
+      /not the prepared candidate/
+    )
+    await assert.rejects(
+      () => candidate.commitRetiredOwnerReplacement("stale-replacement", processKey),
       /not the prepared candidate/
     )
     await assert.rejects(
