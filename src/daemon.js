@@ -300,6 +300,7 @@ export default class RollbridgeDaemon {
     let stagingControlPath
     let finalControlPublished = false
     let listenersYielded = false
+    let retiredIncumbentControl = false
     let retainIncumbentControl = false
     let incumbentControl = legacyBridge?.incumbentControl
 
@@ -325,22 +326,31 @@ export default class RollbridgeDaemon {
       if (legacyBridge) {
         await this.crossLegacyDisruptiveBoundary(legacyBridge)
       } else if (preparedStatus.ownerClaimed) {
-        incumbentControl = await openControlSession(transfer.snapshot.control.path)
-        const listenerSession = incumbentControl
+        try {
+          incumbentControl = await openControlSession(transfer.snapshot.control.path)
+        } catch (error) {
+          if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+          retiredIncumbentControl = true
+        }
+        if (incumbentControl) {
+          const listenerSession = incumbentControl
 
-        incumbentControl.onEvent((event) => this.handleIncumbentListenerEvent(event, listenerSession))
-        await incumbentControl.request({
-          command: "yield-owner-listeners",
-          control: transfer.snapshot.control.path === this.config.control.path,
-          proxy: true,
-          replacementId: prepared.replacementId
-        })
-        listenersYielded = true
+          incumbentControl.onEvent((event) => this.handleIncumbentListenerEvent(event, listenerSession))
+          await incumbentControl.request({
+            command: "yield-owner-listeners",
+            control: transfer.snapshot.control.path === this.config.control.path,
+            proxy: true,
+            replacementId: prepared.replacementId
+          })
+          listenersYielded = true
+        }
       }
       if (sharedFixedProxy) await this.startProxy()
-      await fs.rename(stagingControlPath, this.config.control.path)
-      finalControlPublished = true
-      this.boundControlPath = this.config.control.path
+      if (!retiredIncumbentControl) {
+        await fs.rename(stagingControlPath, this.config.control.path)
+        finalControlPublished = true
+        this.boundControlPath = this.config.control.path
+      }
       const committed = this.guardian.waitForEvent("replacement-committed")
       const staged = await this.guardian.stageOwnerReplacement(prepared.replacementId, {
         authority: this.ownerAuthority(),
@@ -350,18 +360,27 @@ export default class RollbridgeDaemon {
       })
 
       if (!staged.committed) {
-        try {
-          if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
-          await incumbentControl.request({command: "commit-owner-replacement", replacementId: prepared.replacementId})
-        } catch (error) {
-          const status = await this.guardian.replacementStatus()
+        if (retiredIncumbentControl) {
+          await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId)
+        } else {
+          try {
+            if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
+            await incumbentControl.request({command: "commit-owner-replacement", replacementId: prepared.replacementId})
+          } catch (error) {
+            const status = await this.guardian.replacementStatus()
 
-          if (status.committedReplacementId !== prepared.replacementId || !status.ownerClaimed) throw error
-          this.logger("owner replacement commit response lost; guardian commit confirmed", {replacementId: prepared.replacementId})
+            if (status.committedReplacementId !== prepared.replacementId || !status.ownerClaimed) throw error
+            this.logger("owner replacement commit response lost; guardian commit confirmed", {replacementId: prepared.replacementId})
+          }
         }
       }
       await committed
       committedAuthority = true
+      if (retiredIncumbentControl) {
+        await fs.rename(stagingControlPath, this.config.control.path)
+        finalControlPublished = true
+        this.boundControlPath = this.config.control.path
+      }
       if (!legacyBridge && incumbentControl && [...this.releases.values()].some((release) => release.hasTransferredConnections())) {
         this.incumbentListenerControl = incumbentControl
         retainIncumbentControl = true

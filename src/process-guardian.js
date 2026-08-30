@@ -297,6 +297,23 @@ async function execute(request, socket) {
     return {aborted: true}
   }
 
+  if (request.command === "commit-retired-owner-replacement") {
+    requireReplacement(socket, request)
+    if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
+    if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
+    const controlPath = ownerControlPath(ownerState)
+
+    try {
+      await fs.lstat(controlPath)
+      throw new Error(`Retired owner control socket ${controlPath} still exists`)
+    } catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+    }
+    commitReplacement()
+    finalizeReplacementRetirement()
+    return {committed: true}
+  }
+
   if (request.command === "commit-owner-replacement") {
     requireOwner(socket, request.command)
     if (!replacementClient || request.replacementId !== replacementId || !replacementOwnerState) throw new Error("Owner replacement transaction is not the prepared ready candidate")
@@ -508,6 +525,21 @@ function requireReplacement(socket, request) {
 function ownerAuthority(state) {
   if (!state || typeof state !== "object" || Array.isArray(state) || !("authority" in state)) throw new Error("Guardian owner state is missing its authority fence")
   return state.authority
+}
+
+/**
+ * @param {import("./json.js").JsonValue | undefined} state - Committed transferable state.
+ * @returns {string} Exact incumbent public control path.
+ */
+function ownerControlPath(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state) || !("snapshot" in state)) throw new Error("Guardian owner state is missing its committed snapshot")
+  const snapshot = state.snapshot
+
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) || !("control" in snapshot)) throw new Error("Guardian owner snapshot is missing its control identity")
+  const control = snapshot.control
+
+  if (!control || typeof control !== "object" || Array.isArray(control) || !("path" in control) || typeof control.path !== "string") throw new Error("Guardian owner snapshot has an invalid control identity")
+  return control.path
 }
 
 /**

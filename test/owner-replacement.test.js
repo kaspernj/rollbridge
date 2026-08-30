@@ -9,8 +9,9 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
+import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
-import {isLegacyGuardianPrepareDiagnostic} from "../src/daemon.js"
+import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic} from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
 import {findAvailablePort} from "../src/port-allocator.js"
 
@@ -243,6 +244,50 @@ test("ensure-daemon atomically replaces incompatible config, socket, and package
     await shutdown
   } finally {
     if (owner && owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("same-authority replacement commits after a retired incumbent already removed its control socket", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-retired-control-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const releasePath = path.join(root, "v1")
+  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath}))
+  const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  let replacement
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    await Promise.all([...owner.releases.values()].map((release) => release.quiesce()))
+    await owner.closeServer(owner.controlServer)
+    await owner.removeControlSocket()
+    await owner.closeServer(owner.proxyServer)
+    const retired = owner.status()
+    const processState = retired.releases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
+
+    assert.deepEqual(processState?.map(({state}) => state), ["quiesced", "quiesced"])
+    assert.equal((await owner.guardian?.replacementStatus())?.ownerClaimed, true)
+    await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
+
+    replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    await replacement.replaceIncompatibleOwner()
+    const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const recoveredReleases = /** @type {{processes: {id: string, pid?: number, state: string}[]}[]} */ (recovered.releases)
+
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
+    assert.deepEqual(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state})), processState)
+  } finally {
+    const shutdown = replacement?.controlCommandsReady ? replacement.shutdown().catch(() => {}) : owner.shutdown().catch(() => {})
+
+    await Promise.all([fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => {}), shutdown])
+    owner.guardian?.disconnect()
+    replacement?.guardian?.disconnect()
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }
