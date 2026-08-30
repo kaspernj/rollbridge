@@ -14,7 +14,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
- * @typedef {{drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, stopCommand?: string}} LifecycleConfig
+ * @typedef {{activateCommand?: string, drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, stopCommand?: string}} LifecycleConfig
  * @typedef {number | "indefinite"} StopTimeoutMs
  * @typedef {"persistent" | "handoff"} ServiceDeployStrategy
  * @typedef {{cwd?: string, deployStrategy: ServiceDeployStrategy, env: Record<string, string>, gracefulStopMs: StopTimeoutMs, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, nonBlockingDrain: boolean, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
@@ -158,6 +158,7 @@ export function validateConfig(rawConfig, configPath = process.cwd()) {
   if (ownerRecovery && !statePath) issues.push({fix: "Configure statePath when ownerRecovery is enabled.", message: "ownerRecovery requires statePath"})
 
   validateProcessSet(processes, issues)
+  validateActivationLifecycle(processes, ownerRecovery, statePath, issues)
 
   return {config: {application, control, legacyTakeover, ownerRecovery, processes, proxy, releaseRetention, statePath}, issues}
 }
@@ -341,7 +342,7 @@ function normalizeLifecycle(value, key, issues) {
   if (value === undefined || value === null) return {drainTimeoutMs: 0}
 
   if (!isPlainObject(value)) {
-    issues.push({fix: `Set ${key} to a mapping with optional quietCommand, drainCommand, stopCommand, and drainTimeoutMs.`, message: `${key} must be an object`})
+    issues.push({fix: `Set ${key} to a mapping with optional activateCommand, quietCommand, drainCommand, stopCommand, and drainTimeoutMs.`, message: `${key} must be an object`})
 
     return {drainTimeoutMs: 0}
   }
@@ -350,6 +351,7 @@ function normalizeLifecycle(value, key, issues) {
   /** @type {LifecycleConfig} */
   const lifecycle = {drainTimeoutMs: nonNegativeOrDefault(drainTimeoutMs, `${key}.drainTimeoutMs`, issues, 0, false)}
 
+  if (value.activateCommand !== undefined) lifecycle.activateCommand = normalizeString(value.activateCommand, `${key}.activateCommand`, issues)
   if (value.quietCommand !== undefined) lifecycle.quietCommand = normalizeString(value.quietCommand, `${key}.quietCommand`, issues)
   if (value.drainCommand !== undefined) lifecycle.drainCommand = normalizeString(value.drainCommand, `${key}.drainCommand`, issues)
   if (value.stopCommand !== undefined) lifecycle.stopCommand = normalizeString(value.stopCommand, `${key}.stopCommand`, issues)
@@ -359,6 +361,34 @@ function normalizeLifecycle(value, key, issues) {
   }
 
   return lifecycle
+}
+
+/**
+ * Validates the opt-in durable generation activation contract.
+ * @param {ProcessConfig[]} processes - Normalized process definitions.
+ * @param {OwnerRecoveryConfig | undefined} ownerRecovery - Durable owner recovery config.
+ * @param {string | undefined} statePath - Durable state transaction anchor.
+ * @param {ConfigIssue[]} issues - Issue collector.
+ */
+function validateActivationLifecycle(processes, ownerRecovery, statePath, issues) {
+  const activated = processes.filter((processConfig) => processConfig.lifecycle.activateCommand !== undefined)
+
+  if (activated.length > 1) {
+    issues.push({fix: "Configure lifecycle.activateCommand on only one release-generation coordinator.", message: "Config may define at most one lifecycle.activateCommand"})
+  }
+
+  for (const processConfig of activated) {
+    if (processConfig.policy !== "service" || processConfig.deployStrategy !== "handoff") {
+      issues.push({fix: `Set lifecycle.activateCommand only on a service using deployStrategy: "handoff"; "${processConfig.id}" is ${processConfig.policy}/${processConfig.deployStrategy}.`, message: `Process "${processConfig.id}" can only set lifecycle.activateCommand on a handoff service`})
+    }
+    if (!processConfig.lifecycle.quietCommand) {
+      issues.push({fix: `Add lifecycle.quietCommand to "${processConfig.id}" so every activated generation has a paired retirement command.`, message: `Process "${processConfig.id}" lifecycle.activateCommand requires lifecycle.quietCommand`})
+    }
+  }
+
+  if (activated.length > 0 && (!ownerRecovery || !statePath)) {
+    issues.push({fix: "Configure statePath and ownerRecovery for durable release-generation transition recovery.", message: "lifecycle.activateCommand requires ownerRecovery and statePath"})
+  }
 }
 
 /**

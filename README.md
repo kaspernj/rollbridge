@@ -49,6 +49,9 @@ export default {
     path: "/tmp/rollbridge-ticket-server.sock"
   },
 
+  statePath: "/var/lib/rollbridge/ticket-server.state.json",
+  ownerRecovery: {reconnectGraceMs: 30000},
+
   proxy: {
     host: "127.0.0.1",
     port: 8182,
@@ -82,8 +85,12 @@ export default {
       policy: "service",
       deployStrategy: "handoff",
       cwd: "{{releasePath}}",
+      env: {VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET: "{{releasePath}}/tmp/background-jobs-main.sock"},
       command: "env VELOCIOUS_BACKGROUND_JOBS_PORT={{port}} npx velocious background-jobs-main",
-      lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
+      lifecycle: {
+        activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+        quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
+      },
       port: {from: 7331, to: 7399}
     },
     {
@@ -98,8 +105,8 @@ export default {
 }
 ```
 
-`appctl jobs-main-retire` is illustrative; replace it with a reviewed command
-that quiesces the real jobs-main without exiting it.
+The lifecycle socket path is illustrative; set it to the reviewed release-local
+Velocious socket used by jobs-main.
 
 Each process retains its most recent stdout/stderr lines and reports them in
 `status`. Set `outputLines` (a positive integer, default 50) per process to keep
@@ -173,12 +180,16 @@ handoffs as soon as its release retires, independently of the proxied connection
 drain. Its release-scoped handoff jobs-main remains running to supervise existing
 handoffs and exits only after the worker pool has drained.
 
-Give the handoff jobs-main a `lifecycle.quietCommand` that stops schedules,
-dispatch, and new handoffs without terminating the main. After candidate health
-and traffic activation, Rollbridge waits only for this bounded quiescence step,
-then returns while the old main and workers drain together. A failed quiet hook
-is reported as `retirementError`; Rollbridge leaves that generation alive for
-diagnosis instead of silently continuing to stop it.
+For a coordinator that starts quiescent, give the handoff jobs-main paired
+`lifecycle.activateCommand` and `quietCommand` hooks. After candidate health,
+Rollbridge waits for old retirement, waits for candidate activation, and commits
+the active proxy target without an awaited boundary. The durable transition is
+generation-scoped and resumable; failures remain visible and block unrelated
+deploys. Post-commit singleton replacement is also journaled and must complete
+before an exact retry reports success. If the active coordinator restarts,
+Rollbridge restores its active role with the same bounded, generation-scoped
+activation command before reporting it running. Omit `activateCommand` to
+preserve the existing hook-free ordering.
 
 See [`docs/workers.md`](docs/workers.md) for the full release-generation
 deployment pattern: a handoff `background-jobs-main`, its companion worker pool,
@@ -384,7 +395,10 @@ candidate coordinator.
   deployStrategy: "handoff",
   cwd: "{{releasePath}}",
   command: "npx velocious background-jobs-main",
-  lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
+  lifecycle: {
+    activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+    quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
+  },
   port: {from: 7331, to: 7399}
 }
 ```
@@ -396,8 +410,10 @@ On `rollbridge deploy`, the required ordering is:
 1. starts any missing persistent service and the candidate's handoff services;
 2. starts the new release's `companion`s, then its `proxied` process, and
    health-checks the proxied process;
-3. switches new traffic to the new release;
-4. quiesces the previous jobs-main and worker pool as one retired generation;
+3. when `activateCommand` is configured, retires and acknowledges the previous
+   jobs generation, then activates and acknowledges the candidate;
+4. synchronously switches new traffic to the new release (hook-free configs keep
+   the existing switch-then-retire behavior);
 5. replaces `singleton`s (stops the old one, then starts the new one);
 6. returns success without waiting for the previous generation or its independent
    HTTP/WebSocket drain; Rollbridge supervises all retained drains in the

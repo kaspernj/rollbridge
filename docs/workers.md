@@ -17,7 +17,10 @@ fixed port such as `7330`.
   policy: "service",
   deployStrategy: "handoff",
   command: "npx velocious background-jobs-main",
-  lifecycle: {quietCommand: "appctl jobs-main-retire --pid $ROLLBRIDGE_PID"},
+  lifecycle: {
+    activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+    quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
+  },
   port: {from: 7331, to: 7399}
 },
 {
@@ -31,8 +34,8 @@ fixed port such as `7330`.
 }
 ```
 
-The illustrative `appctl` command must be replaced by the application's real,
-reviewed jobs-main quiescence control.
+Set `VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET` in the service environment to
+the release's reviewed lifecycle socket path.
 
 Each worker receives its generation's jobs-main port. Old workers keep that port
 for their entire lifetime; normal deploy draining never hands them to, or lets
@@ -43,22 +46,28 @@ them reconnect to, the new jobs-main. `replicas` scales the pool as
 
 1. Before activation, Rollbridge starts the candidate release's jobs-main and
    complete worker pool, then starts and health-checks the candidate web process.
-2. Activation switches new web traffic and makes the candidate jobs generation
-   active.
-3. The previous jobs generation retires as one unit. Its jobs-main stops schedule
+2. The previous jobs generation retires as one unit and acknowledges the exact
+   generation-scoped retirement command. Its jobs-main stops schedule
    ownership, new queue dispatch, and new ordinary worker handoffs. Its workers
    stop accepting handoffs.
-4. The old jobs-main stays running with its old workers. It continues owning
+3. The candidate acknowledges its exact generation-scoped activation command.
+4. Rollbridge synchronously commits the active release and proxy target.
+5. The old jobs-main stays running with its old workers. It continues owning
    their connections and heartbeats, lease fencing, terminal-report acceptance
    and acknowledgement, and durable store transitions. The old worker/reporting
    side durably retries terminal reports, tracks outstanding report promises,
    enforces per-job execution timeouts, and owns and reaps child runners.
-5. Work returned or retried to the shared queue becomes eligible for the new
+6. Work returned or retried to the shared queue becomes eligible for the new
    active generation. The retired main never dispatches it again.
-6. The old main and workers remain one release generation until every accepted
+7. The old main and workers remain one release generation until every accepted
    handoff settles. Only then, after every old worker drains and exits, may the
    old jobs-main exit. Rollbridge then reaps the generation and reports that its
    release reference ended so Rampway can release the retention pin.
+
+If the active jobs-main crashes or is manually restarted, Rollbridge restores its
+active role with the exact generation-scoped activation command before reporting
+the restarted process running. A retired generation remains fenced and is not
+auto-restarted.
 
 Old and new generations may overlap for hours, each running its own release code
 and jobs-main endpoint. Multiple retired generations may drain concurrently.

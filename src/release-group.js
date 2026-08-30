@@ -116,8 +116,9 @@ export default class ReleaseGroup extends EventEmitter {
   /**
    * Reconstructs this release around processes still owned by the durable guardian.
    * @param {ReleaseStatus} snapshot - Persisted release snapshot.
+   * @param {{synchronizeLifecycleRole?: boolean}} [options] - Guardian role synchronization options.
    */
-  async restore(snapshot) {
+  async restore(snapshot, {synchronizeLifecycleRole = true} = {}) {
     if (!snapshot || snapshot.releaseId !== this.releaseId || snapshot.releasePath !== this.releasePath || snapshot.revision !== this.revision) {
       throw new Error(`Persisted release identity mismatch for ${this.releaseId}`)
     }
@@ -175,6 +176,17 @@ export default class ReleaseGroup extends EventEmitter {
       if (processConfig.nonBlockingDrain) this.nonBlockingDrainIds.add(processStatus.id)
       if ("recover" in processInstance && typeof processInstance.recover === "function") await processInstance.recover()
     }
+    if (synchronizeLifecycleRole) await this.synchronizeLifecycleRoles()
+  }
+
+  /** Synchronizes only the activation owner's durable role without firing its hook. */
+  async synchronizeLifecycleRoles() {
+    const processConfig = this.config.processes.find((candidate) => candidate.lifecycle.activateCommand !== undefined)
+
+    if (!processConfig) return
+    const lifecycleRole = this.state === "active" ? "active" : this.state === "draining" ? "retired" : "candidate"
+
+    await Promise.all(this.getProcesses(processConfig.id).map(({process}) => process.setLifecycleRole(lifecycleRole)))
   }
 
   /**
@@ -251,6 +263,17 @@ export default class ReleaseGroup extends EventEmitter {
   activate() {
     this.state = "active"
     this.activatedAt = new Date().toISOString()
+  }
+
+  /** Runs the configured release-generation activation acknowledgement, if any. */
+  async activateGeneration() {
+    const processConfig = this.config.processes.find((candidate) => candidate.lifecycle.activateCommand !== undefined)
+
+    if (!processConfig) return
+    const [instance] = this.getProcesses(processConfig.id)
+
+    if (!instance) throw new Error(`Generation activation process ${processConfig.id} is not running for release ${this.releaseId}`)
+    await instance.process.activateStrict()
   }
 
   /** @returns {Promise<void>} Allocates all configured per-process ports. */
@@ -543,21 +566,25 @@ export default class ReleaseGroup extends EventEmitter {
   /**
    * Marks the generation retired and quiesces its jobs-main and non-blocking workers as one unit.
    * @param {import("./config.js").RollbridgeConfig} [config] - Refreshed retirement config.
+   * @param {{retry?: boolean}} [options] - Explicit durable-transition resume options.
    * @returns {Promise<void>} Resolves when retirement quiescence succeeds.
    */
-  async beginRetirement(config = this.config) {
+  async beginRetirement(config = this.config, {retry = false} = {}) {
     if (this.state === "draining") {
-      if (this.retirementError) throw new Error(this.retirementError)
-      return
+      if (!retry) {
+        if (this.retirementError) throw new Error(this.retirementError)
+        return
+      }
+    } else {
+      this.state = "draining"
+      this.drainStartedAt = new Date().toISOString()
     }
 
-    this.state = "draining"
-    this.drainStartedAt = new Date().toISOString()
     this.refreshProcessDefinitions(config)
     const generationIds = new Set([...this.handoffServiceIds, ...this.nonBlockingDrainIds])
     const results = await Promise.allSettled([...this.processes.entries()]
       .filter(([id]) => generationIds.has(id))
-      .map(([, processInstance]) => processInstance.quiesceStrict()))
+      .map(([, processInstance]) => retry ? processInstance.requiesceStrict() : processInstance.quiesceStrict()))
     const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
 
     if (errors.length > 0) {
@@ -565,6 +592,7 @@ export default class ReleaseGroup extends EventEmitter {
       this.retirementError = `${failure.message}: ${errors.map((error) => error instanceof Error ? error.message : String(error)).join("; ")}`
       throw failure
     }
+    this.retirementError = undefined
   }
 
   /** @returns {Promise<void>} Stops all release-owned processes. */

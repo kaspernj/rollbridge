@@ -385,6 +385,24 @@ test("a hanging lifecycle hook is bounded so stop still completes", async () => 
   }
 })
 
+test("activateStrict runs the configured activation command once per call and rejects failures", async () => {
+  const commands = /** @type {{command: string, label: string, pid: number | undefined, timeoutMs: number}[]} */ ([])
+  const managed = buildLongLived(() => false)
+
+  managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0}
+  managed.pid = 4321
+  managed.runHook = async (command, timeoutMs, label, pid) => {
+    commands.push({command, label, pid, timeoutMs})
+    return undefined
+  }
+
+  await managed.activateStrict()
+  assert.deepEqual(commands, [{command: "jobs activate", label: "activate command", pid: 4321, timeoutMs: 30000}])
+
+  managed.runHook = async () => new Error("activation rejected")
+  await assert.rejects(() => managed.activateStrict(), /activation rejected/)
+})
+
 test("sends the configured stopSignal as the graceful stop signal", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-stop-signal-"))
   const readyPath = path.join(dir, "ready")

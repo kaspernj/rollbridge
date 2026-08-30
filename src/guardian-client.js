@@ -344,10 +344,15 @@ class GuardianProcess extends ManagedProcess {
     await this.ensureRegistered()
   }
 
-  async start(reason = "deploy") {
+  /**
+   * @param {import("./managed-process.js").ManagedProcessStartReason} [reason] - Start reason.
+   * @param {import("./managed-process.js").LifecycleRole} [lifecycleRole] - Desired role restored before running.
+   */
+  async start(reason = "deploy", lifecycleRole) {
     await this.ensureRegistered()
     await this.pendingUpdate
-    this.cachedStatus = asProcessStatus(await this.client.request({command: "start", key: this.key, reason}))
+    if (lifecycleRole) this.lifecycleRole = lifecycleRole
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "start", key: this.key, lifecycleRole, reason}))
   }
 
   /** @param {import("./managed-process.js").ManagedProcessDefinition} definition - Updated definition. */
@@ -371,6 +376,27 @@ class GuardianProcess extends ManagedProcess {
 
   async quiesceStrict() {
     await this.quiesce()
+  }
+
+  async requiesceStrict() {
+    await this.ensureRegistered()
+    await this.pendingUpdate
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "requiesce", key: this.key}))
+  }
+
+  async activateStrict() {
+    await this.ensureRegistered()
+    await this.pendingUpdate
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "activate", key: this.key}))
+    this.lifecycleRole = "active"
+  }
+
+  /** @param {import("./managed-process.js").LifecycleRole} role - Exact generation role. */
+  async setLifecycleRole(role) {
+    await this.ensureRegistered()
+    await this.pendingUpdate
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "set-lifecycle-role", key: this.key, lifecycleRole: role}))
+    this.lifecycleRole = role
   }
 
   async stop(options = {}) {

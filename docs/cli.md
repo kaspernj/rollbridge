@@ -149,16 +149,19 @@ for old workers, jobs, or HTTP/WebSocket connections to finish. Prints
 If the new release fails to start or health-check, the previous release stays
 active and the command errors.
 
-After activation, deploy waits for bounded quiet hooks of old handoff services
-and `nonBlockingDrain` companions, then returns without waiting for their drains.
-A failure is logged and exposed as `retirementError`; the generation stays alive.
-The successful activation response also includes
-`retirement: {status: "quiescence_failed", releaseId, error}` so callers cannot
-mistake the retirement failure for an unqualified transition.
+With an opt-in handoff-service `lifecycle.activateCommand`, deploy journals the
+exact transition, waits for old retirement acknowledgement, waits for candidate
+activation acknowledgement, and synchronously commits the active proxy target.
+An unresolved failure blocks different deploys; only the exact same release,
+path, revision, and config authority may explicitly resume its incomplete
+idempotent phase. A durable `committed_pending` phase keeps exact retry from
+reporting success until singleton replacement finishes. Stop, restart, and
+rollback mutations are rejected while the transition is unresolved. Hook-free
+configs retain the existing post-activation quiet behavior and retirement result.
 `status.releaseReferences` lists `{releaseId, releasePath}` for every active or
 draining release and excludes fully stopped history.
 
-After candidate activation, `Daemon.deploy()` begins old-generation retirement
+For hook-free configs, after candidate activation `Daemon.deploy()` begins old-generation retirement
 and asynchronous drain before awaiting singleton replacement. A singleton
 replacement failure can therefore return non-zero while the candidate remains
 active, but it cannot leave the old jobs generation dispatching.

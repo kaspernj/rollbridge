@@ -49,6 +49,23 @@ test("guardian inventory removes only an exact owned provenance", async () => {
   }
 })
 
+test("guardian runs a strict activation lifecycle command for the exact registered process", async () => {
+  const fixture = await createGuardian()
+  const activationPath = path.join(fixture.root, "activated")
+  const processInstance = fixture.client.process("candidate-activation", {
+    ...definition("candidate-activation"),
+    lifecycle: {activateCommand: `printf activated > ${JSON.stringify(activationPath)}`, drainTimeoutMs: 0}
+  })
+
+  try {
+    await processInstance.start()
+    await processInstance.activateStrict()
+    assert.equal(await fs.readFile(activationPath, "utf8"), "activated")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("guardian shutdown reports an exact owned process stop failure", async () => {
   const fixture = await createGuardian()
   const processInstance = fixture.client.process("broken-stop", {...definition("broken-stop"), stopSignal: "NOT_A_SIGNAL"})

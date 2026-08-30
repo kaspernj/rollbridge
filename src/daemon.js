@@ -23,9 +23,12 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
  * @typedef {{disruptive: true, mode: "legacy-first-upgrade", reason: string}} OwnerTransition
- * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, ownerRecovery: {configDigest: string} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "committed_pending" | "committed"} GenerationTransitionPhase
+ * @typedef {{candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, configDigest: string, error?: string, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
+ * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, generationTransition?: GenerationTransition, ownerRecovery: {configDigest: string} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
- * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata}} OwnerRecoverySnapshot
+ * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata, singletonReleaseIds?: Record<string, string>}} OwnerRecoverySnapshot
+ * @typedef {{authority: JsonValue, config: import("./config.js").RollbridgeConfig, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, singletonReleaseIds?: Record<string, string>, snapshot: OwnerRecoverySnapshot}} PrivateOwnerState
  * @typedef {{boundaryCrossed: boolean, incumbentControl: Awaited<ReturnType<typeof openControlSession>>, incumbentStartTime: string, prepared: {ownerState: JsonValue, replacementId: string}, recoverySnapshot: OwnerRecoverySnapshot}} LegacyOwnerBridge
  */
 
@@ -62,7 +65,9 @@ export default class RollbridgeDaemon {
     this.servicePorts = /** @type {Record<string, number>} */ ({})
     this.portReservations = /** @type {Set<number>} */ (new Set())
     this.singletons = /** @type {Map<string, import("./managed-process.js").default>} */ (new Map())
+    this.singletonReleaseIds = /** @type {Map<string, string>} */ (new Map())
     this.activeRelease = /** @type {ReleaseGroup | undefined} */ (undefined)
+    this.generationTransition = /** @type {GenerationTransition | undefined} */ (undefined)
     this.proxy = httpProxy.createProxyServer({ws: true, xfwd: true})
     this.proxyServer = /** @type {http.Server | undefined} */ (undefined)
     this.controlServer = /** @type {net.Server | undefined} */ (undefined)
@@ -137,10 +142,42 @@ export default class RollbridgeDaemon {
     this.watchOwnerReplacementEvents()
 
     if (snapshot) {
-      await this.restoreOwnerState(snapshot, {resumeDrains: false})
+      if (!Array.isArray(snapshot.releases) || (snapshot.activeReleaseId !== null && typeof snapshot.activeReleaseId !== "string")) {
+        throw new Error("Owner recovery state is partial or corrupt; active release metadata is required.")
+      }
+      let recoveryConfig = this.config
+      let releaseConfigs = /** @type {Record<string, import("./config.js").RollbridgeConfig>} */ ({})
+      let singletonReleaseIds = snapshot.singletonReleaseIds || /** @type {Record<string, string>} */ ({})
+      let recoverySnapshot = snapshot
+
+      if ((recovery?.format ?? 0) >= 2) {
+        const ownerState = /** @type {PrivateOwnerState} */ (await this.guardian.ownerState())
+
+        if (!ownerState?.config || !ownerState.releaseConfigs || !ownerState.snapshot) {
+          throw new Error("Durable guardian state is missing exact release definitions; refusing partial owner recovery.")
+        }
+        recoveryConfig = ownerState.config
+        releaseConfigs = ownerState.releaseConfigs
+        singletonReleaseIds = ownerState.singletonReleaseIds || singletonReleaseIds
+        const guardianTransitionAt = Date.parse(ownerState.snapshot.generationTransition?.updatedAt || "")
+        const persistedTransitionAt = Date.parse(snapshot.generationTransition?.updatedAt || "")
+
+        if (Number.isFinite(guardianTransitionAt) && (!Number.isFinite(persistedTransitionAt) || guardianTransitionAt > persistedTransitionAt)) {
+          recoverySnapshot = ownerState.snapshot
+        }
+      }
+      await this.restoreOwnerState(recoverySnapshot, {config: recoveryConfig, releaseConfigs, resumeDrains: false, singletonReleaseIds})
+      this.persistenceEnabled = true
       await this.guardian.reconcileInventory()
+      if (this.generationTransition && this.generationTransition.phase !== "committed" && !this.generationTransition.error) {
+        try {
+          await this.resumeGenerationTransition()
+        } catch (error) {
+          this.logger("release generation transition recovery failed", {error: error instanceof Error ? error.message : String(error), releaseId: this.generationTransition.candidateReleaseId})
+        }
+      }
       for (const release of this.releases.values()) {
-        if (release.state === "draining") void this.drainAndPrune(release, release.config)
+        if (release.state === "draining" && this.shouldResumeDrain(release)) void this.drainAndPrune(release, release.config)
       }
     }
     else {
@@ -166,7 +203,7 @@ export default class RollbridgeDaemon {
       if (this.listenerHandoff || this.ownerRetired) return
       for (const release of this.releases.values()) {
         release.resumeDrainAfterOwnerHandoff()
-        if (release.state === "draining") void this.drainAndPrune(release, release.config)
+        if (release.state === "draining" && this.shouldResumeDrain(release)) void this.drainAndPrune(release, release.config)
       }
     })
   }
@@ -182,17 +219,22 @@ export default class RollbridgeDaemon {
    * @param {import("./config.js").RollbridgeConfig} [options.config] - Owner config for daemon-wide processes.
    * @param {Record<string, import("./config.js").RollbridgeConfig>} [options.releaseConfigs] - Exact generation configs.
    * @param {boolean} [options.resumeDrains] - Whether to resume draining generations immediately.
+   * @param {Record<string, string>} [options.singletonReleaseIds] - Exact release owner for each singleton registration.
+   * @param {boolean} [options.synchronizeLifecycleRoles] - Whether the caller owns guardian role mutation authority.
    */
-  async restoreOwnerState(snapshot, {config = this.config, releaseConfigs = /** @type {Record<string, import("./config.js").RollbridgeConfig>} */ ({}), resumeDrains = true} = {}) {
+  async restoreOwnerState(snapshot, {config = this.config, releaseConfigs = /** @type {Record<string, import("./config.js").RollbridgeConfig>} */ ({}), resumeDrains = true, singletonReleaseIds = snapshot.singletonReleaseIds || /** @type {Record<string, string>} */ ({}), synchronizeLifecycleRoles = true} = {}) {
     if (!Array.isArray(snapshot.releases) || (snapshot.activeReleaseId !== null && typeof snapshot.activeReleaseId !== "string")) {
       throw new Error("Owner recovery state is partial or corrupt; active release metadata is required.")
     }
+    this.generationTransition = snapshot.generationTransition ? {...snapshot.generationTransition} : undefined
     if (snapshot.activeReleaseId === null && snapshot.releases.length === 0) return
     this.bootstrap = snapshot.bootstrap ? {...snapshot.bootstrap} : undefined
     this.ownerTransition = snapshot.ownerTransition ? {...snapshot.ownerTransition} : undefined
 
     for (const releaseStatus of snapshot.releases) {
-      if (releaseStatus.state !== "active" && releaseStatus.state !== "draining") continue
+      const transitionCandidate = this.generationTransition?.candidateReleaseId === releaseStatus.releaseId && this.generationTransition.phase !== "committed"
+
+      if (releaseStatus.state !== "active" && releaseStatus.state !== "draining" && !transitionCandidate) continue
       const release = new ReleaseGroup({
         config: releaseConfigs[releaseStatus.releaseId] || config,
         logger: this.logger,
@@ -205,7 +247,7 @@ export default class RollbridgeDaemon {
         shouldStart: () => !this.stopping
       })
 
-      await release.restore(releaseStatus)
+      await release.restore(releaseStatus, {synchronizeLifecycleRole: synchronizeLifecycleRoles})
       this.releases.set(release.releaseId, release)
       if (release.releaseId === snapshot.activeReleaseId) this.activeRelease = release
     }
@@ -232,15 +274,19 @@ export default class RollbridgeDaemon {
     }
     for (const singletonStatus of snapshot.singletons) {
       const processConfig = config.processes.find((candidate) => candidate.id === singletonStatus.id && candidate.policy === "singleton")
+      const singletonReleaseId = singletonReleaseIds[singletonStatus.id] || definitionRelease.releaseId
+      const singletonRelease = this.releases.get(singletonReleaseId)
 
       if (!processConfig) throw new Error(`Owner recovery state contains unknown singleton ${singletonStatus.id}.`)
-      const singleton = definitionRelease.buildProcess(processConfig, {guardianKey: `singleton:${definitionRelease.releaseId}:${singletonStatus.id}`})
+      if (!singletonRelease) throw new Error(`Owner recovery state contains singleton ${singletonStatus.id} for unknown release ${singletonReleaseId}.`)
+      const singleton = singletonRelease.buildProcess(processConfig, {guardianKey: `singleton:${singletonReleaseId}:${singletonStatus.id}`})
 
       await this.recoverGuardianProcess(singleton)
       this.singletons.set(singletonStatus.id, singleton)
+      this.singletonReleaseIds.set(singletonStatus.id, singletonReleaseId)
     }
     for (const release of this.releases.values()) {
-      if (resumeDrains && release.state === "draining") void this.drainAndPrune(release, release.config)
+      if (resumeDrains && release.state === "draining" && this.shouldResumeDrain(release)) void this.drainAndPrune(release, release.config)
     }
     this.logger("owner state recovered", {activeReleaseId: this.activeRelease?.releaseId ?? null, releases: this.releases.size})
   }
@@ -252,6 +298,7 @@ export default class RollbridgeDaemon {
       authority: this.ownerAuthority(),
       config: this.config,
       releaseConfigs: Object.fromEntries([...this.releases].map(([releaseId, release]) => [releaseId, release.config])),
+      singletonReleaseIds: Object.fromEntries(this.singletonReleaseIds),
       snapshot: this.status()
     })
   }
@@ -289,10 +336,10 @@ export default class RollbridgeDaemon {
       prepared = legacyBridge.prepared
     }
     const preparedStatus = await this.guardian.replacementStatus()
-    const transfer = /** @type {{config: import("./config.js").RollbridgeConfig, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, snapshot: OwnerRecoverySnapshot}} */ (prepared.ownerState)
+    const transfer = /** @type {PrivateOwnerState} */ (prepared.ownerState)
 
     if (!transfer?.config || !transfer.snapshot) throw new Error("Committed owner published incomplete replacement state")
-    await this.restoreOwnerState(transfer.snapshot, {config: transfer.config, releaseConfigs: transfer.releaseConfigs, resumeDrains: false})
+    await this.restoreOwnerState(transfer.snapshot, {config: transfer.config, releaseConfigs: transfer.releaseConfigs, resumeDrains: false, singletonReleaseIds: transfer.singletonReleaseIds, synchronizeLifecycleRoles: false})
     for (const release of this.releases.values()) release.preserveConfigOnRetirement = true
     this.logger("owner replacement candidate prepared", {activeReleaseId: this.activeRelease?.releaseId ?? null, replacementId: prepared.replacementId})
 
@@ -346,6 +393,7 @@ export default class RollbridgeDaemon {
         authority: this.ownerAuthority(),
         config: this.config,
         releaseConfigs: Object.fromEntries([...this.releases].map(([releaseId, release]) => [releaseId, release.config])),
+        singletonReleaseIds: Object.fromEntries(this.singletonReleaseIds),
         snapshot: this.status()
       })
 
@@ -362,12 +410,13 @@ export default class RollbridgeDaemon {
       }
       await committed
       committedAuthority = true
+      await Promise.all([...this.releases.values()].map((release) => release.synchronizeLifecycleRoles()))
       if (!legacyBridge && incumbentControl && [...this.releases.values()].some((release) => release.hasTransferredConnections())) {
         this.incumbentListenerControl = incumbentControl
         retainIncumbentControl = true
       }
       for (const release of this.releases.values()) {
-        if (release.state === "draining") void this.drainAndPrune(release, release.config)
+        if (release.state === "draining" && this.shouldResumeDrain(release)) void this.drainAndPrune(release, release.config)
       }
       this.startStatePersistence()
       await this.persistState({throwOnError: true})
@@ -490,6 +539,7 @@ export default class RollbridgeDaemon {
         authority: persistedAuthority,
         config: this.config,
         releaseConfigs: Object.fromEntries(persisted.releases.map((release) => [release.releaseId, this.config])),
+        singletonReleaseIds: Object.fromEntries(persisted.singletons.map((singleton) => [singleton.id, persisted.activeReleaseId]).filter((entry) => entry[1] !== null)),
         snapshot: persisted
       }
       const upgradedIdentity = /** @type {{pid?: number, socketPath: string, token: string}} */ ({
@@ -1003,7 +1053,7 @@ export default class RollbridgeDaemon {
     if (!handoff || this.ownerRetired) return
     for (const release of this.releases.values()) {
       release.resumeDrainAfterOwnerHandoff()
-      if (release.state === "draining") void this.drainAndPrune(release, release.config)
+      if (release.state === "draining" && this.shouldResumeDrain(release)) void this.drainAndPrune(release, release.config)
     }
     if (handoff.proxy) {
       await this.startProxy()
@@ -1029,6 +1079,16 @@ export default class RollbridgeDaemon {
     this.assertReloadCompatible(nextConfig)
 
     const newReleaseId = releaseId || revision || new Date().toISOString().replace(/[^0-9]/g, "")
+    const transition = this.generationTransition
+
+    if (transition && transition.phase !== "committed") {
+      this.assertExactGenerationTransition(transition, {config: nextConfig, releaseId: newReleaseId, releasePath, revision: revision || newReleaseId})
+      return await this.resumeGenerationTransition()
+    }
+    if (transition?.phase === "committed" && transition.candidateReleaseId === newReleaseId && this.activeRelease?.releaseId === newReleaseId) {
+      this.assertExactGenerationTransition(transition, {config: nextConfig, releaseId: newReleaseId, releasePath, revision: revision || newReleaseId})
+      return {activeReleaseId: newReleaseId, previousReleaseId: transition.previousReleaseId}
+    }
     const release = new ReleaseGroup({
       config: nextConfig,
       logger: this.logger,
@@ -1061,6 +1121,25 @@ export default class RollbridgeDaemon {
 
     const previousRelease = this.activeRelease
 
+    if (nextConfig.processes.some((processConfig) => processConfig.lifecycle.activateCommand !== undefined)) {
+      this.config = nextConfig
+      this.releases.set(release.releaseId, release)
+      const now = new Date().toISOString()
+
+      this.generationTransition = /** @type {GenerationTransition} */ ({
+        candidateReleaseId: release.releaseId,
+        candidateReleasePath: release.releasePath,
+        candidateRevision: release.revision,
+        configDigest: ownerConfigDigest(nextConfig),
+        phase: "candidate_ready",
+        previousReleaseId: previousRelease?.releaseId ?? null,
+        startedAt: now,
+        updatedAt: now
+      })
+      await this.checkpointGenerationTransition()
+      return await this.resumeGenerationTransition()
+    }
+
     this.config = nextConfig
     this.releases.set(release.releaseId, release)
     release.activate()
@@ -1092,6 +1171,138 @@ export default class RollbridgeDaemon {
       previousReleaseId: previousRelease ? previousRelease.releaseId : null,
       ...(retirementFailure && previousRelease ? {retirement: {error: retirementFailure, releaseId: previousRelease.releaseId, status: "quiescence_failed"}} : {})
     }
+  }
+
+  /**
+   * Continues one exact durable generation transition without an internal retry loop.
+   * @returns {Promise<Record<string, JsonValue>>} Deploy result after commit.
+   */
+  async resumeGenerationTransition() {
+    const transition = this.generationTransition
+
+    if (!transition) throw new Error("No release generation transition to resume")
+    const release = this.releases.get(transition.candidateReleaseId)
+    const previousRelease = transition.previousReleaseId ? this.releases.get(transition.previousReleaseId) : undefined
+
+    if (!release) throw new Error(`Generation transition candidate ${transition.candidateReleaseId} is not retained`)
+    if (transition.previousReleaseId && !previousRelease) throw new Error(`Generation transition previous release ${transition.previousReleaseId} is not retained`)
+
+    if (transition.phase === "candidate_ready") {
+      if (previousRelease) await this.updateGenerationTransition("retiring_previous")
+      else await this.updateGenerationTransition("previous_retired")
+    }
+
+    if (transition.phase === "retiring_previous") {
+      try {
+        const retirementConfig = previousRelease?.config
+
+        // Every entry into this journaled phase represents one explicit attempt. Reset the
+        // process-local acknowledgement cache so exact resume can replay an ambiguous or
+        // failed idempotent retirement once; there is no internal retry loop.
+        await previousRelease?.beginRetirement(retirementConfig, {retry: true})
+      } catch (error) {
+        const failure = previousRelease?.retirementError ?? (error instanceof Error ? error.message : String(error))
+
+        await this.failGenerationTransition(failure)
+        this.logger("release retirement quiescence failed", {error: failure, releaseId: previousRelease?.releaseId ?? null})
+        throw error
+      }
+      await this.updateGenerationTransition("previous_retired")
+    }
+
+    if (transition.phase === "previous_retired") await this.updateGenerationTransition("activating_candidate")
+
+    if (transition.phase === "activating_candidate") {
+      try {
+        await release.activateGeneration()
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error)
+
+        await this.failGenerationTransition(failure)
+        this.logger("release generation activation failed", {error: failure, releaseId: release.releaseId})
+        throw error
+      }
+
+      // Activation acknowledgement and the logical proxy commit deliberately share one
+      // synchronous continuation: no awaited failure boundary may leave jobs active while
+      // Rollbridge still points new traffic at the retired generation.
+      release.activate()
+      this.activeRelease = release
+      transition.phase = "committed_pending"
+      transition.error = undefined
+      transition.updatedAt = new Date().toISOString()
+      this.logger("traffic switched", {previousReleaseId: previousRelease?.releaseId ?? null, releaseId: release.releaseId})
+    }
+
+    if (transition.phase === "committed_pending") {
+      await this.checkpointGenerationTransition()
+      this.refreshServiceDefinitions(release)
+      if (previousRelease) {
+        const retirementConfig = previousRelease.config
+
+        void this.drainAndPrune(previousRelease, retirementConfig)
+      }
+      try {
+        await this.replaceSingletons(release)
+      } catch (error) {
+        await this.failGenerationTransition(error instanceof Error ? error.message : String(error))
+        throw error
+      }
+      transition.phase = "committed"
+      transition.error = undefined
+      transition.updatedAt = new Date().toISOString()
+      await this.checkpointGenerationTransition()
+    }
+
+    return {activeReleaseId: release.releaseId, previousReleaseId: previousRelease?.releaseId ?? null}
+  }
+
+  /**
+   * @param {GenerationTransition} transition - Pending or committed exact transition.
+   * @param {{config: import("./config.js").RollbridgeConfig, releaseId: string, releasePath: string, revision: string}} candidate - Requested identity.
+   */
+  assertExactGenerationTransition(transition, candidate) {
+    if (transition.candidateReleaseId !== candidate.releaseId || transition.candidateReleasePath !== candidate.releasePath || transition.candidateRevision !== candidate.revision || transition.configDigest !== ownerConfigDigest(candidate.config)) {
+      throw new Error(`Release generation transition for ${transition.candidateReleaseId} is unresolved at ${transition.phase}; only the exact same release, path, revision, and config authority may resume it`)
+    }
+  }
+
+  /** @param {GenerationTransitionPhase} phase - Durable phase to enter. */
+  async updateGenerationTransition(phase) {
+    if (!this.generationTransition) throw new Error("No release generation transition to update")
+    this.generationTransition.phase = phase
+    this.generationTransition.error = undefined
+    this.generationTransition.updatedAt = new Date().toISOString()
+    await this.checkpointGenerationTransition()
+  }
+
+  /** @param {string} error - Exact failed phase diagnostic. */
+  async failGenerationTransition(error) {
+    if (!this.generationTransition) throw new Error("No release generation transition to fail")
+    this.generationTransition.error = error
+    this.generationTransition.updatedAt = new Date().toISOString()
+    await this.checkpointGenerationTransition()
+  }
+
+  /** Persists and publishes the exact transition boundary before another external effect. */
+  async checkpointGenerationTransition() {
+    // Publish private exact definitions before the public secret-safe state can expose
+    // a newer transition authority. A replacement can then reconstruct every guardian
+    // registration without reading commands or environment values from statePath.
+    await this.publishOwnerState()
+    const write = this.persistState({throwOnError: true})
+
+    if (write) await write
+  }
+
+  /**
+   * @param {ReleaseGroup} release - Retained release.
+   * @returns {boolean} Whether its stop drain may run now.
+   */
+  shouldResumeDrain(release) {
+    const transition = this.generationTransition
+
+    return !transition || transition.phase === "committed_pending" || transition.phase === "committed" || transition.previousReleaseId !== release.releaseId
   }
 
   /**
@@ -1162,6 +1373,7 @@ export default class RollbridgeDaemon {
    * @returns {Promise<Record<string, JsonValue>>} The rollback result.
    */
   async rollback({releaseId} = {}) {
+    this.assertNoUnresolvedGenerationTransition("rollback")
     const target = releaseId ? this.releases.get(releaseId) : this.previousRelease()
 
     if (!target) {
@@ -1285,6 +1497,9 @@ export default class RollbridgeDaemon {
       if (processConfig.policy !== "singleton") continue
 
       const previous = this.singletons.get(processConfig.id)
+      const previousReleaseId = this.singletonReleaseIds.get(processConfig.id)
+
+      if (previous && previousReleaseId === release.releaseId && previous.status().state === "running") continue
 
       if (previous) {
         await previous.stop()
@@ -1294,6 +1509,7 @@ export default class RollbridgeDaemon {
       const singleton = release.buildProcess(processConfig, {guardianKey: `singleton:${release.releaseId}:${processConfig.id}`})
 
       this.singletons.set(processConfig.id, singleton)
+      this.singletonReleaseIds.set(processConfig.id, release.releaseId)
       await singleton.start("deploy")
     }
   }
@@ -1309,6 +1525,7 @@ export default class RollbridgeDaemon {
    * @returns {Promise<Record<string, JsonValue>>} The ids that were restarted.
    */
   async restartProcesses({policy, processId} = {}) {
+    this.assertNoUnresolvedGenerationTransition("restart")
     if (policy === "proxied" || (processId !== undefined && this.isProxiedId(processId))) {
       throw new Error('The proxied process cannot be restarted in place; use "rollbridge deploy" for a zero-downtime replacement.')
     }
@@ -1322,7 +1539,7 @@ export default class RollbridgeDaemon {
     for (const target of targets) {
       this.logger("process restart requested", {processId: target.id})
       await target.process.stop()
-      await target.process.start("manual")
+      await target.process.start("manual", target.process.lifecycle.activateCommand ? "active" : undefined)
     }
 
     return {restarted: targets.map((target) => target.id)}
@@ -1383,6 +1600,7 @@ export default class RollbridgeDaemon {
    * @returns {Promise<void>} Resolves when stopped.
    */
   async stopRelease(releaseId) {
+    this.assertNoUnresolvedGenerationTransition("stop")
     const release = releaseId ? this.releases.get(releaseId) : this.activeRelease
 
     if (!release) throw new Error(`Release not found: ${releaseId || "active"}`)
@@ -1392,6 +1610,15 @@ export default class RollbridgeDaemon {
     this.logger("release stopped", {releaseId: release.releaseId})
     this.pruneStoppedReleases()
     this.persistState()
+  }
+
+  /** @param {string} operation - Mutating control operation. */
+  assertNoUnresolvedGenerationTransition(operation) {
+    const transition = this.generationTransition
+
+    if (transition && transition.phase !== "committed") {
+      throw new Error(`Cannot ${operation} while release generation transition ${transition.candidateReleaseId} is unresolved at ${transition.phase}; resume the exact deploy first`)
+    }
   }
 
   /**
@@ -1450,9 +1677,10 @@ export default class RollbridgeDaemon {
       ...status,
       events,
       persistedAt: new Date().toISOString(),
+      ...(this.hasActivationLifecycle() ? {singletonReleaseIds: Object.fromEntries(this.singletonReleaseIds)} : {}),
       ...(this.guardianIdentity ? {recovery: {
         configDigest: this.ownerRecoveryConfigDigest(),
-        format: 1,
+        format: this.hasActivationLifecycle() ? 2 : 1,
         guardian: this.guardianIdentity,
         reconnectGraceMs: this.config.ownerRecovery?.reconnectGraceMs
       }} : {})
@@ -1470,6 +1698,11 @@ export default class RollbridgeDaemon {
       })
 
     return this.pendingWrite
+  }
+
+  /** @returns {boolean} Whether the current authority uses explicit generation activation. */
+  hasActivationLifecycle() {
+    return Boolean(this.generationTransition) || this.config.processes.some((processConfig) => processConfig.lifecycle.activateCommand !== undefined) || [...this.releases.values()].some((release) => release.config.processes.some((processConfig) => processConfig.lifecycle.activateCommand !== undefined))
   }
 
   /**
@@ -1656,6 +1889,7 @@ export default class RollbridgeDaemon {
       control: {...this.config.control},
       daemonPid: process.pid,
       daemonRuntime: this.runtime ? {...this.runtime} : undefined,
+      generationTransition: this.generationTransition ? {...this.generationTransition} : undefined,
       ownerRecovery: this.guardian ? {configDigest: this.ownerRecoveryConfigDigest()} : undefined,
       ownerTransition: this.ownerTransition ? {...this.ownerTransition} : undefined,
       orphans: [...this.orphans],
@@ -1665,7 +1899,7 @@ export default class RollbridgeDaemon {
         upstreamHost: this.config.proxy.upstreamHost
       },
       releaseReferences: [...this.releases.values()]
-        .filter((release) => release.state === "active" || release.state === "draining")
+        .filter((release) => release.state === "active" || release.state === "draining" || (this.generationTransition?.phase !== "committed" && this.generationTransition?.candidateReleaseId === release.releaseId))
         .map((release) => ({releaseId: release.releaseId, releasePath: release.releasePath})),
       releases: [...this.releases.values()].map((release) => release.status()),
       services: [...this.services.entries()].map(([id, processInstance]) => ({
