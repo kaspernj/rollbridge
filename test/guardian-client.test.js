@@ -4,6 +4,7 @@ import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -213,31 +214,66 @@ test("replacement staging rejects owner state published after prepare", async ()
 test("retired owner replacement requires unchanged authority and the exact control path absent", async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const processKey = "release:v1:worker"
   const controlPath = path.join(fixture.root, "rollbridge.sock")
   const authority = {configDigest: "incumbent", runtime: null}
   const nextAuthority = {configDigest: "candidate", runtime: null}
   const snapshot = {activeReleaseId: "v1", control: {path: controlPath}}
 
   try {
+    await candidate.connect()
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement("missing-transaction", ""), /requires a process key/)
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement("missing-transaction", processKey), /is not registered/)
+    candidate.disconnect()
+    await fixture.client.process(processKey, definition("retained-worker")).start()
     await fixture.client.publishOwnerState({authority, snapshot})
     await candidate.connect()
     const changed = await candidate.prepareOwnerReplacement(authority, nextAuthority)
 
     await candidate.stageOwnerReplacement(changed.replacementId, {authority: nextAuthority, snapshot})
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId), /unchanged owner authority/)
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId, processKey), /unchanged owner authority/)
     await candidate.abortOwnerReplacement(changed.replacementId)
 
     const occupied = await candidate.prepareOwnerReplacement(authority, authority)
 
     await candidate.stageOwnerReplacement(occupied.replacementId, {authority, snapshot})
     await fs.writeFile(controlPath, "occupied\n")
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId), /control socket .* still exists/)
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId, processKey), /control socket .* still exists/)
     await candidate.abortOwnerReplacement(occupied.replacementId)
     await fixture.client.shutdown()
     await fixture.client.guardianExit()
   } finally {
     candidate.disconnect()
     await cleanupGuardian(fixture)
+  }
+})
+
+test("retired owner replacement commit carries the exact retained process key", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-guardian-retired-commit-key-"))
+  const socketPath = path.join(root, "guardian.sock")
+  const token = "retained-guardian-token"
+  const processKey = "release:v1:worker"
+  const guardian = net.createServer((socket) => {
+    socket.setEncoding("utf8")
+    socket.once("data", (chunk) => {
+      const request = JSON.parse(String(chunk))
+      const response = request.key === processKey
+        ? {id: request.id, result: {committed: true}}
+        : {error: `Guardian ${request.command} requires a process key`, id: request.id}
+
+      socket.write(`${JSON.stringify(response)}\n`)
+    })
+  })
+  const candidate = new GuardianClient({socketPath, token})
+
+  try {
+    await new Promise((resolve, reject) => guardian.listen(socketPath, () => resolve(undefined)).once("error", reject))
+    await candidate.connect()
+    await candidate.commitRetiredOwnerReplacement("replacement-v1", processKey)
+  } finally {
+    candidate.disconnect()
+    if (guardian.listening) await new Promise((resolve) => guardian.close(() => resolve(undefined)))
+    await fs.rm(root, {force: true, recursive: true})
   }
 })
 

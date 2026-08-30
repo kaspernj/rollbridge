@@ -249,45 +249,109 @@ test("ensure-daemon atomically replaces incompatible config, socket, and package
   }
 })
 
-test("same-authority replacement commits after a retired incumbent already removed its control socket", async () => {
+test("cross-version replacement commits through a retained process-key guardian after the public socket is removed", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-retired-control-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "state.json")
+  const compatibilitySocketPath = path.join(root, "retained-guardian.sock")
+  const configPath = path.join(root, "rollbridge.cjs")
   const releasePath = path.join(root, "v1")
-  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath}))
-  const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  const compatibilitySockets = new Set()
+  let compatibilityGuardian
+  let committedProcessKey
+  let owner
   let replacement
 
   try {
     await fs.mkdir(releasePath)
     await makeFifo(path.join(releasePath, "worker.fifo"))
-    await owner.start()
-    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
-    await Promise.all([...owner.releases.values()].map((release) => release.quiesce()))
-    await owner.closeServer(owner.controlServer)
-    await owner.removeControlSocket()
-    await owner.closeServer(owner.proxyServer)
-    const retired = owner.status()
-    const processState = retired.releases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
+    await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
+    const retired = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const retiredReleases = /** @type {{processes: {id: string, pid?: number, state: string}[]}[]} */ (retired.releases)
+    const processState = retiredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
 
-    assert.deepEqual(processState?.map(({state}) => state), ["quiesced", "quiesced"])
-    assert.equal((await owner.guardian?.replacementStatus())?.ownerClaimed, true)
+    assert.deepEqual(processState?.map(({state}) => state), ["running", "running"])
+    await fs.rm(socketPath)
     await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+    const guardianSocketPath = state.recovery.guardian.socketPath
+    const expectedProcessKey = "release:v1:worker"
 
-    replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    compatibilityGuardian = net.createServer((candidateSocket) => {
+      const guardianSocket = net.createConnection(guardianSocketPath)
+      let buffer = ""
+
+      compatibilitySockets.add(candidateSocket)
+      compatibilitySockets.add(guardianSocket)
+      candidateSocket.setEncoding("utf8")
+      candidateSocket.once("close", () => compatibilitySockets.delete(candidateSocket))
+      guardianSocket.once("close", () => compatibilitySockets.delete(guardianSocket))
+      guardianSocket.on("data", (chunk) => candidateSocket.write(chunk))
+      candidateSocket.on("data", (chunk) => {
+        buffer += chunk
+        let newline = buffer.indexOf("\n")
+
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline)
+          const request = JSON.parse(line)
+
+          buffer = buffer.slice(newline + 1)
+          if (request.command === "commit-retired-owner-replacement") {
+            if (request.key !== expectedProcessKey) {
+              candidateSocket.write(`${JSON.stringify({error: `Guardian ${request.command} requires a process key`, id: request.id})}\n`)
+            } else {
+              committedProcessKey = request.key
+              candidateSocket.write(`${JSON.stringify({error: `Guardian ${request.command} requires the committed owner`, id: request.id})}\n`)
+            }
+            newline = buffer.indexOf("\n")
+            continue
+          }
+          guardianSocket.write(`${line}\n`)
+          newline = buffer.indexOf("\n")
+        }
+      })
+    })
+    await listenUnix(compatibilityGuardian, compatibilitySocketPath)
+    state.recovery.guardian.socketPath = compatibilitySocketPath
+    await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+
+    assert.ok(owner.pid)
+    replacement = new RollbridgeDaemon({
+      config: normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath})),
+      configPath,
+      legacyIncumbentPid: owner.pid,
+      logger: () => {}
+    })
     await replacement.replaceIncompatibleOwner()
+    if (owner.exitCode === null && owner.signalCode === null) await once(owner, "exit")
     const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const recoveredReleases = /** @type {{processes: {id: string, pid?: number, state: string}[]}[]} */ (recovered.releases)
 
     assert.equal(recovered.activeReleaseId, "v1")
     assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
     assert.deepEqual(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state})), processState)
+    assert.equal(committedProcessKey, expectedProcessKey)
+    for (const {pid} of processState || []) {
+      if (typeof pid !== "number") throw new Error("Retained process is missing its PID")
+      assert.doesNotThrow(() => process.kill(pid, 0))
+    }
   } finally {
-    const shutdown = replacement?.controlCommandsReady ? replacement.shutdown().catch(() => {}) : owner.shutdown().catch(() => {})
-
-    await Promise.all([fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => {}), shutdown])
-    owner.guardian?.disconnect()
+    if (replacement?.controlCommandsReady) {
+      await Promise.all([
+        fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => {}),
+        replacement.shutdown().catch(() => {})
+      ])
+    }
+    if (owner && owner.exitCode === null && owner.signalCode === null) {
+      owner.kill("SIGKILL")
+      await once(owner, "exit")
+    }
     replacement?.guardian?.disconnect()
+    for (const socket of compatibilitySockets) socket.destroy()
+    if (compatibilityGuardian?.listening) await closeServer(compatibilityGuardian)
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }

@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import http from "node:http"
 import net from "node:net"
 import crypto from "node:crypto"
+import path from "node:path"
 import {isDeepStrictEqual} from "node:util"
 import httpProxy from "http-proxy"
 import {loadConfig} from "./config.js"
@@ -412,7 +413,15 @@ export default class RollbridgeDaemon {
 
       if (!staged.committed) {
         if (retiredIncumbentControl) {
-          await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId)
+          const retainedProcessKey = legacyGuardianKeys(transfer.snapshot)[0]
+
+          if (!retainedProcessKey) throw new Error("Retired owner replacement requires an exact guardian-owned process registration in durable state")
+          try {
+            await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, retainedProcessKey)
+          } catch (error) {
+            if (!(error instanceof Error) || error.message !== "Guardian commit-retired-owner-replacement requires the committed owner") throw error
+            await this.retireRetainedProtocolOwner(transfer.snapshot)
+          }
         } else {
           try {
             if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
@@ -617,6 +626,21 @@ export default class RollbridgeDaemon {
       mode: "legacy-first-upgrade",
       reason: "pre-split guardian and daemon lacked atomic replacement protocol"
     })
+  }
+
+  /**
+   * Retires an exact stale daemon so its retained guardian can commit the staged candidate.
+   * @param {OwnerRecoverySnapshot} snapshot - Guardian-published incumbent identity.
+   */
+  async retireRetainedProtocolOwner(snapshot) {
+    if (!this.legacyIncumbentPid) throw new Error("Retained guardian compatibility requires the exact incumbent PID from ensure-daemon")
+    if (snapshot.daemonPid !== this.legacyIncumbentPid) throw new Error("Retained guardian compatibility incumbent PID does not match committed owner state")
+    await verifyRetiredDaemonProcess(this.legacyIncumbentPid, this.configPath, snapshot.daemonRuntime)
+    this.logger("retained guardian owner retirement boundary", {
+      incumbentPid: this.legacyIncumbentPid,
+      reason: "retained guardian requires committed-owner disconnect to complete the staged replacement"
+    })
+    process.kill(this.legacyIncumbentPid, "SIGKILL")
   }
 
   /**
@@ -2027,6 +2051,28 @@ async function verifyLegacyDaemonProcess(pid, configPath, socketPath) {
 
   if (!startTime) throw new Error(`Could not attest start time for legacy daemon PID ${pid}`)
   return startTime
+}
+
+/**
+ * Attests the exact guardian-published daemon when its public socket is already absent.
+ * @param {number} pid - Incumbent PID from ensure-daemon and guardian state.
+ * @param {string | undefined} configPath - Exact daemon config path.
+ * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined} runtime - Guardian-published runtime identity.
+ */
+async function verifyRetiredDaemonProcess(pid, configPath, runtime) {
+  if (pid === process.pid) throw new Error("Retained guardian compatibility cannot retire the replacement candidate")
+  if (!configPath) throw new Error("Retained guardian compatibility requires the daemon's exact config path")
+  const args = await processArguments(pid, "retained guardian owner daemon")
+  const daemonIndex = args.indexOf("daemon")
+  const configIndex = args.indexOf("--config")
+
+  if (daemonIndex < 1 || configIndex < 0 || args[configIndex + 1] !== configPath) {
+    throw new Error(`Daemon PID ${pid} does not match the exact retained guardian owner config command`)
+  }
+  if (runtime && path.resolve(args[daemonIndex - 1]) !== path.join(runtime.path, "bin", "rollbridge")) {
+    throw new Error(`Daemon PID ${pid} does not match the committed retained guardian runtime`)
+  }
+  await verifyProcessUser(pid, "retained guardian owner daemon")
 }
 
 /**

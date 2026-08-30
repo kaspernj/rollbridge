@@ -299,6 +299,8 @@ async function execute(request, socket) {
   }
 
   if (request.command === "commit-retired-owner-replacement") {
+    if (!request.key) throw new Error("Guardian commit-retired-owner-replacement requires a process key")
+    if (!processes.has(request.key)) throw new Error(`Guardian process ${request.key} is not registered`)
     requireReplacement(socket, request)
     if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
     if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
