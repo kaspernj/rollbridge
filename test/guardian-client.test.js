@@ -210,6 +210,32 @@ test("replacement staging rejects owner state published after prepare", async ()
   }
 })
 
+test("replacement abort notifies both the candidate and committed owner", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const authority = {configDigest: "incumbent", runtime: null}
+  const nextAuthority = {configDigest: "candidate", runtime: null}
+
+  try {
+    await fixture.client.publishOwnerState({authority, snapshot: {activeReleaseId: "v1"}})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, nextAuthority)
+    const incumbentAborted = fixture.client.waitForEvent("replacement-aborted")
+    const candidateAborted = candidate.waitForEvent("replacement-aborted")
+
+    await candidate.abortOwnerReplacement(prepared.replacementId)
+    assert.deepEqual(await Promise.all([incumbentAborted, candidateAborted]), [
+      {event: "replacement-aborted", reason: "Replacement candidate aborted the prepared transaction"},
+      {event: "replacement-aborted", reason: "Replacement candidate aborted the prepared transaction"}
+    ])
+    await fixture.client.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("retired owner replacement commit carries its exact recovered process key", async () => {
   const client = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
   const replacementId = "prepared-replacement"
@@ -222,6 +248,54 @@ test("retired owner replacement commit carries its exact recovered process key",
   }
 
   await client.commitRetiredOwnerReplacement(replacementId, processKey)
+})
+
+test("guardian owner-replacement capability classification is explicit and fail closed", async () => {
+  const current = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+
+  current.request = async (request) => {
+    assert.deepEqual(request, {command: "owner-replacement-capabilities"})
+    return {
+      commands: ["commit-retired-owner-replacement", "future-command"],
+      futureField: {supported: true},
+      protocol: "owner-replacement",
+      version: 2
+    }
+  }
+  assert.equal(await current.ownerReplacementProtocol(), "atomic")
+
+  for (const [commitDiagnostic, expected] of [
+    ["Owner replacement transaction is not the prepared candidate", "atomic"],
+    ["Guardian commit-retired-owner-replacement requires a process key", "legacy"],
+    ["Unknown guardian command: commit-retired-owner-replacement", "legacy"]
+  ]) {
+    const older = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+    const requests = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ ([])
+
+    older.request = async (request) => {
+      requests.push(request)
+      if (request.command === "owner-replacement-capabilities") throw new Error("Guardian owner-replacement-capabilities requires a process key")
+      throw new Error(commitDiagnostic)
+    }
+    assert.equal(await older.ownerReplacementProtocol(), expected)
+    assert.deepEqual(requests, [
+      {command: "owner-replacement-capabilities"},
+      {command: "commit-retired-owner-replacement", replacementId: "owner-replacement-capability-probe"}
+    ])
+  }
+
+  for (const fixture of [
+    async () => ({commands: [], protocol: "owner-replacement", version: 1}),
+    async (/** @type {Record<string, import("../src/json.js").JsonValue>} */ request) => {
+      if (request.command === "owner-replacement-capabilities") throw new Error("Guardian owner-replacement-capabilities requires a process key")
+      throw new Error("Guardian commit-retired-owner-replacement requires the committed owner")
+    }
+  ]) {
+    const ambiguous = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+
+    ambiguous.request = fixture
+    await assert.rejects(() => ambiguous.ownerReplacementProtocol(), /invalid owner-replacement capability response|ambiguous retired-owner capability response/)
+  }
 })
 
 test("reserved process recovery rejects a reconstructed definition with different provenance", async () => {

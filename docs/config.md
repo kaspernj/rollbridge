@@ -151,8 +151,10 @@ config reloads remain unchanged.
 
 The first upgrade from an authenticated pre-replacement Rollbridge guardian and
 daemon uses an explicitly disruptive compatibility bridge because that legacy
-owner cannot transfer listeners on Node 20. Rollbridge attests the exact guardian
-and daemon processes, sockets, runtime/config authority, and durable process
+owner cannot transfer listeners on Node 20. A retained guardian that supports
+replacement prepare/stage but lacks the retired-owner commit command is explicitly
+classified and uses the same bridge. Rollbridge attests the exact guardian and
+daemon processes, sockets, runtime/config authority, and durable process
 registrations before retiring the legacy listeners. Managed process PIDs and
 release state remain supervised, but live proxy/control connections may close.
 The resulting status includes `ownerTransition: {disruptive: true, mode:
