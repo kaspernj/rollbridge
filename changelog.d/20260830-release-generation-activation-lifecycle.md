@@ -13,4 +13,10 @@
   release across recovery, manual restart reaches the active handoff coordinator,
   unresolved transitions retain both release definitions and reject
   config-authority-changing owner replacements, and live activation-mode changes
-  require a daemon restart. Hook-free configs keep their existing deploy behavior.
+   require a daemon restart. Hook-free configs keep their existing deploy behavior.
+
+### Fixed
+
+- Serialize active-role restoration with retirement, reject empty lifecycle
+  commands, bound guardian process-log forwarding for stalled clients, and keep
+  a claimed recovery owner alive until replacement listener retirement.

@@ -67,6 +67,7 @@ export default class ManagedProcess extends EventEmitter {
     this.intentionalStop = false
     this.lifecycleRole = /** @type {LifecycleRole} */ ("candidate")
     this.intentionalStopSignal = /** @type {ProcessExitSignal | undefined} */ (undefined)
+    this.lifecycleRestoreBarrier = /** @type {Promise<void> | undefined} */ (undefined)
     this.quiescePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.quiesceError = /** @type {Error | undefined} */ (undefined)
     this.stopPromise = /** @type {Promise<void> | undefined} */ (undefined)
@@ -118,16 +119,26 @@ export default class ManagedProcess extends EventEmitter {
         void (async () => {
           this.startedAtMs = Date.now()
           this.lastStartReason = reason
+          const lifecycleRestore = this.restoreLifecycleRole()
+          const lifecycleRestoreBarrier = lifecycleRestore.then(() => undefined, () => undefined)
+
+          this.lifecycleRestoreBarrier = lifecycleRestoreBarrier
           try {
-            await this.restoreLifecycleRole()
+            await lifecycleRestore
           } catch (error) {
             this.state = "failed"
             this.logger("process lifecycle role restoration failed", {error: error instanceof Error ? error.message : String(error), id: this.id, role: this.lifecycleRole})
             reject(error)
             return
+          } finally {
+            if (this.lifecycleRestoreBarrier === lifecycleRestoreBarrier) this.lifecycleRestoreBarrier = undefined
           }
           if (this.child !== child) {
             reject(new Error(`Process ${this.id} exited before lifecycle role ${this.lifecycleRole} was restored`))
+            return
+          }
+          if (this.intentionalStop || this.state !== "starting") {
+            reject(new Error(`Process ${this.id} was quiesced before lifecycle role ${this.lifecycleRole} was restored`))
             return
           }
           this.state = "running"
@@ -443,6 +454,7 @@ export default class ManagedProcess extends EventEmitter {
         clearTimeout(this.restartTimer)
         this.restartTimer = undefined
       }
+      if (this.lifecycleRestoreBarrier) await this.lifecycleRestoreBarrier
       if (!this.child?.pid) {
         this.state = "stopped"
         if (this.lifecycle.activateCommand) this.lifecycleRole = "retired"

@@ -464,6 +464,48 @@ test("activateStrict rejects an activation request when its process is not runni
   assert.equal(hookRan, false)
 })
 
+test("quiesce waits for active-role restoration before retiring a restarted process", async () => {
+  const managed = buildLongLived(() => false)
+  const hooks = /** @type {string[]} */ ([])
+  /** @type {() => void} */
+  let allowActivation = () => {}
+  /** @type {() => void} */
+  let markActivationStarted = () => {}
+  const activationAllowed = new Promise((resolve) => { allowActivation = () => resolve(undefined) })
+  const activationStarted = new Promise((resolve) => { markActivationStarted = () => resolve(undefined) })
+
+  managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0, quietCommand: "jobs retire"}
+  managed.runHook = async (_command, _timeoutMs, label) => {
+    if (label === "activate command") {
+      hooks.push("activate:start")
+      markActivationStarted()
+      await activationAllowed
+      hooks.push("activate:end")
+    } else {
+      hooks.push("quiet")
+    }
+    return undefined
+  }
+  const start = assert.rejects(() => managed.start("crash", "active"), /quiesced before lifecycle role active was restored/)
+
+  try {
+    await activationStarted
+    const quiesce = managed.quiesceStrict()
+
+    await Promise.resolve()
+    assert.deepEqual(hooks, ["activate:start"], "retirement must not race ahead of role restoration")
+    allowActivation()
+    await Promise.all([start, quiesce])
+    assert.deepEqual(hooks, ["activate:start", "activate:end", "quiet"])
+    assert.equal(managed.status().state, "quiesced")
+    assert.equal(managed.lifecycleRole, "retired")
+  } finally {
+    allowActivation()
+    await start.catch(() => {})
+    await managed.stop()
+  }
+})
+
 test("sends the configured stopSignal as the graceful stop signal", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rollbridge-stop-signal-"))
   const readyPath = path.join(dir, "ready")

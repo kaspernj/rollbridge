@@ -62,6 +62,10 @@ if (legacyGuardian) await legacyGuardian.connect()
 const processes = new Map()
 /** @type {Set<net.Socket>} */
 const clients = new Set()
+/** @type {Set<net.Socket>} */
+const backpressuredClients = new Set()
+/** @type {Map<net.Socket, Map<string, string>>} */
+const pendingStatusEvents = new Map()
 /** @type {Map<net.Socket, number>} */
 const ownerUpdatesInFlight = new Map()
 /** @type {net.Socket | undefined} */
@@ -118,10 +122,13 @@ const server = net.createServer((socket) => {
   // An abruptly killed daemon can reset its private guardian connection. Keep the
   // durable guardian alive; the close handler below releases only that owner claim.
   socket.on("error", () => socket.destroy())
+  socket.on("drain", () => flushStatusEvents(socket))
   let buffer = ""
 
   socket.once("close", () => {
     clients.delete(socket)
+    backpressuredClients.delete(socket)
+    pendingStatusEvents.delete(socket)
     const waiterIndex = claimWaiters.findIndex((waiter) => waiter.socket === socket)
 
     if (waiterIndex >= 0) {
@@ -405,6 +412,7 @@ async function execute(request, socket) {
 
   if (request.command === "commit-retired-owner-replacement") {
     requireReplacement(socket, request)
+    requireProcess(request)
     if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
     if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
     const controlPath = ownerControlPath(ownerState)
@@ -503,7 +511,7 @@ async function execute(request, socket) {
       : new ManagedProcess(managedDefinition)
 
     managedProcess.on("log", (entry) => {
-      broadcast({entry, event: "process-log", key: request.key, status: managedProcess.status()})
+      broadcast({entry, event: "process-log", key: request.key})
     })
     if (recoversLegacyProcess && "recover" in managedProcess && typeof managedProcess.recover === "function") await managedProcess.recover()
 
@@ -513,10 +521,7 @@ async function execute(request, socket) {
     return managedProcess.status()
   }
 
-  if (!request.key) throw new Error(`Guardian ${request.command} requires a process key`)
-  const record = processes.get(request.key)
-
-  if (!record) throw new Error(`Guardian process ${request.key} is not registered`)
+  const record = requireProcess(request)
 
   if (request.command !== "status") requireOwner(socket, request.command)
 
@@ -649,9 +654,10 @@ function commitReplacement() {
 
   cancelOwnerRestart()
   const supersededRestartChild = ownerRestartChild
+  const restartChildIsIncumbent = Boolean(previousOwner && supersededRestartChild?.pid === ownerClientPid)
 
   clearOwnerRestartTracking()
-  if (supersededRestartChild) killDetachedProcessGroup(supersededRestartChild)
+  if (supersededRestartChild && !restartChildIsIncumbent) killDetachedProcessGroup(supersededRestartChild)
   for (const waiter of claimWaiters.splice(0)) {
     clearTimeout(waiter.timer)
     waiter.reject(new Error("Durable owner authority changed while the claim was queued"))
@@ -703,6 +709,18 @@ function publishReplacementCommitted(committedClient, committedId) {
  */
 function requireReplacement(socket, request) {
   if (replacementClient !== socket || request.replacementId !== replacementId) throw new Error("Owner replacement transaction is not the prepared candidate")
+}
+
+/**
+ * @param {GuardianRequest} request - Keyed guardian request.
+ * @returns {{desired: boolean, process: ManagedProcess, provenance: string}} Exact registered process.
+ */
+function requireProcess(request) {
+  if (!request.key) throw new Error(`Guardian ${request.command} requires a process key`)
+  const record = processes.get(request.key)
+
+  if (!record) throw new Error(`Guardian process ${request.key} is not registered`)
+  return record
 }
 
 /**
@@ -786,7 +804,38 @@ async function finishShutdown() {
 function broadcast(event) {
   const line = `${JSON.stringify(event)}\n`
 
-  for (const client of clients) if (!client.destroyed) client.write(line)
+  for (const client of clients) {
+    if (client.destroyed) continue
+    if (backpressuredClients.has(client)) {
+      if (event.event !== "process-log" && typeof event.key === "string") {
+        const pending = pendingStatusEvents.get(client) || new Map()
+
+        pending.set(event.key, line)
+        pendingStatusEvents.set(client, pending)
+      }
+      continue
+    }
+    if (!client.write(line)) backpressuredClients.add(client)
+  }
+}
+
+/**
+ * Flushes one latest status-bearing event per process after socket backpressure clears.
+ * @param {net.Socket} client - Drained guardian client socket.
+ */
+function flushStatusEvents(client) {
+  backpressuredClients.delete(client)
+  const pending = pendingStatusEvents.get(client)
+
+  if (!pending || client.destroyed) return
+  for (const [key, line] of pending) {
+    pending.delete(key)
+    if (!client.write(line)) {
+      backpressuredClients.add(client)
+      break
+    }
+  }
+  if (pending.size === 0) pendingStatusEvents.delete(client)
 }
 
 /** @returns {void} Grants the next queued owner claim. */

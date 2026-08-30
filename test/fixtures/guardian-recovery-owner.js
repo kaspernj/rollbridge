@@ -9,6 +9,8 @@ const claimDelayMs = Number(process.env.GUARDIAN_CLAIM_DELAY_MS || 0)
 const descendantPath = process.env.GUARDIAN_DESCENDANT_PATH
 const exitAfterClaim = process.env.GUARDIAN_EXIT_AFTER_CLAIM === "1"
 const markerPath = process.env.GUARDIAN_MARKER_PATH
+const replacementCommittedPath = process.env.GUARDIAN_REPLACEMENT_COMMITTED_PATH
+const replacementPreparedPath = process.env.GUARDIAN_REPLACEMENT_PREPARED_PATH
 const skipReady = process.env.GUARDIAN_SKIP_READY === "1"
 const socketPath = process.env.GUARDIAN_SOCKET_PATH
 const startedLogPath = process.env.GUARDIAN_STARTED_LOG_PATH
@@ -20,6 +22,8 @@ if (!authorityText || !markerPath || !socketPath || !token || !Number.isInteger(
 }
 
 let buffer = ""
+/** @type {string | undefined} */
+let replacementId
 
 if (startedPath) fs.writeFileSync(startedPath, `${process.pid}\n`)
 if (startedLogPath) fs.appendFileSync(startedLogPath, `${JSON.stringify({at: Date.now(), pid: process.pid})}\n`)
@@ -51,10 +55,19 @@ const timer = setTimeout(() => {
         if (exitAfterClaim) process.exit(47)
         if (!skipReady) socket.write(`${JSON.stringify({command: "owner-ready", id: 2, ownerPid: process.pid, token})}\n`)
       }
+      if (response.event === "replacement-prepared") {
+        replacementId = response.replacementId
+        if (replacementPreparedPath) fs.writeFileSync(replacementPreparedPath, `${replacementId}\n`)
+      }
+      if (response.id === 3 && replacementCommittedPath) fs.writeFileSync(replacementCommittedPath, `${replacementId}\n`)
       newline = buffer.indexOf("\n")
     }
   })
   process.once("SIGUSR1", () => socket.destroy())
+  process.once("SIGUSR2", () => {
+    if (!replacementId) throw new Error("Guardian recovery owner fixture has no prepared replacement")
+    socket.write(`${JSON.stringify({command: "commit-owner-replacement", id: 3, replacementId, token})}\n`)
+  })
 }, claimDelayMs)
 
 timer.unref()

@@ -212,9 +212,12 @@ export default class GuardianClient {
     await this.request({command: "commit-owner-replacement", replacementId})
   }
 
-  /** @param {string} replacementId - Same-authority transaction whose incumbent listener is absent. */
-  async commitRetiredOwnerReplacement(replacementId) {
-    await this.request({command: "commit-retired-owner-replacement", replacementId})
+  /**
+   * @param {string} replacementId - Same-authority transaction whose incumbent listener is absent.
+   * @param {string} key - Exact recovered guardian process proving candidate reconstruction.
+   */
+  async commitRetiredOwnerReplacement(replacementId, key) {
+    await this.request({command: "commit-retired-owner-replacement", key, replacementId})
   }
 
   /** @param {string} replacementId - Committed transaction awaiting incumbent retirement. */
@@ -453,7 +456,10 @@ class GuardianProcess extends ManagedProcess {
   onGuardianEvent(event) {
     if (event.status) this.cachedStatus = asProcessStatus(event.status)
     if (event.event === "process-log") {
-      this.emit("log", asProcessLog(event.entry))
+      const entry = asProcessLog(event.entry)
+
+      this.cachedStatus = {...this.cachedStatus, logs: [...this.cachedStatus.logs, entry].slice(-this.outputLines)}
+      this.emit("log", entry)
       return
     }
     if (event.message === "process started") this.emit("started")

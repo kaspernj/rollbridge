@@ -441,6 +441,7 @@ export default class RollbridgeDaemon {
     let retiredIncumbentControl = false
     let retainIncumbentControl = false
     let incumbentControl = legacyBridge?.incumbentControl
+    let committed = /** @type {Promise<Error | undefined> | undefined} */ (undefined)
 
     try {
       if (this.config.control.path !== transfer.snapshot.control.path) {
@@ -489,12 +490,26 @@ export default class RollbridgeDaemon {
         finalControlPublished = true
         this.boundControlPath = this.config.control.path
       }
-      const committed = this.guardian.waitForEvent("replacement-committed")
+      committed = this.guardian.waitForEvent("replacement-committed").then(
+        () => undefined,
+        (error) => error instanceof Error ? error : new Error(String(error))
+      )
       const staged = await this.guardian.stageOwnerReplacement(prepared.replacementId, this.transferableOwnerState())
 
       if (!staged.committed) {
         if (retiredIncumbentControl) {
-          await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId)
+          const processKey = this.guardian.processes.keys().next().value
+
+          if (!processKey) throw new Error("Retired owner replacement requires an exact recovered guardian process registration")
+          try {
+            await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, processKey)
+          } catch (error) {
+            if (!(error instanceof Error) || error.message !== "Guardian commit-retired-owner-replacement requires the committed owner") throw error
+            throw new Error(
+              "Cannot safely complete atomic owner replacement through the older retained guardian while the incumbent control socket is absent; incumbent owner and connections were preserved",
+              {cause: error}
+            )
+          }
         } else {
           try {
             if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
@@ -507,7 +522,9 @@ export default class RollbridgeDaemon {
           }
         }
       }
-      await committed
+      const commitmentError = await committed
+
+      if (commitmentError) throw commitmentError
       committedAuthority = true
       if (retiredIncumbentControl) {
         await fs.rename(stagingControlPath, this.config.control.path)
@@ -553,6 +570,13 @@ export default class RollbridgeDaemon {
         }
       } else {
         this.guardian.disconnect()
+      }
+      if (committed) {
+        const commitmentError = await committed
+
+        if (commitmentError && commitmentError !== error && commitmentError.message !== "Process guardian connection closed") {
+          abortError = commitmentError
+        }
       }
       incumbentControl?.close()
       if (legacyBridge?.boundaryCrossed) {

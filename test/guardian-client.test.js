@@ -97,15 +97,58 @@ test("guardian forwards each retained output line to its exact process proxy", a
     command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`console.log(${JSON.stringify(marker)})`)}`
   })
   const logged = once(processInstance, "log")
+  const forwarded = fixture.client.waitForEvent("process-log")
   const exitedFirst = once(processInstance, "exit").then(() => { throw new Error("Guardian process exited before forwarding retained output") })
 
   try {
     await processInstance.start()
     const [entry] = await Promise.race([logged, exitedFirst])
+    const event = await forwarded
 
     assert.equal(entry.line, marker)
+    assert.equal(event.status, undefined, "log events must not resend the complete retained process status")
     assert.ok(processInstance.status().logs.some((candidate) => candidate.line === marker))
   } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian delivers the final process status after dropping logs for a backpressured client", async () => {
+  const fixture = await createGuardian()
+  const gatePath = path.join(fixture.root, "write-output")
+  const script = `const fs = require("node:fs"); const {once} = require("node:events"); (async () => { while (!fs.existsSync(${JSON.stringify(gatePath)})) await new Promise((resolve) => setTimeout(resolve, 5)); const line = "x".repeat(1024) + "\\n"; for (let index = 0; index < 8192; index += 1) if (!process.stdout.write(line)) await once(process.stdout, "drain"); })()`
+  const processInstance = fixture.client.process("backpressured-output", {
+    ...definition("backpressured-output"),
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`
+  })
+  const socket = fixture.client.socket
+
+  assert.ok(socket)
+  try {
+    await processInstance.start()
+    const pid = processInstance.status().pid
+
+    assert.ok(pid)
+    const finalStatus = fixture.client.waitForEvent("process")
+
+    socket.pause()
+    await fs.writeFile(gatePath, "write\n")
+    await waitForProcessExit(pid, 10000)
+    socket.resume()
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timeout
+
+    try {
+      await Promise.race([
+        finalStatus,
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("Guardian did not flush the final process status after backpressure")), 3000) })
+      ])
+    } finally {
+      clearTimeout(timeout)
+    }
+    assert.equal(processInstance.status().state, "failed")
+  } finally {
+    socket.resume()
     await cleanupGuardian(fixture)
   }
 })
@@ -418,6 +461,53 @@ test("guardian preserves restart backoff when an unready owner disconnect aborts
   }
 })
 
+test("replacement commit preserves a claimed guardian restart child through listener retirement", async () => {
+  const fixture = await createGuardian()
+  const claimedPath = path.join(fixture.root, "claimed-restart-owner.pid")
+  const committedPath = path.join(fixture.root, "claimed-restart-owner-committed.txt")
+  const preparedPath = path.join(fixture.root, "claimed-restart-owner-prepared.txt")
+  const authority = {configDigest: "old", runtime: null}
+  const nextAuthority = {configDigest: "new", runtime: null}
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  /** @type {number | undefined} */
+  let recoveredOwnerPid
+
+  try {
+    await fixture.client.publishOwnerState(claimingRecoveryOwnerState(fixture, authority, claimedPath, {
+      ready: false,
+      replacementCommittedPath: committedPath,
+      replacementPreparedPath: preparedPath,
+      startupTimeoutMs: 5000
+    }))
+    fixture.client.disconnect()
+    const incumbentPid = Number((await waitForFileText(claimedPath)).trim())
+
+    recoveredOwnerPid = incumbentPid
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, nextAuthority)
+
+    await waitForFileText(preparedPath, new RegExp(prepared.replacementId))
+    await candidate.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: {activeReleaseId: null}})
+    const published = candidate.waitForEvent("replacement-committed")
+
+    process.kill(incumbentPid, "SIGUSR2")
+    await Promise.race([waitForFileText(committedPath, new RegExp(prepared.replacementId)), published])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.doesNotThrow(() => process.kill(incumbentPid, 0), "claimed incumbent must survive replacement commit until its listeners retire")
+
+    process.kill(incumbentPid, "SIGUSR1")
+    await published
+    await candidate.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    candidate.disconnect()
+    if (recoveredOwnerPid) {
+      try { process.kill(-recoveredOwnerPid, "SIGKILL") } catch (_error) { /* Exact recovered fixture owner already exited. */ }
+    }
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("ownerless replacement commit kills a superseded restart candidate", async () => {
   const fixture = await createGuardian()
   const delayedClaimPath = path.join(fixture.root, "delayed-claim.pid")
@@ -582,32 +672,68 @@ test("replacement staging rejects owner state published after prepare", async ()
   }
 })
 
+test("retired owner replacement commit carries its exact recovered process key", async () => {
+  const client = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+  const replacementId = "prepared-replacement"
+  const processKey = "release:v1:worker"
+
+  client.request = async (request) => {
+    if (!request.key) throw new Error(`Guardian ${request.command} requires a process key`)
+    assert.deepEqual(request, {command: "commit-retired-owner-replacement", key: processKey, replacementId})
+    return {committed: true}
+  }
+
+  await client.commitRetiredOwnerReplacement(replacementId, processKey)
+})
+
 test("retired owner replacement requires unchanged authority and the exact control path absent", async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const contender = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
   const controlPath = path.join(fixture.root, "rollbridge.sock")
+  const processKey = "release:v1:worker"
   const authority = {configDigest: "incumbent", runtime: null}
   const nextAuthority = {configDigest: "candidate", runtime: null}
   const snapshot = {activeReleaseId: "v1", control: {path: controlPath}}
 
   try {
+    await fixture.client.process(processKey, definition("worker")).recover()
     await fixture.client.publishOwnerState({authority, snapshot})
     await candidate.connect()
     const changed = await candidate.prepareOwnerReplacement(authority, nextAuthority)
 
     await candidate.stageOwnerReplacement(changed.replacementId, {authority: nextAuthority, snapshot})
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId), /unchanged owner authority/)
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId, processKey), /unchanged owner authority/)
     await candidate.abortOwnerReplacement(changed.replacementId)
 
     const occupied = await candidate.prepareOwnerReplacement(authority, authority)
 
     await candidate.stageOwnerReplacement(occupied.replacementId, {authority, snapshot})
     await fs.writeFile(controlPath, "occupied\n")
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId), /control socket .* still exists/)
+    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId, processKey), /control socket .* still exists/)
     await candidate.abortOwnerReplacement(occupied.replacementId)
-    await fixture.client.shutdown()
+
+    await fs.rm(controlPath)
+    const ready = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(ready.replacementId, {authority, snapshot})
+    await contender.connect()
+    await assert.rejects(
+      () => contender.request({command: "commit-retired-owner-replacement", key: processKey, replacementId: ready.replacementId}),
+      /not the prepared candidate/
+    )
+    await assert.rejects(
+      () => candidate.commitRetiredOwnerReplacement(ready.replacementId, "release:v1:wrong"),
+      /process .* is not registered/
+    )
+    const committed = candidate.waitForEvent("replacement-committed")
+
+    await candidate.commitRetiredOwnerReplacement(ready.replacementId, processKey)
+    await committed
+    await candidate.shutdown()
     await fixture.client.guardianExit()
   } finally {
+    contender.disconnect()
     candidate.disconnect()
     await cleanupGuardian(fixture)
   }
@@ -980,7 +1106,7 @@ function recoveryOwnerState(authority, markerPath, marker, reconnectGraceMs) {
  * @param {{client: GuardianClient, root: string, token: string}} fixture - Guardian fixture.
  * @param {Record<string, import("../src/json.js").JsonValue>} authority - Recovery authority.
  * @param {string} markerPath - Claim marker path.
- * @param {{claimDelayMs?: number, descendantPath?: string, exitAfterClaim?: boolean, ready?: boolean, startedLogPath?: string, startedPath?: string, startupTimeoutMs?: number}} [options] - Optional recovery behavior.
+ * @param {{claimDelayMs?: number, descendantPath?: string, exitAfterClaim?: boolean, ready?: boolean, replacementCommittedPath?: string, replacementPreparedPath?: string, startedLogPath?: string, startedPath?: string, startupTimeoutMs?: number}} [options] - Optional recovery behavior.
  * @returns {Record<string, import("../src/json.js").JsonValue>} Guardian owner state.
  */
 function claimingRecoveryOwnerState(fixture, authority, markerPath, options = {}) {
@@ -996,6 +1122,8 @@ function claimingRecoveryOwnerState(fixture, authority, markerPath, options = {}
           ...(options.descendantPath ? {GUARDIAN_DESCENDANT_PATH: options.descendantPath} : {}),
           ...(options.exitAfterClaim ? {GUARDIAN_EXIT_AFTER_CLAIM: "1"} : {}),
           GUARDIAN_MARKER_PATH: markerPath,
+          ...(options.replacementCommittedPath ? {GUARDIAN_REPLACEMENT_COMMITTED_PATH: options.replacementCommittedPath} : {}),
+          ...(options.replacementPreparedPath ? {GUARDIAN_REPLACEMENT_PREPARED_PATH: options.replacementPreparedPath} : {}),
           ...(options.ready === false ? {GUARDIAN_SKIP_READY: "1"} : {}),
           GUARDIAN_SOCKET_PATH: fixture.client.socketPath,
           ...(options.startedLogPath ? {GUARDIAN_STARTED_LOG_PATH: options.startedLogPath} : {}),

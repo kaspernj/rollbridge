@@ -355,10 +355,10 @@ function normalizeLifecycle(value, key, issues) {
   /** @type {LifecycleConfig} */
   const lifecycle = {drainTimeoutMs: nonNegativeOrDefault(drainTimeoutMs, `${key}.drainTimeoutMs`, issues, 0, false)}
 
-  if (value.activateCommand !== undefined) lifecycle.activateCommand = normalizeString(value.activateCommand, `${key}.activateCommand`, issues)
-  if (value.quietCommand !== undefined) lifecycle.quietCommand = normalizeString(value.quietCommand, `${key}.quietCommand`, issues)
-  if (value.drainCommand !== undefined) lifecycle.drainCommand = normalizeString(value.drainCommand, `${key}.drainCommand`, issues)
-  if (value.stopCommand !== undefined) lifecycle.stopCommand = normalizeString(value.stopCommand, `${key}.stopCommand`, issues)
+  if (value.activateCommand !== undefined) lifecycle.activateCommand = normalizeString(value.activateCommand, `${key}.activateCommand`, issues, {nonEmpty: true})
+  if (value.quietCommand !== undefined) lifecycle.quietCommand = normalizeString(value.quietCommand, `${key}.quietCommand`, issues, {nonEmpty: true})
+  if (value.drainCommand !== undefined) lifecycle.drainCommand = normalizeString(value.drainCommand, `${key}.drainCommand`, issues, {nonEmpty: true})
+  if (value.stopCommand !== undefined) lifecycle.stopCommand = normalizeString(value.stopCommand, `${key}.stopCommand`, issues, {nonEmpty: true})
 
   if (lifecycle.drainCommand !== undefined && lifecycle.drainTimeoutMs <= 0) {
     issues.push({fix: `Set ${key}.drainTimeoutMs to a positive number to bound ${key}.drainCommand; with 0 the drain step is skipped and the command never runs.`, message: `${key}.drainCommand requires a positive ${key}.drainTimeoutMs`})
@@ -853,7 +853,7 @@ function normalizePortRange(value, key, issues) {
  * @param {JsonValue} value - Raw value.
  * @param {string} key - Config key.
  * @param {ConfigIssue[]} issues - Issue collector.
- * @param {{default?: string}} [options] - Options.
+ * @param {{default?: string, nonEmpty?: boolean}} [options] - Options.
  * @returns {string} Normalized string, or a placeholder when invalid.
  */
 function normalizeString(value, key, issues, options = {}) {
@@ -869,6 +869,10 @@ function normalizeString(value, key, issues, options = {}) {
     issues.push({fix: `Set ${key} to a string value.`, message: `${key} must be a string`})
 
     return options.default ?? ""
+  }
+
+  if (options.nonEmpty && !value.trim()) {
+    issues.push({fix: `Set ${key} to a non-empty command string.`, message: `${key} must not be empty`})
   }
 
   return value

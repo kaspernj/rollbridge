@@ -231,6 +231,10 @@ test("validateConfig accepts one durable handoff activation lifecycle and reject
   const invalidType = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: 5, quietCommand: "jobs retire"}}]})
   assert.ok(invalidType.issues.some((issue) => issue.message === "processes[1].lifecycle.activateCommand must be a string"))
 
+  const emptyCommands = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: " ", quietCommand: ""}}]})
+  assert.ok(emptyCommands.issues.some((issue) => issue.message === "processes[1].lifecycle.activateCommand must not be empty"))
+  assert.ok(emptyCommands.issues.some((issue) => issue.message === "processes[1].lifecycle.quietCommand must not be empty"))
+
   const missingRetirement = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: "jobs activate"}}]})
   assert.ok(missingRetirement.issues.some((issue) => /requires lifecycle\.quietCommand/.test(issue.message)))
 
