@@ -1437,11 +1437,11 @@ export default class RollbridgeDaemon {
   /**
    * Persists a state snapshot (status plus recent events) to statePath, atomically and
    * fire-and-forget unless the caller awaits the returned write. A failed write is logged.
-   * @param {{throwOnError?: boolean}} [options] - Whether a write failure rejects the returned promise.
+   * @param {{allowStopping?: boolean, throwOnError?: boolean}} [options] - Write behavior.
    * @returns {Promise<void> | undefined} The queued write, or undefined when persistence is disabled.
    */
-  persistState({throwOnError = false} = {}) {
-    if (!this.statePath || !this.persistenceEnabled || this.stopping) return
+  persistState({allowStopping = false, throwOnError = false} = {}) {
+    if (!this.statePath || !this.persistenceEnabled || (this.stopping && !allowStopping)) return
 
     const statePath = this.statePath
     const status = /** @type {Record<string, JsonValue>} */ (secretSafeStateValue(this.status()))
@@ -1533,26 +1533,35 @@ export default class RollbridgeDaemon {
       clearInterval(this.persistTimer)
       this.persistTimer = undefined
     }
-    this.persistenceEnabled = false
     if (this.pendingWrite) await this.pendingWrite
     this.stateCleanupEnabled = false
     this.controlClosePromise = this.closeServer(this.controlServer)
     for (const socket of this.controlSockets) if (socket !== completionSocket) socket.destroy()
+    if (this.activeRelease) {
+      await this.activeRelease.beginRetirement(this.activeRelease.config)
+      this.activeRelease = undefined
+    }
     await Promise.all([
       ...[...this.services.values()].map((processInstance) => processInstance.quiesce()),
       ...[...this.singletons.values()].map((processInstance) => processInstance.quiesce()),
       ...[...this.startingReleases].map((release) => release.quiesce()),
       ...[...this.releases.values()].map((release) => release.quiesce())
     ])
+    await this.persistState({allowStopping: true, throwOnError: true})
+    this.persistenceEnabled = false
     await this.removeControlSocket()
     void this.closeServer(this.proxyServer)
-    void Promise.allSettled([
-      ...[...this.services.values()].map((processInstance) => processInstance.stop()),
-      ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
-      ...[...this.startingReleases].map((release) => release.stop()),
-      ...[...this.releases.values()].map((release) => release.stop())
-    ])
-    this.guardian?.disconnect()
+    if (this.guardian) {
+      await this.guardian.retireOwner()
+      this.guardian.disconnect()
+    } else {
+      void Promise.allSettled([
+        ...[...this.services.values()].map((processInstance) => processInstance.stop()),
+        ...[...this.singletons.values()].map((processInstance) => processInstance.stop()),
+        ...[...this.startingReleases].map((release) => release.stop()),
+        ...[...this.releases.values()].map((release) => release.stop())
+      ])
+    }
     this.logger("external owner retired", {attestation, status: "draining"})
   }
 

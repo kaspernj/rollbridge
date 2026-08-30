@@ -26,7 +26,8 @@ test("external owner retirement releases guardian authority without losing its g
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-retirement-recovery-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "rollbridge.state.json")
-  const drainPath = path.join(root, "drained")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
   const config = normalizeConfig({
     application: "owner-retirement-recovery-test",
     control: {path: socketPath},
@@ -35,7 +36,7 @@ test("external owner retirement releases guardian authority without losing its g
       {
         command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
         id: "worker",
-        lifecycle: {drainCommand: `while [ ! -f ${JSON.stringify(drainPath)} ]; do sleep 0.01; done`, drainTimeoutMs: 3000},
+        lifecycle: {drainCommand: "printf started > \"$ROLLBRIDGE_RELEASE_PATH/drain-started\"; while [ ! -f \"$ROLLBRIDGE_RELEASE_PATH/drained\" ]; do sleep 0.01; done", drainTimeoutMs: 3000},
         nonBlockingDrain: true,
         policy: "companion"
       },
@@ -54,24 +55,39 @@ test("external owner retirement releases guardian authority without losing its g
   let replacement
 
   try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path)])
     await retired.start()
-    await retired.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
+    await retired.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
     const before = retired.status()
-    const processPids = before.releases[0]?.processes.map(({pid}) => pid).filter((pid) => pid !== undefined)
-
-    assert.ok(processPids?.length)
-    await retired.retireOwner({attestation: `sha256:${"a".repeat(64)}`})
+    const v1WorkerPid = releaseProcessPid(before, "v1", "worker")
 
     replacement = new RollbridgeDaemon({config, logger: () => {}})
+    await replacement.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    const v2WorkerPid = releaseProcessPid(replacement.status(), "v2", "worker")
+
+    await retired.retireOwner({attestation: `sha256:${"a".repeat(64)}`})
     await replacement.start({reportOrphans: false})
     const recovered = replacement.status()
+    const v1 = recovered.releases.find(({releaseId}) => releaseId === "v1")
+    const v2 = recovered.releases.find(({releaseId}) => releaseId === "v2")
 
-    assert.equal(recovered.activeReleaseId, "v1")
-    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath: root}])
-    assert.deepEqual(recovered.releases[0]?.processes.map(({pid}) => pid).filter((pid) => pid !== undefined), processPids)
-    for (const pid of processPids) assert.doesNotThrow(() => process.kill(pid, 0), `preserved process ${pid} must remain alive`)
+    assert.equal(recovered.activeReleaseId, "v2", "the prestarted candidate must remain active")
+    assert.deepEqual(recovered.releaseReferences.sort((a, b) => a.releaseId.localeCompare(b.releaseId)), [
+      {releaseId: "v1", releasePath: v1Path},
+      {releaseId: "v2", releasePath: v2Path}
+    ])
+    assert.equal(v1?.state, "draining")
+    assert.equal(v1?.processes.find(({id}) => id === "worker")?.pid, v1WorkerPid)
+    assert.equal(v1?.processes.find(({id}) => id === "worker")?.state, "quiesced")
+    assert.equal(v2?.state, "active")
+    assert.equal(v2?.processes.find(({id}) => id === "worker")?.pid, v2WorkerPid)
+    assert.equal(v2?.processes.find(({id}) => id === "worker")?.state, "running")
+    await waitForFile(path.join(v1Path, "drain-started"), 1000)
+    await fs.writeFile(path.join(v1Path, "drained"), "done\n")
+    await waitForProcessExit(v1WorkerPid, 1000)
+    assert.equal(isAlive(v2WorkerPid), true, "the active candidate worker must remain usable while the old generation drains")
   } finally {
-    await fs.writeFile(drainPath, "drained\n").catch(() => {})
+    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "drained"), "done\n").catch(() => {})))
     await replacement?.shutdown().catch(() => {})
     retired.guardian?.disconnect()
     await stopFixtureGuardian(statePath)
@@ -745,16 +761,19 @@ async function waitForState(statePath, predicate) {
 
 /**
  * @param {string} filePath - File whose creation is the transaction-boundary signal.
+ * @param {number} [timeoutMs] - Optional bounded wait.
  * @returns {Promise<void>} Resolves when the file exists.
  */
-async function waitForFile(filePath) {
+async function waitForFile(filePath, timeoutMs) {
   try {
     await fs.access(filePath)
     return
   } catch (error) {
     if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
   }
-  const watcher = fs.watch(path.dirname(filePath))
+  const controller = timeoutMs === undefined ? undefined : new AbortController()
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller?.abort(), timeoutMs)
+  const watcher = fs.watch(path.dirname(filePath), {signal: controller?.signal})
 
   try {
     for await (const change of watcher) {
@@ -766,9 +785,24 @@ async function waitForFile(filePath) {
         if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
       }
     }
+  } catch (error) {
+    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw new Error(`Timed out waiting for ${filePath}`, {cause: error})
+    throw error
   } finally {
+    clearTimeout(timer)
     await watcher.return?.()
   }
+}
+
+/**
+ * @param {number} pid - Exact fixture process.
+ * @param {number} timeoutMs - Bounded exit wait.
+ */
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+
+  while (isAlive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(isAlive(pid), false, `process ${pid} did not exit within ${timeoutMs}ms`)
 }
 
 /**
