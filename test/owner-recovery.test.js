@@ -95,6 +95,163 @@ test("external owner retirement releases guardian authority without losing its g
   }
 })
 
+test("exact bootstrap restores the committed generation after external owner retirement", async () => {
+  const fixture = await createFixture()
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const retired = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+
+  try {
+    await retired.start()
+    await retired.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    await retired.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    const committed = retired.status()
+    const v1WorkerPid = releaseProcessPid(committed, "v1", "worker")
+    const retiredPids = [
+      ...(committed.releases.find(({releaseId}) => releaseId === "v2")?.processes.map(({pid}) => pid) || []),
+      ...committed.services.map(({process}) => process.pid),
+      ...committed.singletons.map(({process}) => process.pid)
+    ].filter((pid) => typeof pid === "number")
+
+    assert.equal(committed.activeReleaseId, "v2")
+    assert.equal(committed.generationTransition?.phase, "committed")
+    await retired.retireOwner({attestation: `sha256:${"a".repeat(64)}`})
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    await Promise.all(retiredPids.map((pid) => waitForProcessExit(pid, 3000)))
+
+    recovered = new RollbridgeDaemon({
+      bootstrap: {releaseId: "v2", releasePath: v2Path, revision: "v2"},
+      config,
+      configPath: fixture.configPath,
+      logger: () => {}
+    })
+    await recovered.start({exposeControl: false})
+    const recoveryOrder = /** @type {string[]} */ ([])
+    const recoveredCandidate = recovered.releases.get("v2")
+    const recoveredService = recovered.services.get("beacon")
+
+    assert.ok(recoveredCandidate && recoveredService && recovered.singletons.get("singleton"))
+    const activateGeneration = recoveredCandidate.activateGeneration.bind(recoveredCandidate)
+    const startService = recoveredService.start.bind(recoveredService)
+    const replaceSingletons = recovered.replaceSingletons.bind(recovered)
+
+    recoveredCandidate.activateGeneration = async () => {
+      recoveryOrder.push("activate")
+      await activateGeneration()
+    }
+    recoveredService.start = async (...args) => {
+      assert.equal(recovered?.generationTransition?.phase, "restoring_committed")
+      recoveryOrder.push("service")
+      await startService(...args)
+    }
+    recovered.replaceSingletons = async (...args) => {
+      recoveryOrder.push("singleton")
+      await replaceSingletons(...args)
+    }
+    await recovered.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    const active = recovered.status()
+
+    assert.equal(active.activeReleaseId, "v2")
+    assert.equal(active.generationTransition?.phase, "committed")
+    assert.equal(active.releases.find(({releaseId}) => releaseId === "v1")?.state, "draining")
+    assert.equal(releaseProcessPid(active, "v1", "worker"), v1WorkerPid)
+    assert.equal(isAlive(v1WorkerPid), true, "the retained previous generation must keep draining")
+    assert.equal(active.releases.find(({releaseId}) => releaseId === "v2")?.state, "active")
+    assert.ok(active.releases.find(({releaseId}) => releaseId === "v2")?.processes.every(({pid, state}) => typeof pid === "number" && state === "running"))
+    assert.ok(active.services.every(({process}) => typeof process.pid === "number" && process.state === "running"))
+    assert.ok(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running"))
+    assert.deepEqual(recoveryOrder, ["service", "activate", "singleton"], "candidate activation must precede post-commit singleton completion")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
+  } finally {
+    if (recovered) {
+      const activeRecovery = recovered.status().activeReleaseId === "v2"
+      const shutdown = recovered.shutdown()
+
+      await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      if (activeRecovery) await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => undefined)
+    }
+    retired.guardian?.disconnect()
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("journaled committed bootstrap recovery resumes after a restart begins", async () => {
+  const fixture = await createFixture()
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const retired = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  /** @type {RollbridgeDaemon | undefined} */
+  let interrupted
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+
+  try {
+    await retired.start()
+    await retired.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    await retired.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    const committed = retired.status()
+    const v1WorkerPid = releaseProcessPid(committed, "v1", "worker")
+    const retiringPids = [
+      ...(committed.releases.find(({releaseId}) => releaseId === "v2")?.processes.map(({pid}) => pid) || []),
+      ...committed.services.map(({process}) => process.pid),
+      ...committed.singletons.map(({process}) => process.pid)
+    ].filter((pid) => typeof pid === "number")
+
+    await retired.retireOwner({attestation: `sha256:${"b".repeat(64)}`})
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    await Promise.all(retiringPids.map((pid) => waitForProcessExit(pid, 3000)))
+
+    const bootstrap = {releaseId: "v2", releasePath: v2Path, revision: "v2"}
+    interrupted = new RollbridgeDaemon({bootstrap, config, configPath: fixture.configPath, logger: () => {}})
+    await interrupted.start({exposeControl: false})
+    interrupted.assertCommittedBootstrapRecoveryReady()
+    await interrupted.updateGenerationTransition("restoring_committed")
+    const candidate = interrupted.releases.get("v2")
+
+    assert.ok(candidate)
+    for (const processInstance of interrupted.services.values()) await processInstance.start("deploy")
+    await candidate.restartCommittedGeneration()
+    const restarted = interrupted.status()
+    const restartedCandidatePids = restarted.releases.find(({releaseId}) => releaseId === "v2")?.processes.map(({pid}) => pid)
+    const restartedServicePids = restarted.services.map(({process}) => process.pid)
+
+    assert.equal(restarted.generationTransition?.phase, "restoring_committed")
+    assert.ok(restartedCandidatePids?.every((pid) => typeof pid === "number"))
+    await interrupted.retireCommittedOwner(undefined)
+    interrupted.guardian?.disconnect()
+
+    recovered = new RollbridgeDaemon({bootstrap, config, configPath: fixture.configPath, logger: () => {}})
+    await recovered.start({exposeControl: false})
+    const active = recovered.status()
+
+    assert.equal(active.activeReleaseId, "v2")
+    assert.equal(active.generationTransition?.phase, "committed")
+    assert.deepEqual(active.releases.find(({releaseId}) => releaseId === "v2")?.processes.map(({pid}) => pid), restartedCandidatePids)
+    assert.deepEqual(active.services.map(({process}) => process.pid), restartedServicePids)
+    assert.ok(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running"))
+    assert.equal(releaseProcessPid(active, "v1", "worker"), v1WorkerPid)
+    assert.equal(isAlive(v1WorkerPid), true)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
+  } finally {
+    if (recovered) {
+      const shutdown = recovered.shutdown()
+
+      await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)))
+      await shutdown.catch(() => undefined)
+    }
+    interrupted?.guardian?.disconnect()
+    retired.guardian?.disconnect()
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("replacement owner reconstructs one active and two draining generations after abrupt daemon exit", async () => {
   const fixture = await createFixture()
   let owner = spawnDaemon(fixture.configPath)
