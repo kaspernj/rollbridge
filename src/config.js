@@ -14,7 +14,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
- * @typedef {{activateCommand?: string, drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, reactivateCommand?: string, stopCommand?: string}} LifecycleConfig
+ * @typedef {{activateCommand?: string, activateTimeoutMs?: number, drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, reactivateCommand?: string, stopCommand?: string}} LifecycleConfig
  * @typedef {number | "indefinite"} StopTimeoutMs
  * @typedef {"persistent" | "handoff"} ServiceDeployStrategy
  * @typedef {{cwd?: string, deployStrategy: ServiceDeployStrategy, env: Record<string, string>, gracefulStopMs: StopTimeoutMs, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, nonBlockingDrain: boolean, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
@@ -343,17 +343,25 @@ function normalizeMemory(value, key, issues) {
  * @returns {LifecycleConfig} Normalized lifecycle hooks (no commands and a 0 drain by default).
  */
 function normalizeLifecycle(value, key, issues) {
-  if (value === undefined || value === null) return {drainTimeoutMs: 0}
+  if (value === undefined || value === null) return {activateTimeoutMs: 30000, drainTimeoutMs: 0}
 
   if (!isPlainObject(value)) {
     issues.push({fix: `Set ${key} to a mapping with optional activateCommand, quietCommand, reactivateCommand, drainCommand, stopCommand, and drainTimeoutMs.`, message: `${key} must be an object`})
 
-    return {drainTimeoutMs: 0}
+    return {activateTimeoutMs: 30000, drainTimeoutMs: 0}
   }
 
+  const activateTimeoutMs = normalizeNumber(value.activateTimeoutMs, `${key}.activateTimeoutMs`, issues, {default: 30000})
   const drainTimeoutMs = normalizeNumber(value.drainTimeoutMs, `${key}.drainTimeoutMs`, issues, {default: 0})
   /** @type {LifecycleConfig} */
-  const lifecycle = {drainTimeoutMs: nonNegativeOrDefault(drainTimeoutMs, `${key}.drainTimeoutMs`, issues, 0, false)}
+  const lifecycle = {
+    activateTimeoutMs: activateTimeoutMs > 0 ? activateTimeoutMs : 30000,
+    drainTimeoutMs: nonNegativeOrDefault(drainTimeoutMs, `${key}.drainTimeoutMs`, issues, 0, false)
+  }
+
+  if (activateTimeoutMs <= 0) {
+    issues.push({fix: `Set ${key}.activateTimeoutMs to a positive number of milliseconds, e.g. 30000.`, message: `${key}.activateTimeoutMs must be a positive number`})
+  }
 
   if (value.activateCommand !== undefined) lifecycle.activateCommand = normalizeString(value.activateCommand, `${key}.activateCommand`, issues, {nonEmpty: true})
   if (value.quietCommand !== undefined) lifecycle.quietCommand = normalizeString(value.quietCommand, `${key}.quietCommand`, issues, {nonEmpty: true})

@@ -303,8 +303,8 @@ service when the service starts as a quiescent candidate and requires an explici
 generation transition. Rollbridge starts and health-checks the complete candidate,
 waits for the old generation's strict retirement acknowledgement, waits for the
 candidate's strict activation acknowledgement, then commits the active release and
-proxy target synchronously. Activation is always bounded to 30 seconds;
-retirement uses the process's `gracefulStopMs` bound (or 30 seconds when that
+proxy target synchronously. Activation is bounded by `lifecycle.activateTimeoutMs`,
+which defaults to 30 seconds; retirement uses the process's `gracefulStopMs` bound (or 30 seconds when that
 window is `"indefinite"`). Both run with the process environment plus
 `ROLLBRIDGE_PID`.
 
@@ -347,7 +347,8 @@ legitimate hours-long generation drains are valid.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lifecycle.activateCommand` | string | unset | For one handoff service, acknowledge activation of its already-started candidate generation after the previous generation has acknowledged retirement. Requires `quietCommand`, `statePath`, and `ownerRecovery`; bounded to 30 seconds. |
+| `lifecycle.activateCommand` | string | unset | For one handoff service, acknowledge activation of its already-started candidate generation after the previous generation has acknowledged retirement. Requires `quietCommand`, `statePath`, and `ownerRecovery`; bounded by `activateTimeoutMs`. |
+| `lifecycle.activateTimeoutMs` | positive number | `30000` | Bounds activation, reactivation, and active-role restoration commands. |
 | `lifecycle.quietCommand` | string | unset | Run first to tell the process to stop accepting new work. Bounded by `gracefulStopMs`, or 30 seconds when that window is `"indefinite"`. |
 | `lifecycle.drainCommand` | string | unset | Run after quieting to wait until the process has drained (it blocks until done). When unset, Rollbridge instead waits up to `drainTimeoutMs` for the process to exit on its own. Requires a positive `drainTimeoutMs` (which bounds it). |
 | `lifecycle.drainTimeoutMs` | non-negative number | `0` | Bounds the drain step. `0` **skips the drain step entirely** (no `drainCommand`, no wait). |

@@ -89,6 +89,7 @@ export default {
       command: "env VELOCIOUS_BACKGROUND_JOBS_PORT={{port}} npx velocious background-jobs-main",
       lifecycle: {
         activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+        activateTimeoutMs: 60000,
         quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
       },
       port: {from: 7331, to: 7399}
@@ -188,7 +189,8 @@ generation-scoped and resumable; failures remain visible and block unrelated
 deploys. Post-commit singleton replacement is also journaled and must complete
 before an exact retry reports success. If the active coordinator restarts,
 Rollbridge restores its active role with the same bounded, generation-scoped
-activation command before reporting it running. Omit `activateCommand` to
+activation command before reporting it running. Set `activateTimeoutMs` when the
+activation acknowledgement can exceed its 30-second default. Omit `activateCommand` to
 preserve the existing hook-free ordering.
 
 See [`docs/workers.md`](docs/workers.md) for the full release-generation

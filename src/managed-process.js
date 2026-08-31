@@ -4,7 +4,7 @@ import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
 import {processGroupHasLiveMembers, processGroupMembers} from "./process-memory.js"
 
-const ACTIVATION_HOOK_TIMEOUT_MS = 30000
+const DEFAULT_ACTIVATION_HOOK_TIMEOUT_MS = 30000
 const MAX_BUFFERED_OUTPUT_CHARACTERS = 64 * 1024
 
 /**
@@ -554,7 +554,7 @@ export default class ManagedProcess extends EventEmitter {
     const command = this.lifecycle.activateCommand
 
     if (!command) return
-    const error = await this.runHook(command, ACTIVATION_HOOK_TIMEOUT_MS, "activate command", pid)
+    const error = await this.runHook(command, this.activationHookTimeoutMs(), "activate command", pid)
 
     if (error) throw error
   }
@@ -570,7 +570,7 @@ export default class ManagedProcess extends EventEmitter {
 
     if (!command) return
     const label = this.lifecycle.reactivateCommand ? "reactivate command" : "activate command"
-    const error = await this.runHook(command, ACTIVATION_HOOK_TIMEOUT_MS, label, pid)
+    const error = await this.runHook(command, this.activationHookTimeoutMs(), label, pid)
 
     if (error) throw error
   }
@@ -596,11 +596,16 @@ export default class ManagedProcess extends EventEmitter {
       : this.lifecycle.quietCommand
 
     if (!command) throw new Error(`Process ${this.id} cannot restore lifecycle role ${this.lifecycleRole} without its paired command`)
-    const timeoutMs = this.lifecycleRole === "active" ? ACTIVATION_HOOK_TIMEOUT_MS : this.hookTimeoutMs()
+    const timeoutMs = this.lifecycleRole === "active" ? this.activationHookTimeoutMs() : this.hookTimeoutMs()
     const activeLabel = this.lifecycle.reactivateCommand ? "reactivate" : "activate"
     const error = await this.runHook(command, timeoutMs, `${this.lifecycleRole === "active" ? activeLabel : "quiet"} command`, this.pid)
 
     if (error) throw error
+  }
+
+  /** @returns {number} Timeout used for activation/reactivation hooks. */
+  activationHookTimeoutMs() {
+    return this.lifecycle.activateTimeoutMs ?? DEFAULT_ACTIVATION_HOOK_TIMEOUT_MS
   }
 
   /** @returns {number} Timeout used for lifecycle hooks. */
