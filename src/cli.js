@@ -102,8 +102,13 @@ export async function runCli(argv) {
 
           daemon.logger("bootstrap activation failed", {releaseId: bootstrap.releaseId, status: "error", ...errorLogData(failure)})
 
-          if (config.ownerRecovery && daemon.activeRelease) {
-            await daemon.exposeControl()
+          if (config.ownerRecovery && daemon.releases.size > 0) {
+            if (daemon.activeRelease) {
+              await daemon.exposeControl()
+              return
+            }
+            await daemon.abandonOwnerRecoveryAttempt()
+            process.exitCode = 1
             return
           }
 

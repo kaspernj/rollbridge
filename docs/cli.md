@@ -64,6 +64,14 @@ identity. Rollbridge does not calculate or interpret the digest.
 With no release options, daemon behavior is unchanged: it starts listener-only
 and waits for control-socket deployments.
 
+If an external owner retirement has already journaled a committed generation but
+cleared its active role, only a foreground bootstrap with that exact release id,
+path, revision, and config authority may restore it. Rollbridge waits for the
+retiring candidate processes to stop, reconnects their existing guardian
+registrations, restarts that candidate, health-checks it, and restores its
+generation activation before exposing control. A mismatched tuple or a candidate
+that is still retiring fails closed without stopping other retained generations.
+
 `--takeover-owner` requires the complete bootstrap tuple. It bootstraps and
 health-checks the replacement before sending the current daemon the private
 retirement command. The current `performOwnerRetirement` path quiesces every
