@@ -505,7 +505,10 @@ export default class RollbridgeDaemon {
       if (!transfer?.config || !transfer.snapshot) throw new Error("Committed owner published incomplete replacement state")
       const unresolvedTransition = transfer.snapshot.generationTransition
 
-      if (unresolvedTransition && unresolvedTransition.phase !== "committed" && unresolvedTransition.configDigest !== this.ownerRecoveryConfigDigest()) {
+      const transferredTransitionConfigDigest = transfer.config ? ownerConfigDigest(transfer.config) : undefined
+      if (unresolvedTransition && unresolvedTransition.phase !== "committed" &&
+        unresolvedTransition.configDigest !== this.ownerRecoveryConfigDigest() &&
+        unresolvedTransition.configDigest !== transferredTransitionConfigDigest) {
         throw new Error(`Owner replacement cannot change config authority while unresolved generation transition ${unresolvedTransition.candidateReleaseId} remains at ${unresolvedTransition.phase}`)
       }
       const registeredProcesses = new Map((await this.guardian.inventory()).map(({key, provenance}) => [key, provenance]))
