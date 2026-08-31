@@ -1243,7 +1243,7 @@ export default class RollbridgeDaemon {
       this.assertExactGenerationTransition(transition, {config: nextConfig, releaseId: newReleaseId, releasePath, revision: revision || newReleaseId})
       return {activeReleaseId: newReleaseId, previousReleaseId: transition.previousReleaseId}
     }
-    if (transition?.phase === "committed" && !this.activeRelease && this.bootstrap) {
+    if (transition?.phase === "committed" && !this.activeRelease && this.bootstrap && this.releases.get(transition.candidateReleaseId)?.state === "draining") {
       this.assertExactGenerationTransition(transition, {config: nextConfig, releaseId: newReleaseId, releasePath, revision: revision || newReleaseId})
       this.assertCommittedBootstrapRecoveryReady()
       this.config = nextConfig

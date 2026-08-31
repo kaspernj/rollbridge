@@ -322,6 +322,16 @@ test("committed bootstrap tuple mismatches fail closed without singletons", asyn
     assert.equal(releaseProcessPid(preserved, "v1", "worker"), v1WorkerPid)
     assert.equal(isAlive(v1WorkerPid), true)
     assert.equal(preserved.releases.some(({releaseId}) => releaseId === "wrong"), false)
+
+    await owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    await Promise.all([
+      owner.stopRelease("v2"),
+      fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    ])
+    const afterIntentionalStop = await owner.deploy({releaseId: "wrong", releasePath: wrongPath, revision: "wrong"})
+
+    assert.equal(afterIntentionalStop.activeReleaseId, "wrong")
+    assert.equal(owner.status().activeReleaseId, "wrong")
   } finally {
     if (recovered) {
       const activeReleaseId = recovered.status().activeReleaseId
