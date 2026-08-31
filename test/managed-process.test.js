@@ -450,14 +450,14 @@ test("activateStrict runs the configured activation command once per call and re
     const pid = managed.pid
 
     assert.ok(pid)
-    managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0}
+    managed.lifecycle = {activateCommand: "jobs activate", activateTimeoutMs: 60000, drainTimeoutMs: 0}
     managed.runHook = async (command, timeoutMs, label, hookPid) => {
       commands.push({command, label, pid: hookPid, timeoutMs})
       return undefined
     }
 
     await managed.activateStrict()
-    assert.deepEqual(commands, [{command: "jobs activate", label: "activate command", pid, timeoutMs: 30000}])
+    assert.deepEqual(commands, [{command: "jobs activate", label: "activate command", pid, timeoutMs: 60000}])
 
     managed.runHook = async () => new Error("activation rejected")
     await assert.rejects(() => managed.activateStrict(), /activation rejected/)
