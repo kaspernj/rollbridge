@@ -1922,7 +1922,7 @@ async function removeDaemonRecoveryCapability(packagePath, {abortedPath, prepare
   const guardianPath = path.join(packagePath, "src", "process-guardian.js")
   const daemonPath = path.join(packagePath, "src", "daemon.js")
   const source = await fs.readFile(guardianPath, "utf8")
-  const capability = "  if (request.command === \"capabilities\") return {daemonRecovery: 1}\n\n"
+  const capability = "  if (request.command === \"capabilities\") return {daemonRecovery: 1, generationReactivation: 1}\n\n"
   const incumbentAbortNotification = "  if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: \"replacement-aborted\", reason})}\\n`)\n"
   const legacyCapability = `  if (request.command === "capabilities") {
     while (!fsSync.existsSync(${JSON.stringify(preparedPath)})) await new Promise((resolve) => setTimeout(resolve, 5))
