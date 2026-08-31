@@ -486,14 +486,14 @@ export default class ManagedProcess extends EventEmitter {
       if (this.lifecycleRestoreBarrier) await this.lifecycleRestoreBarrier
       if (!this.child?.pid) {
         this.state = "stopped"
-        if (this.lifecycle.activateCommand) this.lifecycleRole = "retired"
+        if (this.hasRestorableLifecycle()) this.lifecycleRole = "retired"
         return
       }
       this.state = "stopping"
       if (this.lifecycle.quietCommand) this.quiesceError = await this.runHook(this.lifecycle.quietCommand, this.hookTimeoutMs(), "quiet command")
       if (!this.quiesceError) {
         this.state = "quiesced"
-        if (this.lifecycle.activateCommand) this.lifecycleRole = "retired"
+        if (this.hasRestorableLifecycle()) this.lifecycleRole = "retired"
       }
     })()
     return await this.quiescePromise
@@ -534,7 +534,7 @@ export default class ManagedProcess extends EventEmitter {
     if (!child?.pid || child.pid !== pid || (this.state !== "quiesced" && this.state !== "running")) {
       throw new Error(`Process ${this.id} is not retained for reactivation`)
     }
-    await this.runActivationHook(pid)
+    await this.runReactivationHook(pid)
     if (this.child !== child || this.pid !== pid) throw new Error(`Process ${this.id} exited before reactivation completed`)
     this.intentionalStop = false
     this.intentionalStopSignal = undefined
@@ -560,6 +560,27 @@ export default class ManagedProcess extends EventEmitter {
   }
 
   /**
+   * Runs the process-specific reactivation hook, falling back to the generation
+   * coordinator's activation hook for the original lifecycle contract.
+   * @param {number | undefined} pid - Exact process group leader.
+   * @returns {Promise<void>} Resolves after acknowledgement.
+   */
+  async runReactivationHook(pid) {
+    const command = this.lifecycle.reactivateCommand ?? this.lifecycle.activateCommand
+
+    if (!command) return
+    const label = this.lifecycle.reactivateCommand ? "reactivate command" : "activate command"
+    const error = await this.runHook(command, ACTIVATION_HOOK_TIMEOUT_MS, label, pid)
+
+    if (error) throw error
+  }
+
+  /** @returns {boolean} Whether this process owns a durable external lifecycle role. */
+  hasRestorableLifecycle() {
+    return Boolean(this.lifecycle.activateCommand || this.lifecycle.reactivateCommand)
+  }
+
+  /**
    * Records the durable desired role without firing a lifecycle command.
    * @param {LifecycleRole} role - Exact role owned by this process generation.
    */
@@ -569,12 +590,15 @@ export default class ManagedProcess extends EventEmitter {
 
   /** Restores an active or retired role after this exact process starts. */
   async restoreLifecycleRole() {
-    if (!this.lifecycle.activateCommand || this.lifecycleRole === "candidate") return
-    const command = this.lifecycleRole === "active" ? this.lifecycle.activateCommand : this.lifecycle.quietCommand
+    if (!this.hasRestorableLifecycle() || this.lifecycleRole === "candidate") return
+    const command = this.lifecycleRole === "active"
+      ? this.lifecycle.reactivateCommand ?? this.lifecycle.activateCommand
+      : this.lifecycle.quietCommand
 
     if (!command) throw new Error(`Process ${this.id} cannot restore lifecycle role ${this.lifecycleRole} without its paired command`)
     const timeoutMs = this.lifecycleRole === "active" ? ACTIVATION_HOOK_TIMEOUT_MS : this.hookTimeoutMs()
-    const error = await this.runHook(command, timeoutMs, `${this.lifecycleRole === "active" ? "activate" : "quiet"} command`, this.pid)
+    const activeLabel = this.lifecycle.reactivateCommand ? "reactivate" : "activate"
+    const error = await this.runHook(command, timeoutMs, `${this.lifecycleRole === "active" ? activeLabel : "quiet"} command`, this.pid)
 
     if (error) throw error
   }
@@ -791,7 +815,7 @@ export default class ManagedProcess extends EventEmitter {
       id: this.id,
       lastMemoryRestartAt: this.lastMemoryRestartAtMs === undefined ? undefined : new Date(this.lastMemoryRestartAtMs).toISOString(),
       lastStartReason: this.lastStartReason,
-      ...(this.lifecycle.activateCommand ? {lifecycleRole: this.lifecycleRole} : {}),
+      ...(this.hasRestorableLifecycle() ? {lifecycleRole: this.lifecycleRole} : {}),
       logs: this.logs.slice(-this.outputLines),
       memoryRestarts: this.memoryRestarts,
       pid: this.pid,

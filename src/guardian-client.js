@@ -539,12 +539,13 @@ class GuardianProcess extends ManagedProcess {
   async reactivateStrict() {
     await this.ensureRegistered()
     await this.pendingUpdate
+    const command = this.lifecycle.reactivateCommand ? "reactivate-with-command" : "reactivate"
     try {
-      this.cachedStatus = asProcessStatus(await this.client.request({command: "reactivate", key: this.key}))
+      this.cachedStatus = asProcessStatus(await this.client.request({command, key: this.key}))
       this.client.generationReactivation = true
       this.compatibilityReactivated = false
     } catch (error) {
-      if (!(error instanceof Error) || error.message !== "Unknown guardian command: reactivate") throw error
+      if (!(error instanceof Error) || error.message !== `Unknown guardian command: ${command}`) throw error
       this.client.generationReactivation = false
       await this.adoptRetainedActive({activate: true})
     }
@@ -559,7 +560,7 @@ class GuardianProcess extends ManagedProcess {
     const before = this.cachedStatus
 
     if (!before.pid || (before.state !== "quiesced" && before.state !== "running")) throw new Error(`Process ${this.id} is not retained for compatible reactivation`)
-    if (activate) await this.runActivationHook(before.pid)
+    if (activate) await this.runReactivationHook(before.pid)
     const verified = asProcessStatus(await this.client.request({command: "status", key: this.key}))
 
     if (verified.pid !== before.pid || (verified.state !== "quiesced" && verified.state !== "running")) {

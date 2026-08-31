@@ -1785,32 +1785,10 @@ export default class RollbridgeDaemon {
       if (!transition.error && !transition.activationError) throw new Error("Candidate activation has no recorded failure to compensate")
       transition.activationError = transition.activationError || transition.error
       transition.compensationError = undefined
-      await this.updateGenerationTransition("restoring_previous")
-    }
-
-    if (transition.phase === "restoring_previous") {
-      try {
-        await previous.reactivateGeneration()
-      } catch (error) {
-        const failure = error instanceof Error ? error.message : String(error)
-
-        transition.compensationError = failure
-        await this.failGenerationTransition(`Incumbent ${previous.releaseId} restoration failed: ${failure}`)
-        this.logger("release generation compensation restoration failed", {
-          activationError: transition.activationError,
-          error: failure,
-          releaseId: previous.releaseId
-        })
-        throw new Error(`incumbent ${previous.releaseId} restoration failed: ${failure}`, {cause: error})
-      }
-      this.activeRelease = previous
-      transition.compensationError = undefined
       await this.updateGenerationTransition("retiring_failed_candidate")
-      this.logger("release generation compensation incumbent restored", {releaseId: previous.releaseId})
     }
 
     if (transition.phase === "retiring_failed_candidate") {
-      if (this.activeRelease !== previous || previous.state !== "active") throw new Error(`Incumbent ${previous.releaseId} is not restored and authoritative`)
       try {
         await candidate.beginRetirement(candidate.config, {retry: true})
         const candidateServiceIds = [...this.serviceReleaseIds.entries()]
@@ -1830,6 +1808,30 @@ export default class RollbridgeDaemon {
         })
         throw new Error(`failed candidate ${candidate.releaseId} retirement failed: ${failure}`, {cause: error})
       }
+      transition.compensationError = undefined
+      await this.updateGenerationTransition("restoring_previous")
+      this.logger("release generation compensation candidate retired", {releaseId: candidate.releaseId})
+    }
+
+    if (transition.phase === "restoring_previous") {
+      if (candidate.state !== "draining") throw new Error(`Failed candidate ${candidate.releaseId} is not retired before incumbent restoration`)
+      try {
+        await previous.reactivateGeneration()
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error)
+
+        transition.compensationError = failure
+        await this.failGenerationTransition(`Incumbent ${previous.releaseId} restoration failed: ${failure}`)
+        this.logger("release generation compensation restoration failed", {
+          activationError: transition.activationError,
+          error: failure,
+          releaseId: previous.releaseId
+        })
+        throw new Error(`incumbent ${previous.releaseId} restoration failed: ${failure}`, {cause: error})
+      }
+      this.activeRelease = previous
+      transition.compensationError = undefined
+      this.logger("release generation compensation incumbent restored", {releaseId: previous.releaseId})
     }
 
     const result = /** @type {Record<string, JsonValue>} */ ({

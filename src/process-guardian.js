@@ -655,7 +655,7 @@ async function execute(request, socket) {
     await record.process.start(request.reason, request.lifecycleRole)
   } else if (request.command === "activate") {
     await record.process.activateStrict()
-  } else if (request.command === "reactivate") {
+  } else if (request.command === "reactivate" || request.command === "reactivate-with-command") {
     await record.process.reactivateStrict()
     record.desired = true
   } else if (request.command === "quiesce") {

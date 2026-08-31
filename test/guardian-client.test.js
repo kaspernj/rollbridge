@@ -116,6 +116,41 @@ test("client reactivates a retained process through a guardian without the react
   }
 })
 
+test("client reverses a worker quiet hook through a pre-reactivation guardian", async () => {
+  const fixture = await createGuardian()
+  const lifecyclePath = path.join(fixture.root, "worker-lifecycle.log")
+  const processInstance = fixture.client.process("compatible-worker-reactivation", {
+    ...definition("compatible-worker-reactivation"),
+    lifecycle: {
+      drainTimeoutMs: 0,
+      quietCommand: `printf 'quiet\n' >> ${JSON.stringify(lifecyclePath)}`,
+      reactivateCommand: `printf 'resume\n' >> ${JSON.stringify(lifecyclePath)}`
+    },
+    shouldRestart: () => true
+  })
+  const request = fixture.client.request.bind(fixture.client)
+
+  fixture.client.request = async command => {
+    if (command.command === "reactivate-with-command") throw new Error("Unknown guardian command: reactivate-with-command")
+    return await request(command)
+  }
+
+  try {
+    await processInstance.start()
+    const pid = processInstance.status().pid
+
+    await processInstance.quiesceStrict()
+    await processInstance.reactivateStrict()
+
+    assert.equal(processInstance.status().pid, pid)
+    assert.equal(processInstance.status().state, "running")
+    assert.equal(processInstance.status().lifecycleRole, "active")
+    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "quiet\nresume\n")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("guardian atomically updates process provenance with private owner state", async () => {
   const fixture = await createGuardian()
   const processInstance = fixture.client.process("service", definition("service"))
