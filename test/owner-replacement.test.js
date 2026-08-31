@@ -10,7 +10,7 @@ import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
-import {sendControlCommand} from "../src/control-client.js"
+import {openControlSession, sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic} from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
 import {findAvailablePort} from "../src/port-allocator.js"
@@ -1241,6 +1241,33 @@ test("owner replacement excludes stopped retained releases from reserved process
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }
+})
+
+test("pruned release connection completion closes the incumbent listener session", () => {
+  const daemon = new RollbridgeDaemon({
+    config: normalizeConfig(config({controlPath: "/unused/control.sock", extraCompanion: false, statePath: "/unused/state.json"})),
+    logger: () => {}
+  })
+  let closeCount = 0
+  const session = {close: () => { closeCount += 1 }}
+  const controlSession = /** @type {Awaited<ReturnType<typeof openControlSession>>} */ (session)
+
+  daemon.releases = /** @type {Map<string, import("../src/release-group.js").default>} */ (new Map([
+    ["active", /** @type {import("../src/release-group.js").default} */ ({hasTransferredConnections: () => false})]
+  ]))
+  daemon.incumbentListenerControl = controlSession
+  daemon.handleIncumbentListenerEvent({connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session)
+
+  assert.equal(closeCount, 1)
+  assert.equal(daemon.incumbentListenerControl, undefined)
+
+  daemon.incumbentListenerControl = controlSession
+  assert.throws(
+    () => daemon.handleIncumbentListenerEvent({connections: {http: 1, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session),
+    /unknown release pruned/
+  )
+  assert.equal(closeCount, 1)
+  assert.equal(daemon.incumbentListenerControl, session)
 })
 
 test("owner replacement preserves a failed generation transition without retrying its hook", async () => {

@@ -553,9 +553,8 @@ export default class RollbridgeDaemon {
     }
     const release = this.releases.get(releaseId)
 
-    if (!release && transferredConnections.http === 0 && transferredConnections.websocket === 0) return
-    if (!release) throw new Error(`Incumbent listener reported unknown release ${releaseId}`)
-    release.setTransferredConnections(transferredConnections)
+    if (!release && (transferredConnections.http > 0 || transferredConnections.websocket > 0)) throw new Error(`Incumbent listener reported unknown release ${releaseId}`)
+    if (release) release.setTransferredConnections(transferredConnections)
     if (this.incumbentListenerControl === session && ![...this.releases.values()].some((candidate) => candidate.hasTransferredConnections())) {
       this.incumbentListenerControl = undefined
       session.close()
