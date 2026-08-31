@@ -1649,7 +1649,7 @@ test("pruned release connection completion closes the incumbent listener session
   assert.equal(daemon.incumbentListenerControl, session)
 })
 
-test("same-authority owner replacement preserves a failed generation transition without retrying its hook", async () => {
+test("same-authority owner replacement preserves completed activation compensation without replaying hooks", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-failed-generation-"))
   const oldSocketPath = path.join(root, "old.sock")
   const statePath = path.join(root, "state.json")
@@ -1677,18 +1677,15 @@ test("same-authority owner replacement preserves a failed generation transition 
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
     await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath}), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nactivate:v1\nretire:v2\n")
 
     await writeConfig(configPath, failedConfig(oldSocketPath, false))
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(candidate, "owner replacement committed")
     const status = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
-    const generationTransition = status.generationTransition
-
-    assert.ok(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))
-    assert.equal(generationTransition.phase, "activating_candidate")
-    assert.match(String(generationTransition.error), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n", "replacement must preserve, not retry, the failed activation")
+    assert.equal(status.activeReleaseId, "v1")
+    assert.equal(status.generationTransition, undefined)
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nactivate:v1\nretire:v2\n", "replacement must not replay completed compensation hooks")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -1700,7 +1697,7 @@ test("same-authority owner replacement preserves a failed generation transition 
   }
 })
 
-test("config-changing owner replacement rejects an unresolved generation transition", async () => {
+test("config-changing owner replacement proceeds after activation compensation clears the transition", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-unresolved-config-"))
   const oldSocketPath = path.join(root, "old.sock")
   const newSocketPath = path.join(root, "new.sock")
@@ -1734,16 +1731,13 @@ test("config-changing owner replacement rejects an unresolved generation transit
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     const result = await collectUntilExitOrLog(candidate, "owner replacement committed")
 
-    assert.equal(result.message, undefined, result.output)
-    assert.match(result.output, /config authority.*unresolved generation transition/i)
-    const status = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
-    const generationTransition = status.generationTransition
+    assert.equal(result.message, "owner replacement committed", result.output)
+    const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
 
-    assert.ok(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))
-    assert.equal(generationTransition.phase, "activating_candidate")
-    assert.match(String(generationTransition.error), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n")
-    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
+    assert.equal(status.activeReleaseId, "v1")
+    assert.equal(status.generationTransition, undefined)
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nactivate:v1\nretire:v2\n")
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
 
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
     await shutdown

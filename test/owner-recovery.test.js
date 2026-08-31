@@ -748,7 +748,7 @@ test("guardian recovery becomes ready before replaying a gated generation hook",
   }
 })
 
-test("owner recovery preserves a failed generation transition without firing hooks until exact resume", async () => {
+test("owner recovery preserves a completed activation compensation without replaying hooks", async () => {
   const fixture = await createFixture({activationFailureRelease: "v2"})
   let owner = spawnDaemon(fixture.configPath)
 
@@ -762,7 +762,7 @@ test("owner recovery preserves a failed generation transition without firing hoo
       sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath}),
       /activate command exited non-zero/
     )
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1", "retire:v2"])
 
     owner.kill("SIGKILL")
     await once(owner, "exit")
@@ -771,13 +771,9 @@ test("owner recovery preserves a failed generation transition without firing hoo
 
     const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
 
-    assert.equal(recovered.generationTransition?.phase, "activating_candidate")
-    assert.match(String(recovered.generationTransition?.error), /activate command exited non-zero/)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1"], "owner recovery alone must not retry a failed hook")
-
-    await fs.writeFile(fixture.activationGatePath, "allow\n")
-    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(recovered.generationTransition, undefined)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1", "retire:v2"], "owner recovery must not replay completed compensation hooks")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -789,17 +785,14 @@ test("owner recovery preserves a failed generation transition without firing hoo
   }
 })
 
-test("owner recovery replays one journaled ambiguous activation by exact generation identity", async () => {
-  const fixture = await createFixture({activationFailureRelease: "v2"})
+test("owner recovery replays one journaled ambiguous first-generation activation by exact identity", async () => {
+  const fixture = await createFixture({activationFailureRelease: "v1"})
   let owner = spawnDaemon(fixture.configPath)
 
   try {
     await waitForLog(owner, "control socket listening")
     const v1Path = await prepareRelease(fixture.root, "v1")
-    const v2Path = await prepareRelease(fixture.root, "v2")
-
-    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
-    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath}))
+    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath}))
     owner.kill("SIGKILL")
     await once(owner, "exit")
 
@@ -818,12 +811,12 @@ test("owner recovery replays one journaled ambiguous activation by exact generat
 
     const recovered = /** @type {DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: fixture.socketPath}))
 
-    assert.equal(recovered.activeReleaseId, "v2")
+    assert.equal(recovered.activeReleaseId, "v1")
     assert.equal(recovered.generationTransition?.phase, "committed")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1"])
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
-    await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
     await shutdown
   } finally {
     await killChild(owner)

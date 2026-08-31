@@ -24,8 +24,8 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
  * @typedef {{disruptive: true, mode: "legacy-first-upgrade", reason: string}} OwnerTransition
- * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "committed_pending" | "committed" | "restoring_committed"} GenerationTransitionPhase
- * @typedef {{activationLifecycle?: boolean, candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, configDigest: string, error?: string, journalRevision?: number, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
+ * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "restoring_previous" | "retiring_failed_candidate" | "committed_pending" | "committed" | "restoring_committed"} GenerationTransitionPhase
+ * @typedef {{activationError?: string, activationLifecycle?: boolean, candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, compensationError?: string, configDigest: string, error?: string, journalRevision?: number, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
  * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, generationTransition?: GenerationTransition, ownerRecovery: {configDigest: string, ready: boolean} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
  * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>}} OwnerRecoverySnapshot
@@ -1337,6 +1337,15 @@ export default class RollbridgeDaemon {
         }))
     }
 
+    if (commandName === "recover-generation-transition") {
+      return await this.executeOwnerMutation("recover generation transition", async () => await this.recoverGenerationTransition({
+        previousReleaseId: requiredString(data.previousReleaseId, "previousReleaseId"),
+        releaseId: requiredString(data.releaseId, "releaseId"),
+        releasePath: requiredString(data.releasePath, "releasePath"),
+        revision: requiredString(data.revision, "revision")
+      }))
+    }
+
     if (commandName === "status") {
       return this.status()
     }
@@ -1627,6 +1636,9 @@ export default class RollbridgeDaemon {
     const transition = this.generationTransition
 
     if (!transition) throw new Error("No release generation transition to resume")
+    if (transition.phase === "restoring_previous" || transition.phase === "retiring_failed_candidate") {
+      return await this.compensatePreCommitActivationFailure()
+    }
     const release = this.releases.get(transition.candidateReleaseId)
     const previousRelease = transition.previousReleaseId ? this.releases.get(transition.previousReleaseId) : undefined
 
@@ -1668,7 +1680,23 @@ export default class RollbridgeDaemon {
 
         await this.failGenerationTransition(failure)
         this.logger("release generation activation failed", {error: failure, releaseId: release.releaseId})
-        throw error
+        if (!previousRelease || !activationLifecycle) throw error
+
+        let compensation
+
+        try {
+          compensation = await this.compensatePreCommitActivationFailure()
+        } catch (compensationError) {
+          throw new AggregateError(
+            [error, compensationError],
+            `${failure}; pre-commit compensation failed: ${compensationError instanceof Error ? compensationError.message : String(compensationError)}`,
+            {cause: compensationError}
+          )
+        }
+        const compensatedError = /** @type {Error & {compensation?: Record<string, JsonValue>}} */ (new Error(`${failure}; compensation restored incumbent ${compensation.previousReleaseId} as authoritative and retired failed candidate ${compensation.candidateReleaseId}`, {cause: error}))
+
+        compensatedError.compensation = compensation
+        throw compensatedError
       }
 
       // Activation acknowledgement and the logical proxy commit deliberately share one
@@ -1730,6 +1758,153 @@ export default class RollbridgeDaemon {
       previousReleaseId: previousRelease?.releaseId ?? null,
       ...(retirementFailure && previousRelease ? {retirement: {error: retirementFailure, releaseId: previousRelease.releaseId, status: "quiescence_failed"}} : {})
     }
+  }
+
+  /**
+   * Restores the authoritative proxy target and retires only the failed candidate.
+   * Every external effect is preceded by a durable phase checkpoint so recovery can
+   * safely replay the paired lifecycle hooks, which are already idempotent contracts.
+   * @returns {Promise<Record<string, JsonValue>>} Structured recovery result.
+   */
+  async compensatePreCommitActivationFailure() {
+    const transition = this.generationTransition
+
+    if (!transition) throw new Error("No release generation transition to compensate")
+    if (transition.phase !== "activating_candidate" && transition.phase !== "restoring_previous" && transition.phase !== "retiring_failed_candidate") {
+      throw new Error(`Generation transition ${transition.candidateReleaseId} at ${transition.phase} is not safe for pre-commit compensation`)
+    }
+    if (!transition.previousReleaseId) throw new Error("Pre-commit compensation requires a retained previous release")
+    const candidate = this.releases.get(transition.candidateReleaseId)
+    const previous = this.releases.get(transition.previousReleaseId)
+
+    if (!candidate) throw new Error(`Generation transition candidate ${transition.candidateReleaseId} is not retained`)
+    if (!previous) throw new Error(`Generation transition previous release ${transition.previousReleaseId} is not retained`)
+    if (this.activeRelease !== previous) throw new Error(`Previous release ${previous.releaseId} is not the authoritative proxy target`)
+
+    if (transition.phase === "activating_candidate") {
+      if (!transition.error && !transition.activationError) throw new Error("Candidate activation has no recorded failure to compensate")
+      transition.activationError = transition.activationError || transition.error
+      transition.compensationError = undefined
+      await this.updateGenerationTransition("restoring_previous")
+    }
+
+    if (transition.phase === "restoring_previous") {
+      try {
+        await previous.reactivateGeneration()
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error)
+
+        transition.compensationError = failure
+        await this.failGenerationTransition(`Incumbent ${previous.releaseId} restoration failed: ${failure}`)
+        this.logger("release generation compensation restoration failed", {
+          activationError: transition.activationError,
+          error: failure,
+          releaseId: previous.releaseId
+        })
+        throw new Error(`incumbent ${previous.releaseId} restoration failed: ${failure}`, {cause: error})
+      }
+      this.activeRelease = previous
+      transition.compensationError = undefined
+      await this.updateGenerationTransition("retiring_failed_candidate")
+      this.logger("release generation compensation incumbent restored", {releaseId: previous.releaseId})
+    }
+
+    if (transition.phase === "retiring_failed_candidate") {
+      if (this.activeRelease !== previous || previous.state !== "active") throw new Error(`Incumbent ${previous.releaseId} is not restored and authoritative`)
+      try {
+        await candidate.beginRetirement(candidate.config, {retry: true})
+        const candidateServiceIds = [...this.serviceReleaseIds.entries()]
+          .filter(([, releaseId]) => releaseId === candidate.releaseId)
+          .map(([serviceId]) => serviceId)
+
+        await this.stopStartedServices(candidateServiceIds)
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error)
+
+        transition.compensationError = failure
+        await this.failGenerationTransition(`Failed candidate ${candidate.releaseId} retirement failed: ${failure}`)
+        this.logger("release generation compensation candidate retirement failed", {
+          activationError: transition.activationError,
+          error: failure,
+          releaseId: candidate.releaseId
+        })
+        throw new Error(`failed candidate ${candidate.releaseId} retirement failed: ${failure}`, {cause: error})
+      }
+    }
+
+    const result = /** @type {Record<string, JsonValue>} */ ({
+      activeReleaseId: previous.releaseId,
+      activationError: transition.activationError,
+      candidateReleaseId: candidate.releaseId,
+      failedCandidateStatus: candidate.state,
+      previousReleaseId: previous.releaseId,
+      recoveryStatus: "recovered"
+    })
+
+    this.config = previous.config
+    this.generationTransition = undefined
+    try {
+      await this.checkpointGenerationTransition()
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error)
+
+      this.generationTransition = transition
+      transition.compensationError = failure
+      transition.error = `Compensation checkpoint clear failed: ${failure}`
+      transition.journalRevision = (transition.journalRevision ?? 0) + 1
+      transition.updatedAt = new Date().toISOString()
+      await this.publishOwnerState().catch((publishError) => {
+        this.logger("release generation compensation fence republish failed", {
+          error: publishError instanceof Error ? publishError.message : String(publishError),
+          releaseId: candidate.releaseId
+        })
+      })
+      this.logger("release generation compensation checkpoint failed", {error: failure, releaseId: candidate.releaseId})
+      throw new Error(`compensation checkpoint clear failed: ${failure}`, {cause: error})
+    }
+    void this.drainAndPrune(candidate, candidate.config)
+    this.logger("release generation compensation completed", result)
+    return result
+  }
+
+  /**
+   * Authenticated control recovery for one exact failed pre-commit transition.
+   * @param {{previousReleaseId: string, releaseId: string, releasePath: string, revision: string}} identity - Exact transition fence.
+   * @returns {Promise<Record<string, JsonValue>>} Structured recovery result.
+   */
+  async recoverGenerationTransition(identity) {
+    const transition = this.generationTransition
+
+    if (!transition) {
+      if (this.activeRelease?.releaseId !== identity.previousReleaseId || this.activeRelease.releaseId === identity.releaseId) {
+        throw new Error("No matching recovered generation transition; the expected incumbent is not authoritative")
+      }
+      return {
+        activeReleaseId: this.activeRelease.releaseId,
+        candidateReleaseId: identity.releaseId,
+        previousReleaseId: identity.previousReleaseId,
+        recoveryStatus: "already_recovered"
+      }
+    }
+    if (transition.previousReleaseId !== identity.previousReleaseId) {
+      throw new Error(`Generation transition previous release is ${transition.previousReleaseId}; refusing stale recovery for ${identity.previousReleaseId}`)
+    }
+    if (transition.phase !== "activating_candidate" && transition.phase !== "restoring_previous" && transition.phase !== "retiring_failed_candidate") {
+      throw new Error(`Generation transition ${transition.candidateReleaseId} at ${transition.phase} is not a safe failed pre-commit transition`)
+    }
+    const nextConfig = this.configPath ? await loadConfig(this.configPath) : this.config
+
+    this.assertReloadCompatible(nextConfig)
+    this.assertExactGenerationTransition(transition, {
+      config: nextConfig,
+      releaseId: identity.releaseId,
+      releasePath: identity.releasePath,
+      revision: identity.revision
+    })
+    if (this.activeRelease?.releaseId !== transition.previousReleaseId) {
+      throw new Error(`Previous release ${transition.previousReleaseId} is not the authoritative proxy target`)
+    }
+    return await this.compensatePreCommitActivationFailure()
   }
 
   /**

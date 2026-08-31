@@ -18,7 +18,7 @@ test("guardian bootstrap capability is absent from process argv", async () => {
   const fixture = await createGuardian()
 
   try {
-    assert.deepEqual(await fixture.client.capabilities(), {daemonRecovery: 1})
+    assert.deepEqual(await fixture.client.capabilities(), {daemonRecovery: 1, generationReactivation: 1})
     const commandLine = await fs.readFile(`/proc/${fixture.client.pid}/cmdline`, "utf8")
     const environment = await fs.readFile(`/proc/${fixture.client.pid}/environ`, "utf8")
     const status = await fs.readFile(`/proc/${fixture.client.pid}/status`, "utf8")
@@ -65,6 +65,52 @@ test("guardian runs a strict activation lifecycle command for the exact register
     await processInstance.start()
     await processInstance.activateStrict()
     assert.equal(await fs.readFile(activationPath, "utf8"), "activated")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("client reactivates a retained process through a guardian without the reactivation command", async () => {
+  const fixture = await createGuardian()
+  const lifecyclePath = path.join(fixture.root, "lifecycle.log")
+  const processInstance = fixture.client.process("compatible-reactivation", {
+    ...definition("compatible-reactivation"),
+    lifecycle: {
+      activateCommand: `printf 'activate\n' >> ${JSON.stringify(lifecyclePath)}`,
+      drainTimeoutMs: 0,
+      quietCommand: `printf 'retire\n' >> ${JSON.stringify(lifecyclePath)}`
+    },
+    shouldRestart: () => true
+  })
+  const request = fixture.client.request.bind(fixture.client)
+
+  fixture.client.request = async command => {
+    if (command.command === "reactivate") throw new Error("Unknown guardian command: reactivate")
+    return await request(command)
+  }
+
+  try {
+    await processInstance.start()
+    await processInstance.activateStrict()
+    const pid = processInstance.status().pid
+
+    await processInstance.quiesceStrict()
+    await processInstance.reactivateStrict()
+
+    assert.equal(processInstance.status().pid, pid)
+    assert.equal(processInstance.status().state, "running")
+    assert.equal(processInstance.status().lifecycleRole, "active")
+    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "activate\nretire\nactivate\n")
+
+    const restarted = once(processInstance, "started")
+
+    assert.ok(pid)
+    process.kill(-pid, "SIGKILL")
+    await restarted
+    assert.notEqual(processInstance.status().pid, pid)
+    assert.equal(processInstance.status().state, "running")
+    assert.equal(processInstance.status().lifecycleRole, "active")
+    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "activate\nretire\nactivate\nactivate\n")
   } finally {
     await cleanupGuardian(fixture)
   }

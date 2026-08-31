@@ -521,11 +521,42 @@ export default class ManagedProcess extends EventEmitter {
     const pid = this.pid
 
     if (!child?.pid || child.pid !== pid || this.state !== "running") throw new Error(`Process ${this.id} is not running for activation`)
+    await this.runActivationHook(pid)
+    if (this.child !== child || this.pid !== pid || this.state !== "running") throw new Error(`Process ${this.id} exited before activation completed`)
+    this.lifecycleRole = "active"
+  }
+
+  /** Reactivates an explicitly retired process without replacing its release-scoped process. */
+  async reactivateStrict() {
+    const child = this.child
+    const pid = this.pid
+
+    if (!child?.pid || child.pid !== pid || (this.state !== "quiesced" && this.state !== "running")) {
+      throw new Error(`Process ${this.id} is not retained for reactivation`)
+    }
+    await this.runActivationHook(pid)
+    if (this.child !== child || this.pid !== pid) throw new Error(`Process ${this.id} exited before reactivation completed`)
+    this.intentionalStop = false
+    this.intentionalStopSignal = undefined
+    this.quiescePromise = undefined
+    this.quiesceError = undefined
+    this.state = "running"
+    this.lifecycleRole = "active"
+    this.startMemoryMonitor()
+  }
+
+  /**
+   * Runs the generation activation hook against one exact retained process.
+   * @param {number | undefined} pid - Exact process group leader.
+   * @returns {Promise<void>} Resolves after acknowledgement.
+   */
+  async runActivationHook(pid) {
+    const command = this.lifecycle.activateCommand
+
+    if (!command) return
     const error = await this.runHook(command, ACTIVATION_HOOK_TIMEOUT_MS, "activate command", pid)
 
     if (error) throw error
-    if (this.child !== child || this.pid !== pid || this.state !== "running") throw new Error(`Process ${this.id} exited before activation completed`)
-    this.lifecycleRole = "active"
   }
 
   /**

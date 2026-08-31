@@ -505,6 +505,33 @@ test("activateStrict rejects an activation request when its process is not runni
   assert.equal(hookRan, false)
 })
 
+test("reactivateStrict restores a retained quiesced process only after activation succeeds", async () => {
+  const managed = buildLongLived(() => false)
+  const hooks = /** @type {string[]} */ ([])
+
+  managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0, quietCommand: "jobs retire"}
+  managed.runHook = async (_command, _timeoutMs, label) => {
+    hooks.push(label)
+    if (label === "activate command" && hooks.length === 2) return new Error("restoration rejected")
+    return undefined
+  }
+
+  try {
+    await managed.start()
+    await managed.quiesceStrict()
+    await assert.rejects(() => managed.reactivateStrict(), /restoration rejected/)
+    assert.equal(managed.status().state, "quiesced")
+    assert.equal(managed.status().lifecycleRole, "retired")
+
+    await managed.reactivateStrict()
+    assert.equal(managed.status().state, "running")
+    assert.equal(managed.status().lifecycleRole, "active")
+    assert.deepEqual(hooks, ["quiet command", "activate command", "activate command"])
+  } finally {
+    await managed.stop()
+  }
+})
+
 test("quiesce waits for active-role restoration before retiring a restarted process", async () => {
   const managed = buildLongLived(() => false)
   const hooks = /** @type {string[]} */ ([])

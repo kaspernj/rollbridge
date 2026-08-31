@@ -279,6 +279,28 @@ export default class ReleaseGroup extends EventEmitter {
     await instance.process.activateStrict()
   }
 
+  /** Restores the retained generation coordinator to its active role in place. */
+  async reactivateGeneration() {
+    if (this.state !== "draining" && this.state !== "active") throw new Error(`Generation ${this.releaseId} is not retained for reactivation`)
+    const processConfig = this.config.processes.find((candidate) => candidate.lifecycle.activateCommand !== undefined)
+
+    if (!processConfig) throw new Error(`Generation ${this.releaseId} has no activation lifecycle`)
+    const [coordinator] = this.getProcesses(processConfig.id)
+
+    if (!coordinator) throw new Error(`Generation activation process ${processConfig.id} is not retained for release ${this.releaseId}`)
+    const generationIds = new Set([...this.handoffServiceIds, ...this.nonBlockingDrainIds])
+
+    for (const [id, processInstance] of this.processes) {
+      if (generationIds.has(id) && processInstance !== coordinator.process) await processInstance.reactivateStrict()
+    }
+    await coordinator.process.reactivateStrict()
+    this.state = "active"
+    this.activatedAt = new Date().toISOString()
+    this.drainStartedAt = undefined
+    this.retirementError = undefined
+    this.stoppedAt = undefined
+  }
+
   /**
    * Restarts only the exact processes reconstructed for a committed generation.
    * The caller must prove the durable transition identity before using this path.

@@ -660,25 +660,162 @@ test("retirement failure retains the exact transition, blocks other deploys, and
   }
 })
 
-test("candidate activation failure never reactivates old and exact resume activates only the candidate", async () => {
+test("candidate activation failure reports restoration failure and exact recovery clears the fence", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /activate command exited non-zero/)
+    const incumbentCoordinator = daemon.releases.get("v1")?.getProcess("beacon")
+    const reactivate = incumbentCoordinator?.reactivateStrict.bind(incumbentCoordinator)
+
+    assert.ok(incumbentCoordinator && reactivate)
+    incumbentCoordinator.reactivateStrict = async () => { throw new Error("incumbent restoration rejected") }
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      error => {
+        assert.ok(error instanceof AggregateError)
+        assert.match(error.message, /activate command exited non-zero/)
+        assert.match(error.message, /incumbent v1 restoration failed: incumbent restoration rejected/i)
+        return true
+      }
+    )
 
     const failed = daemon.status()
 
     assert.equal(failed.activeReleaseId, "v1")
-    assert.equal(failed.generationTransition?.phase, "activating_candidate")
+    assert.equal(failed.generationTransition?.phase, "restoring_previous")
+    assert.match(String(failed.generationTransition?.activationError), /activate command exited non-zero/)
+    assert.match(String(failed.generationTransition?.compensationError), /incumbent restoration rejected/)
+    const failedEvents = daemon.eventLog.recent()
+    const activationEvent = failedEvents.find((event) => event.message === "release generation activation failed")
+    const restorationEvent = failedEvents.find((event) => event.message === "release generation compensation restoration failed")
+
+    assert.match(String(activationEvent?.data.error), /activate command exited non-zero/)
+    assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
+    assert.match(String(restorationEvent?.data.error), /incumbent restoration rejected/)
     assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1"])
+    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
 
-    await fs.writeFile(fixture.activationGatePath, "allow\n")
-    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    incumbentCoordinator.reactivateStrict = reactivate
+    const recovery = await sendControlCommand({
+      command: {
+        command: "recover-generation-transition",
+        previousReleaseId: "v1",
+        releaseId: "v2",
+        releasePath: fixture.root,
+        revision: "v2"
+      },
+      path: fixture.config.control.path
+    })
 
-    assert.equal(daemon.status().activeReleaseId, "v2")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+    assert.equal(recovery.recoveryStatus, "recovered")
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(daemon.status().generationTransition, undefined)
+    const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
+
+    assert.equal(persisted?.generationTransition, undefined)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1", "retire:v2"])
+
+    const idempotent = await sendControlCommand({
+      command: {
+        command: "recover-generation-transition",
+        previousReleaseId: "v1",
+        releaseId: "v2",
+        releasePath: fixture.root,
+        revision: "v2"
+      },
+      path: fixture.config.control.path
+    })
+
+    assert.equal(idempotent.recoveryStatus, "already_recovered")
+    await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
+    await assert.rejects(
+      () => sendControlCommand({
+        command: {
+          command: "recover-generation-transition",
+          previousReleaseId: "v1",
+          releaseId: "v3",
+          releasePath: fixture.root,
+          revision: "v3"
+        },
+        path: fixture.config.control.path
+      }),
+      /not a safe failed pre-commit transition/i
+    )
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("candidate activation failure compensates to the incumbent and admits a different later release", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /activate command exited non-zero.*compensation restored incumbent v1 as authoritative and retired failed candidate v2/i
+    )
+
+    const compensated = daemon.status()
+
+    assert.equal(compensated.activeReleaseId, "v1")
+    assert.equal(compensated.generationTransition, undefined)
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "running")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1", "retire:v2"])
+
+    await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
+
+    assert.equal(daemon.status().activeReleaseId, "v3")
+    assert.equal(await fetchText(daemon, "/release"), "v3")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("compensation keeps the fence when the cleared checkpoint cannot be persisted", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const checkpoint = daemon.checkpointGenerationTransition.bind(daemon)
+
+    daemon.checkpointGenerationTransition = async () => {
+      if (!daemon.generationTransition) throw new Error("cleared checkpoint unavailable")
+      await checkpoint()
+    }
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /activate command exited non-zero.*compensation checkpoint clear failed: cleared checkpoint unavailable/i
+    )
+
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(daemon.status().generationTransition?.phase, "retiring_failed_candidate")
+    const persisted = /** @type {{generationTransition?: {phase?: string}} | undefined} */ (await readState(fixture.statePath))
+
+    assert.equal(persisted?.generationTransition?.phase, "retiring_failed_candidate")
+    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+
+    daemon.checkpointGenerationTransition = checkpoint
+    const recovery = await sendControlCommand({
+      command: {
+        command: "recover-generation-transition",
+        previousReleaseId: "v1",
+        releaseId: "v2",
+        releasePath: fixture.root,
+        revision: "v2"
+      },
+      path: fixture.config.control.path
+    })
+
+    assert.equal(recovery.recoveryStatus, "recovered")
+    assert.equal(daemon.status().generationTransition, undefined)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -691,6 +828,10 @@ test("unresolved generation transition fences stop, restart, and rollback mutati
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const incumbentCoordinator = daemon.releases.get("v1")?.getProcess("beacon")
+
+    assert.ok(incumbentCoordinator)
+    incumbentCoordinator.reactivateStrict = async () => { throw new Error("incumbent restoration rejected") }
     await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /activate command exited non-zero/)
 
     await assert.rejects(() => daemon.stopRelease("v2"), /cannot stop.*generation transition.*unresolved/i)
@@ -698,9 +839,7 @@ test("unresolved generation transition fences stop, restart, and rollback mutati
     await assert.rejects(() => daemon.rollback({releaseId: "v2"}), /cannot rollback.*generation transition.*unresolved/i)
 
     assert.notEqual(statusRelease(daemon, "v2").processes.find((entry) => entry.id === "web")?.state, "stopped")
-    await fs.writeFile(fixture.activationGatePath, "allow\n")
-    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
-    assert.equal(await fetchText(daemon, "/release"), "v2")
+    assert.equal(await fetchText(daemon, "/release"), "v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})

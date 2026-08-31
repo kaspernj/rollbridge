@@ -23,6 +23,7 @@ export default class GuardianClient {
     this.processes = /** @type {Map<string, GuardianProcess>} */ (new Map())
     this.reservedProcessKey = /** @type {string | undefined} */ (undefined)
     this.reservedProcessProvenance = /** @type {string | undefined} */ (undefined)
+    this.generationReactivation = /** @type {boolean | undefined} */ (undefined)
     this.events = /** @type {Map<string, {reject: (error: Error) => void, resolve: (value: Record<string, import("./json.js").JsonValue>) => void}[]>} */ (new Map())
     this.eventHandlers = /** @type {Map<string, ((event: Record<string, import("./json.js").JsonValue>) => void)[]>} */ (new Map())
   }
@@ -51,6 +52,7 @@ export default class GuardianClient {
     if (child.connected) await new Promise((resolve) => child.once("disconnect", () => resolve(undefined)))
     child.unref()
     await this.connect()
+    this.generationReactivation = true
   }
 
   /**
@@ -184,9 +186,12 @@ export default class GuardianClient {
     await this.request({command: "owner-ready", ownerPid: process.pid})
   }
 
-  /** @returns {Promise<{daemonRecovery: number}>} Guardian protocol capabilities. */
+  /** @returns {Promise<{daemonRecovery: number, generationReactivation?: number}>} Guardian protocol capabilities. */
   async capabilities() {
-    return /** @type {{daemonRecovery: number}} */ (await this.request({command: "capabilities"}))
+    const capabilities = /** @type {{daemonRecovery: number, generationReactivation?: number}} */ (await this.request({command: "capabilities"}))
+
+    this.generationReactivation = capabilities.generationReactivation === 1
+    return capabilities
   }
 
   /** Starts graceful process retirement and relinquishes committed owner authority. */
@@ -445,6 +450,7 @@ class GuardianProcess extends ManagedProcess {
     this.cachedStatus = super.status()
     this.registration = /** @type {Promise<void> | undefined} */ (undefined)
     this.pendingUpdate = Promise.resolve()
+    this.compatibilityReactivated = false
   }
 
   async ensureRegistered() {
@@ -479,6 +485,7 @@ class GuardianProcess extends ManagedProcess {
     await this.pendingUpdate
     if (lifecycleRole) this.lifecycleRole = lifecycleRole
     this.cachedStatus = asProcessStatus(await this.client.request({command: "start", key: this.key, lifecycleRole, reason}))
+    if (this.cachedStatus.state === "running") this.compatibilityReactivated = false
   }
 
   /**
@@ -529,12 +536,51 @@ class GuardianProcess extends ManagedProcess {
     this.lifecycleRole = "active"
   }
 
+  async reactivateStrict() {
+    await this.ensureRegistered()
+    await this.pendingUpdate
+    try {
+      this.cachedStatus = asProcessStatus(await this.client.request({command: "reactivate", key: this.key}))
+      this.client.generationReactivation = true
+      this.compatibilityReactivated = false
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "Unknown guardian command: reactivate") throw error
+      this.client.generationReactivation = false
+      await this.adoptRetainedActive({activate: true})
+    }
+    this.lifecycleRole = "active"
+  }
+
+  /**
+   * Bridges a retained quiesced process owned by a pre-reactivation guardian.
+   * @param {{activate: boolean}} options - Whether to run the external activation acknowledgement.
+   */
+  async adoptRetainedActive({activate}) {
+    const before = this.cachedStatus
+
+    if (!before.pid || (before.state !== "quiesced" && before.state !== "running")) throw new Error(`Process ${this.id} is not retained for compatible reactivation`)
+    if (activate) await this.runActivationHook(before.pid)
+    const verified = asProcessStatus(await this.client.request({command: "status", key: this.key}))
+
+    if (verified.pid !== before.pid || (verified.state !== "quiesced" && verified.state !== "running")) {
+      throw new Error(`Process ${this.id} exited before compatible reactivation completed`)
+    }
+    const adopted = asProcessStatus(await this.client.request({command: "start", key: this.key, lifecycleRole: "active", reason: "deploy"}))
+
+    if (adopted.pid !== before.pid) throw new Error(`Process ${this.id} changed before compatible reactivation was adopted`)
+    this.cachedStatus = asProcessStatus({...adopted, lifecycleRole: "active", state: "running"})
+    this.compatibilityReactivated = true
+  }
+
   /** @param {import("./managed-process.js").LifecycleRole} role - Exact generation role. */
   async setLifecycleRole(role) {
     await this.ensureRegistered()
     await this.pendingUpdate
     this.cachedStatus = asProcessStatus(await this.client.request({command: "set-lifecycle-role", key: this.key, lifecycleRole: role}))
     this.lifecycleRole = role
+    if (role === "active" && this.client.generationReactivation === false && this.cachedStatus.state === "quiesced") {
+      await this.adoptRetainedActive({activate: false})
+    }
   }
 
   async stop(options = {}) {
@@ -550,6 +596,12 @@ class GuardianProcess extends ManagedProcess {
   /** @param {Record<string, import("./json.js").JsonValue>} event - Guardian event. */
   onGuardianEvent(event) {
     if (event.status) this.cachedStatus = asProcessStatus(event.status)
+    if (this.compatibilityReactivated && (this.cachedStatus.state === "failed" || this.cachedStatus.state === "stopped") && this.shouldRestart()) {
+      this.compatibilityReactivated = false
+      void this.start("crash", this.lifecycleRole).catch((error) => {
+        this.logger("compatible reactivated process restart failed", {error: error instanceof Error ? error.message : String(error), id: this.id})
+      })
+    }
     if (event.event === "process-log") {
       const entry = asProcessLog(event.entry)
 
