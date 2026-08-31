@@ -141,14 +141,17 @@ export default class ReleaseGroup extends EventEmitter {
       .filter((processConfig) => processConfig.port && (processConfig.policy !== "service" || processConfig.deployStrategy === "handoff"))
       .map((processConfig) => snapshot.ports[processConfig.id])
     const distinctGenerationPorts = new Set(generationPorts)
+    const ownsGenerationPorts = snapshot.state === "starting" || snapshot.state === "active" || snapshot.state === "draining"
 
     if (distinctGenerationPorts.size !== generationPorts.length) throw new Error(`Persisted release ${this.releaseId} reuses a port within one live generation`)
-    for (const port of distinctGenerationPorts) {
-      if (this.portReservations.has(port)) throw new Error(`Persisted release ${this.releaseId} port ${port} is already reserved by another live generation`)
-    }
-    for (const port of distinctGenerationPorts) {
-      this.portReservations.add(port)
-      this.ownedPortReservations.add(port)
+    if (ownsGenerationPorts) {
+      for (const port of distinctGenerationPorts) {
+        if (this.portReservations.has(port)) throw new Error(`Persisted release ${this.releaseId} port ${port} is already reserved by another live generation`)
+      }
+      for (const port of distinctGenerationPorts) {
+        this.portReservations.add(port)
+        this.ownedPortReservations.add(port)
+      }
     }
 
     this.ports = {...snapshot.ports}
@@ -281,6 +284,7 @@ export default class ReleaseGroup extends EventEmitter {
    * The caller must prove the durable transition identity before using this path.
    */
   async restartCommittedGeneration() {
+    if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
     this.assertCommittedGenerationRecoverable()
     this.state = "starting"
     try {
@@ -288,7 +292,10 @@ export default class ReleaseGroup extends EventEmitter {
         const instances = this.getProcesses(processConfig.id)
 
         if (instances.length !== processConfig.replicas) throw new Error(`Committed generation ${this.releaseId} is missing process ${processConfig.id}`)
-        for (const {process} of instances) await process.start("deploy", processConfig.lifecycle.activateCommand ? "candidate" : undefined)
+        for (const {process} of instances) {
+          if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
+          await process.start("deploy", processConfig.lifecycle.activateCommand ? "candidate" : undefined)
+        }
 
         if (processConfig.policy === "proxied" && processConfig.port && processConfig.health) {
           await waitForHealth({
@@ -296,6 +303,7 @@ export default class ReleaseGroup extends EventEmitter {
             host: this.config.proxy.upstreamHost,
             port: this.ports[processConfig.id]
           })
+          if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
         }
       }
     } catch (error) {
@@ -562,6 +570,14 @@ export default class ReleaseGroup extends EventEmitter {
   /** @returns {boolean} Whether a prior daemon still owns live connections for this release. */
   hasTransferredConnections() {
     return this.transferredConnections.http + this.transferredConnections.websocket > 0
+  }
+
+  /** @returns {ReleaseConnections} Connections physically owned by this daemon listener. */
+  localConnections() {
+    return {
+      http: this.connections.http - this.transferredConnections.http,
+      websocket: this.connections.websocket - this.transferredConnections.websocket
+    }
   }
 
   /** Pauses only daemon-local connection-dependent retirement at owner handoff. */

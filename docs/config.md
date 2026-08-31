@@ -50,13 +50,13 @@ restart.
 | `proxy` | object | **required** | Proxy listener and shared defaults (see below). |
 | `processes` | array | **required** | Managed processes (see below). Exactly one must be `proxied`. |
 | `releaseRetention` | object | — | How many stopped releases the daemon retains (see below). |
-| `statePath` | string | unset (no persistence) | File the daemon persists its state to, enabling orphaned-process detection on the next startup (see [`statePath`](#statepath)). |
+| `statePath` | string | unset (no persistence) | File the daemon persists its state to, enabling orphaned-process detection on the next startup; relative paths resolve from the config file directory (see [`statePath`](#statepath)). |
 
 ## `control`
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `control.path` | string | `/tmp/rollbridge-<application>.sock` | Unix domain socket the CLI uses to talk to the daemon. |
+| `control.path` | string | `/tmp/rollbridge-<application>.sock` | Unix domain socket the CLI uses to talk to the daemon; relative paths resolve from the config file directory. |
 | `control.mode` | octal string (e.g. `"660"`) or octal number (`0o660`) | unset | `chmod` applied to the socket after it binds, to share it with a deploy group. When unset, the daemon umask applies. |
 | `control.owner` | non-negative integer uid or user name | unset | `chown` owner applied to the socket after it binds. |
 | `control.group` | non-negative integer gid or group name | unset | `chown` group applied to the socket after it binds, so a shared deploy group can use it. |
@@ -126,15 +126,30 @@ ownerRecovery: {reconnectGraceMs: 30000}
 The private guardian socket is derived from `statePath`; the atomic state file is
 written mode `0600` and contains its authentication capability. The guardian
 owns managed child processes, restart policy, lifecycle hooks, and exit events.
-After an unexpected daemon exit, an exact config/runtime replacement claims the
-guardian during `reconnectGraceMs`, restores active and draining releases with
-their allocated ports, and resumes proxy/control ownership. Concurrent matching
-starts are fenced: one claims ownership and losers attest that winner. A config
-identity mismatch or partial state fails closed without rewriting the snapshot.
-Owner disconnection alone never reclaims accepted work or transfers workers:
-guardian-owned processes and their generation-local connections continue during
-the grace, so the replacement reconnects to supervision rather than duplicating
-execution.
+After an unexpected daemon exit, an exact config/runtime replacement may claim
+the guardian during `reconnectGraceMs`. If none does, the guardian restarts the
+exact accepted daemon command and environment itself, retains startup fencing
+until that daemon publishes its ready listeners and PID file, and uses a nonzero
+retry backoff after failed starts. The replacement restores active and draining
+releases with their allocated ports and resumes proxy/control ownership.
+An unfailed durable generation transition resumes under the guardian's mutation
+fence after those listeners and the recovered PID are ready, so a valid long
+lifecycle hook does not consume the daemon startup deadline. Status remains
+available during replay while competing mutations and terminal owner operations
+stay fenced. `SIGINT` and `SIGTERM` wait for that startup replay before beginning
+clean shutdown. Transition snapshots carry a monotonic journal revision; the
+public snapshot is considered only when it is strictly newer and contains every
+retained transition and singleton-owning release, while private guardian state
+remains authoritative on ties and for older released snapshots without a
+journal revision.
+Concurrent matching starts are fenced: one claims ownership and losers attest
+that winner. The authenticated guardian's private committed state is
+authoritative when the public snapshot is stale or partially written; missing or
+corrupt guardian identity, authentication, or authority still fails closed
+without rewriting the snapshot. Owner disconnection alone never reclaims
+accepted work or transfers workers: guardian-owned processes and their
+generation-local connections continue during the grace, so the replacement
+reconnects to supervision rather than duplicating execution.
 
 For a responsive incompatible owner, `ensure-daemon` prepares the requested
 durable runtime, restores exact active and draining generation definitions from
@@ -162,6 +177,13 @@ The resulting status includes `ownerTransition: {disruptive: true, mode:
 identity; retry config or socket changes after the protocol upgrade, when the
 normal atomic handoff applies. Other guardian/auth/transport/identity failures
 remain fail-closed.
+
+An intermediate guardian which already supports atomic owner replacement but
+predates guardian-owned daemon recovery cannot be upgraded through that bridge.
+The candidate aborts before listener handoff, the incumbent resumes any paused
+drains and remains serving, and the command requests one explicit clean
+`shutdown` followed by `ensure-daemon` so the new guardian can become the OS
+supervisor.
 
 Without `ownerRecovery`, `statePath` retains the advisory orphan behavior above.
 
@@ -293,7 +315,9 @@ release id, path, revision, and config may resume only its incomplete idempotent
 phase. Once the health-ready candidate is journaled, its exact config becomes the
 transition authority even if a later hook fails. A recorded failed hook is not
 retried merely because daemon ownership changes. Omit `activateCommand` to retain
-the existing activate-then-retire behavior.
+the existing activate-then-retire behavior. Adding, removing, or moving
+`activateCommand` changes the daemon's generation coordinator and therefore
+requires a daemon restart before the next deploy.
 
 The synchronous traffic assignment is persisted as `committed_pending` before
 Rollbridge awaits singleton replacement. Exact retry or unambiguous owner recovery
@@ -469,6 +493,6 @@ Rollbridge sets these in every managed process's environment (the process's own
 - `restart.maxRestarts` must be a non-negative integer (omit it for unlimited restarts); `restart.backoffFactor` must be a number ≥ 1; `restart.windowMs` and `restart.maxDelayMs` must be non-negative numbers.
 - When `memory` is set, `memory.limitBytes` must be a positive integer, `memory.warnBytes` a non-negative integer, and `memory.checkIntervalMs` a positive number.
 - `replicas` must be a positive integer; `replicas > 1` is allowed only on a `companion` process without a `port`. Process ids must not contain `#` (reserved for replica instance ids).
-- `lifecycle.activateCommand`/`quietCommand`/`drainCommand`/`stopCommand` must be strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`. `activateCommand` is allowed on at most one handoff service, requires that service's `quietCommand`, and requires `statePath` plus `ownerRecovery`. A `lifecycle.stopCommand` may not be combined with a custom `stopSignal` (the `stopCommand` runs instead of the signal, so the signal would be ignored).
+- `lifecycle.activateCommand`/`quietCommand`/`drainCommand`/`stopCommand` must be non-empty strings when set, and `lifecycle.drainTimeoutMs` a non-negative number; `lifecycle.drainCommand` requires a positive `lifecycle.drainTimeoutMs`. `activateCommand` is allowed on at most one handoff service, requires that service's `quietCommand`, and requires `statePath` plus `ownerRecovery`. A `lifecycle.stopCommand` may not be combined with a custom `stopSignal` (the `stopCommand` runs instead of the signal, so the signal would be ignored).
 - `nonBlockingDrain` must be a boolean, and is allowed only on a `companion` process.
 - `statePath` must be a string when set.

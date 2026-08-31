@@ -10,6 +10,7 @@ import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
 import {sendControlCommand} from "../src/control-client.js"
+import GuardianClient from "../src/guardian-client.js"
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const dummyAppPath = path.join(repoRoot, "test", "fixtures", "dummy-app.js")
@@ -23,12 +24,14 @@ test("detached daemon survives deletion of the release-local Rollbridge installa
   const logPath = path.join(root, "daemon.log")
   const pidPath = path.join(root, "daemon.pid")
   const runtimePath = path.join(root, "runtime")
+  const statePath = path.join(root, "state.json")
 
   try {
     await Promise.all([prepareRelease(releaseA, true), prepareRelease(releaseB, true)])
     await fs.writeFile(configPath, `export default ${JSON.stringify({
       application: "runtime-retention-test",
       control: {path: socketPath},
+      ownerRecovery: {reconnectGraceMs: 50},
       processes: [{
         command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
         health: {intervalMs: 25, path: "/ping", timeoutMs: 3000},
@@ -36,7 +39,8 @@ test("detached daemon survives deletion of the release-local Rollbridge installa
         policy: "proxied",
         port: {from: 0, to: 0}
       }],
-      proxy: {drainTimeoutMs: 100, forceStopTimeoutMs: 100, host: "127.0.0.1", port: 0}
+      proxy: {drainTimeoutMs: 100, forceStopTimeoutMs: 100, host: "127.0.0.1", port: 0},
+      statePath
     }, null, 2)}\n`)
 
     await runReleaseCli(releaseA, [
@@ -52,7 +56,7 @@ test("detached daemon survives deletion of the release-local Rollbridge installa
       "--daemon-runtime-path", runtimePath
     ])
 
-    await fs.rm(path.join(releaseA, "node_modules"), {recursive: true})
+    await fs.rm(releaseA, {recursive: true})
 
     const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const proxyPort = /** @type {{port: number}} */ (status.proxy).port
@@ -66,14 +70,67 @@ test("detached daemon survives deletion of the release-local Rollbridge installa
     assert.ok(!runtime.path.startsWith(releaseA), `runtime must be outside release A: ${runtime.path}`)
     assert.equal(response.status, 200)
     assert.equal(await response.text(), "deferred runtime loaded\n")
+    assert.equal(typeof status.daemonPid, "number")
+    const daemonPid = /** @type {number} */ (status.daemonPid)
+
+    process.kill(daemonPid, "SIGKILL")
+    const recoveredPid = await waitForChangedPid(pidPath, daemonPid)
+    const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(recovered.daemonPid, recoveredPid)
+    assert.equal(recovered.activeReleaseId, "B")
   } finally {
     try {
       await sendControlCommand({command: {command: "shutdown"}, path: socketPath})
     } catch {
       const pid = Number.parseInt(await fs.readFile(pidPath, "utf8").catch(() => ""), 10)
-      if (Number.isInteger(pid)) process.kill(pid, "SIGKILL")
+      if (Number.isInteger(pid)) killProcessIfAlive(pid)
     }
+    await stopGuardian(statePath)
 
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("ensure-daemon resolves an explicit relative config before changing to its durable directory", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-runtime-relative-config-"))
+  const release = path.join(root, "release")
+  const configDirectory = path.join(release, "configs")
+  const configPath = path.join(configDirectory, "rollbridge.js")
+  const pidPath = path.join(root, "daemon.pid")
+  const socketPath = path.join(root, "control.sock")
+  const statePath = path.join(root, "state.json")
+
+  try {
+    await prepareRelease(release, false)
+    await fs.mkdir(configDirectory)
+    await fs.writeFile(configPath, `export default ${JSON.stringify({
+      ...basicConfig(path.relative(configDirectory, socketPath)),
+      ownerRecovery: {reconnectGraceMs: 50},
+      processes: [{
+        command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`,
+        health: {intervalMs: 25, path: "/ping", timeoutMs: 3000},
+        id: "web",
+        policy: "proxied",
+        port: {from: 0, to: 0}
+      }],
+      statePath: path.relative(configDirectory, statePath)
+    }, null, 2)}\n`)
+    await runReleaseCli(release, [
+      "deploy", "--ensure-daemon", "--config", path.relative(release, configPath),
+      "--release-path", release, "--release-id", "relative-config",
+      "--daemon-log-path", path.join(root, "daemon.log"), "--daemon-pid-path", pidPath,
+      "--daemon-runtime-path", path.join(root, "runtime"), "--daemon-start-timeout-ms", "1000"
+    ])
+    const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(status.activeReleaseId, "relative-config")
+  } finally {
+    await sendControlCommand({command: {command: "shutdown"}, path: socketPath}).catch(() => undefined)
+    await stopGuardian(statePath)
+    const pid = Number.parseInt(await fs.readFile(pidPath, "utf8").catch(() => ""), 10)
+
+    if (Number.isInteger(pid)) killProcessIfAlive(pid)
     await fs.rm(root, {force: true, recursive: true})
   }
 })
@@ -349,7 +406,7 @@ function basicConfig(socketPath) {
  */
 async function runReleaseCli(releasePath, args) {
   const binPath = path.join(releasePath, "node_modules", "rollbridge", "bin", "rollbridge")
-  const child = spawn(process.execPath, [binPath, ...args], {stdio: ["ignore", "pipe", "pipe"]})
+  const child = spawn(process.execPath, [binPath, ...args], {cwd: releasePath, stdio: ["ignore", "pipe", "pipe"]})
   let output = ""
 
   child.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk })
@@ -357,4 +414,64 @@ async function runReleaseCli(releasePath, args) {
   const [code] = await once(child, "exit")
 
   if (code !== 0) throw new Error(output)
+}
+
+/**
+ * @param {string} pidPath - Daemon PID file.
+ * @param {number} previousPid - Exited daemon PID.
+ * @returns {Promise<number>} Recovered daemon PID.
+ */
+async function waitForChangedPid(pidPath, previousPid) {
+  const deadline = Date.now() + 5000
+
+  while (Date.now() < deadline) {
+    const pid = Number.parseInt(await fs.readFile(pidPath, "utf8").catch(() => ""), 10)
+
+    if (Number.isInteger(pid) && pid !== previousPid) return pid
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`Timed out waiting for ${pidPath} to publish a recovered daemon PID`)
+}
+
+/** @param {number} pid - Exact fixture process PID. */
+function killProcessIfAlive(pid) {
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error
+  }
+}
+
+/** @param {string} statePath - Owner-recovery state path. */
+async function stopGuardian(statePath) {
+  try {
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+    const identity = state.recovery?.guardian
+    const pid = identity?.pid
+
+    if (identity?.socketPath && identity.token) {
+      const client = new GuardianClient(identity)
+
+      try {
+        await client.connect()
+        for (const entry of await client.inventory()) {
+          if (entry.status.pid) {
+            try { process.kill(-entry.status.pid, "SIGKILL") } catch (error) {
+              if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error
+            }
+          }
+        }
+      } finally {
+        client.disconnect()
+      }
+    }
+    if (typeof pid === "number") {
+      const command = (await fs.readFile(`/proc/${pid}/cmdline`, "utf8")).replaceAll("\0", " ")
+
+      if (!command.includes("process-guardian.js") || !command.includes(statePath)) throw new Error(`Refusing to stop unverified fixture guardian pid ${pid}`)
+      process.kill(pid, "SIGKILL")
+    }
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || !["ENOENT", "ESRCH"].includes(String(error.code))) throw error
+  }
 }

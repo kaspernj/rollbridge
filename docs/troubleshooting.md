@@ -138,11 +138,13 @@ end close idle WebSockets on deploy). In the documented compliant jobs topology,
 jobs companions use `nonBlockingDrain: true`, so timeout expiry affects only the
 web side and must not stop a still-draining jobs generation.
 
-`status.releaseReferences` reports active and draining releases until full stop;
-Rampway still owns enforcement against on-disk cleanup. With `ownerRecovery`,
-references reconstruct across same-authority daemon process replacement and
-transfer across an incompatible `ensure-daemon` owner handoff. They do not
-transfer through the separate destructive `--takeover-owner` path. If
+`status.releaseReferences` reports active and draining releases, plus a stopped
+release that still owns a persistent service definition, pending singleton, or
+unresolved generation transition, until all runtime ownership ends; Rampway
+still owns enforcement against on-disk cleanup. With `ownerRecovery`, references
+reconstruct across same-authority daemon process replacement and transfer across
+an incompatible `ensure-daemon` owner handoff. They do not transfer through the
+separate destructive `--takeover-owner` path. If
 `retirementError` is set,
 inspect the quiet-hook events. Rollbridge deliberately leaves that generation
 alive rather than signaling arbitrary PIDs or continuing its stop sequence.

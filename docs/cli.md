@@ -99,8 +99,11 @@ rollbridge ensure-daemon [--config <path>]
 ```
 
 Starts the daemon as a detached process **only if** the control socket is not
-already accepting commands, waits until it responds, then prints the daemon
-status JSON. Idempotent — safe to call before every deploy.
+already accepting commands, waits until it responds and its guardian accepts
+the ready owner, then prints the daemon status JSON. Idempotent — safe to call
+before every deploy. The detached daemon uses the config file's directory as its
+working directory, rather than the invoking release, so release retention cannot
+remove the accepted recovery cwd.
 
 Before starting a detached daemon, Rollbridge atomically copies its runtime code
 and production dependency closure into a content-addressed directory outside
@@ -128,8 +131,8 @@ and authority failures do not qualify and fail before any deploy is sent.
   [`logging.md`](logging.md) for the log format and rotation guidance.
 - `--daemon-pid-path <path>` — file the detached daemon's PID is written to.
   Default: `/tmp/rollbridge-<application>.pid`. During replacement, the file
-  continues to name the incumbent until the reachable winner reports and
-  publishes its exact `daemonPid`.
+  continues to name the incumbent until the authenticated guardian atomically
+  publishes the ready winner's exact `daemonPid`.
 - `--daemon-runtime-path <path>` — parent directory for content-addressed daemon
   runtime snapshots. Default:
   `/tmp/rollbridge-<user-id>-<application-hash>-runtime`. The directory must be owned
@@ -167,10 +170,16 @@ An unresolved failure blocks different deploys; only the exact same release,
 path, revision, and config authority may explicitly resume its incomplete
 idempotent phase. A durable `committed_pending` phase keeps exact retry from
 reporting success until singleton replacement finishes. Stop, restart, and
-rollback mutations are rejected while the transition is unresolved. Hook-free
-configs retain the existing post-activation quiet behavior and retirement result.
-`status.releaseReferences` lists `{releaseId, releasePath}` for every active or
-draining release and excludes fully stopped history.
+rollback mutations are rejected while the transition is unresolved. Automatic
+replay also fences `shutdown` and `retire-owner` until the replay attempt settles.
+An owner replacement may change runtime/package identity during an unresolved
+transition, but it cannot change config authority until that transition commits;
+the incumbent owner remains in place when such a replacement is rejected.
+Hook-free configs retain the existing post-activation quiet behavior and
+retirement result. `status.releaseReferences` lists `{releaseId, releasePath}`
+for every active or draining release and for a stopped release that still owns a
+persistent service definition, pending singleton, or unresolved generation
+transition; unrelated fully stopped history is excluded.
 
 For hook-free configs, after candidate activation `Daemon.deploy()` begins old-generation retirement
 and asynchronous drain before awaiting singleton replacement. A singleton
@@ -244,6 +253,9 @@ Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
 `daemonRuntime` identifies the immutable Rollbridge runtime serving the proxy:
 its runtime `format`, package `version`, content `digest`, and absolute `path`.
 `ensure-daemon` uses this attestation before reusing a responsive daemon.
+With `ownerRecovery`, `ownerRecovery.ready` becomes `true` only after the
+guardian has accepted that daemon's listener readiness and atomically published
+its configured PID file; `ensure-daemon` does not return a pre-ready status.
 
 A foreground known-release daemon also reports the exact CLI bootstrap identity:
 
@@ -302,7 +314,9 @@ Targeting it (by id or `--policy proxied`) is an error; use `rollbridge deploy`
 for a zero-downtime replacement. `--process <id>` with an id that is not a
 managed process (unknown, or a companion with no active release) is also an
 error. Restarting a `service` bounces a shared broker (for example Velocious
-Beacon), which briefly disrupts every process that depends on it.
+Beacon), which briefly disrupts every process that depends on it. For a handoff
+service, restart targets only the active release's instance and restores its
+active lifecycle role before reporting success.
 
 ## `predeploy-cleanup`
 

@@ -32,7 +32,7 @@ export default class GuardianClient {
    * @param {{legacyGuardian?: {pid?: number, socketPath: string, token: string}, ownerState?: import("./json.js").JsonValue}} [options] - Optional authenticated legacy backend migration.
    */
   async launch(options = {}) {
-    const child = spawn(process.execPath, [guardianPath, this.socketPath], {detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"]})
+    const child = spawn(process.execPath, [guardianPath, this.socketPath], {detached: true, stdio: ["ignore", "inherit", "inherit", "ipc"]})
 
     this.pid = child.pid
     this.guardianExitPromise = new Promise((resolve) => child.once("exit", () => resolve(undefined)))
@@ -176,7 +176,17 @@ export default class GuardianClient {
    * @param {import("./json.js").JsonValue} authority - Exact owner authority.
    */
   async claimOwner(graceMs, authority) {
-    await this.request({authority, command: "claim-owner", graceMs})
+    await this.request({authority, command: "claim-owner", graceMs, ownerPid: process.pid})
+  }
+
+  /** Confirms that the claimed daemon has completed startup and published its listeners. */
+  async ownerReady() {
+    await this.request({command: "owner-ready", ownerPid: process.pid})
+  }
+
+  /** @returns {Promise<{daemonRecovery: number}>} Guardian protocol capabilities. */
+  async capabilities() {
+    return /** @type {{daemonRecovery: number}} */ (await this.request({command: "capabilities"}))
   }
 
   /** Starts graceful process retirement and relinquishes committed owner authority. */
@@ -221,7 +231,7 @@ export default class GuardianClient {
    * @returns {Promise<{ownerState: import("./json.js").JsonValue, replacementId: string}>} Prepared transaction.
    */
   async prepareOwnerReplacement(authority, nextAuthority) {
-    return /** @type {{ownerState: import("./json.js").JsonValue, replacementId: string}} */ (await this.request({authority, command: "prepare-owner-replacement", nextAuthority}))
+    return /** @type {{ownerState: import("./json.js").JsonValue, replacementId: string}} */ (await this.request({authority, command: "prepare-owner-replacement", nextAuthority, ownerPid: process.pid}))
   }
 
   /**
@@ -252,12 +262,23 @@ export default class GuardianClient {
   }
 
   /**
+   * Yields a control-less incumbent's listeners while it still owns authority.
+   * @param {string} replacementId - Same-authority staged transaction.
+   * @param {string} key - Exact recovered guardian process proving candidate reconstruction.
+   */
+  async prepareRetiredOwnerListenerHandoff(replacementId, key) {
+    await this.request({command: "prepare-retired-owner-listener-handoff", key, replacementId})
+  }
+
+  /**
    * Begins acquiring the authenticated legacy backend owner channel at the disruptive boundary.
    * @param {string} replacementId - Exact prepared candidate transaction.
    * @param {number} graceMs - Event-driven incumbent disconnect grace.
+   * @param {string} statePath - Durable public recovery state path.
+   * @param {import("./json.js").JsonValue} recoverySnapshot - Discoverable coordinator state.
    */
-  async beginLegacyOwnerClaim(replacementId, graceMs) {
-    await this.request({command: "begin-legacy-owner-claim", graceMs, replacementId})
+  async beginLegacyOwnerClaim(replacementId, graceMs, statePath, recoverySnapshot) {
+    await this.request({command: "begin-legacy-owner-claim", graceMs, recoverySnapshot, replacementId, statePath})
   }
 
   /**
@@ -271,6 +292,22 @@ export default class GuardianClient {
   /** @param {string} replacementId - Committed transaction awaiting incumbent retirement. */
   async finalizeOwnerReplacement(replacementId) {
     await this.request({command: "finalize-owner-replacement", replacementId})
+  }
+
+  /** @param {string} replacementId - Committed transaction with complete listener state. */
+  async completeOwnerListenerRetirement(replacementId) {
+    await this.request({command: "complete-owner-listener-retirement", replacementId})
+  }
+
+  /**
+   * @param {string} replacementId - Committed control-less replacement transaction.
+   * @param {string} sourceId - Stable listener source identity.
+   * @param {string} releaseId - Retained release identity.
+   * @param {{http: number, websocket: number}} connections - Exact incumbent listener counts.
+   * @param {boolean} [localSource] - Whether the sender physically owns this source.
+   */
+  async publishOwnerConnectionState(replacementId, sourceId, releaseId, connections, localSource = false) {
+    await this.request({command: "publish-owner-connection-state", connections, localSource, releaseId, replacementId, sourceId})
   }
 
   /** @param {string} replacementId - Prepared transaction to validate for listener yield. */
@@ -294,9 +331,9 @@ export default class GuardianClient {
     await this.request({command: "end-owner-mutation", mutationId})
   }
 
-  /** @returns {Promise<{committedReplacementId: string | null, ownerClaimed: boolean}>} Transaction status. */
+  /** @returns {Promise<{committedReplacementId: string | null, ownerClaimed: boolean, retirementFailed?: boolean, retirementPending?: boolean, retirementReady?: boolean}>} Transaction status. */
   async replacementStatus() {
-    return /** @type {{committedReplacementId: string | null, ownerClaimed: boolean}} */ (await this.request({command: "replacement-status"}))
+    return /** @type {{committedReplacementId: string | null, ownerClaimed: boolean, retirementFailed?: boolean, retirementPending?: boolean, retirementReady?: boolean}} */ (await this.request({command: "replacement-status"}))
   }
 
   /** @returns {Promise<import("./json.js").JsonValue>} Current private transfer state. */
@@ -444,17 +481,29 @@ class GuardianProcess extends ManagedProcess {
     this.cachedStatus = asProcessStatus(await this.client.request({command: "start", key: this.key, lifecycleRole, reason}))
   }
 
-  /** @param {import("./managed-process.js").ManagedProcessDefinition} definition - Updated definition. */
-  updateDefinition(definition) {
-    const previousProvenance = this.provenance
+  /**
+   * @param {import("./managed-process.js").ManagedProcessDefinition} definition - Updated definition.
+   * @param {import("./json.js").JsonValue} [ownerState] - Private owner state to commit with the definition.
+   * @returns {Promise<void>} Resolves once the guardian commits the replacement definition.
+   */
+  updateDefinition(definition, ownerState) {
     const registration = this.ensureRegistered()
+    const previousUpdate = this.pendingUpdate
+    const nextDefinition = serializableDefinition({...definition, id: this.id})
+    const nextProvenance = crypto.createHash("sha256").update(JSON.stringify(nextDefinition)).digest("hex")
 
-    super.updateDefinition(definition)
-    this.definition = serializableDefinition(this)
-    this.provenance = crypto.createHash("sha256").update(JSON.stringify(this.definition)).digest("hex")
-    this.pendingUpdate = registration.then(async () => {
-      this.cachedStatus = asProcessStatus(await this.client.request({command: "update", definition: this.definition, key: this.key, previousProvenance, provenance: this.provenance}))
+    const previousUpdateSettled = previousUpdate.catch(() => {
+      // The prior caller received the update failure and local provenance stayed unchanged,
+      // so a later explicit update may retry from the last guardian-committed definition.
     })
+
+    this.pendingUpdate = Promise.all([registration, previousUpdateSettled]).then(async () => {
+      this.cachedStatus = asProcessStatus(await this.client.request({command: "update", definition: nextDefinition, key: this.key, ownerState, previousProvenance: this.provenance, provenance: nextProvenance}))
+      super.updateDefinition(definition)
+      this.definition = nextDefinition
+      this.provenance = nextProvenance
+    })
+    return this.pendingUpdate
   }
 
   async quiesce() {
@@ -502,7 +551,10 @@ class GuardianProcess extends ManagedProcess {
   onGuardianEvent(event) {
     if (event.status) this.cachedStatus = asProcessStatus(event.status)
     if (event.event === "process-log") {
-      this.emit("log", asProcessLog(event.entry))
+      const entry = asProcessLog(event.entry)
+
+      this.cachedStatus = {...this.cachedStatus, logs: [...this.cachedStatus.logs, entry].slice(-this.outputLines)}
+      this.emit("log", entry)
       return
     }
     if (event.message === "process started") this.emit("started")

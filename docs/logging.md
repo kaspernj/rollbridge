@@ -15,7 +15,7 @@ daemon was started.
 
 | How the daemon runs | Destination |
 | --- | --- |
-| `rollbridge daemon` (foreground) | stdout — redirect it (`rollbridge daemon … >> /var/log/rollbridge/app.log 2>&1`) or let your service manager capture it. |
+| `rollbridge daemon` (foreground) | stdout — redirect it (`rollbridge daemon … >> /var/log/rollbridge/app.log 2>&1`) or let your service manager capture it. With `ownerRecovery`, guardian restarts inherit that same accepted destination. |
 | systemd (`examples/rollbridge.service`) | the journal — `journalctl -u rollbridge`. journald rotates on its own. |
 | `rollbridge ensure-daemon` / `rollbridge deploy --ensure-daemon` | the **daemon log file**: `--daemon-log-path <path>`, default `/tmp/rollbridge-<application>.log`. The detached daemon's stdout and stderr are appended there. |
 
@@ -46,8 +46,9 @@ protected accordingly.
 
 Without `ownerRecovery`, both in-memory views clear when the daemon restarts.
 With it, guardian-held process output remains available after reconnection while
-the replacement daemon begins a new event history. The configured log file
-persists in either mode.
+the replacement daemon begins a new event history. A detached ensured daemon
+keeps appending to its configured log file, while a recovered foreground daemon
+inherits its original stdout/stderr destination.
 
 ## Rotation
 

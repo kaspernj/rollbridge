@@ -41,37 +41,71 @@ export async function runCli(argv) {
     .option("--boot-attestation <digest>", "Opaque bootstrap ownership attestation (requires the complete bootstrap release tuple)")
     .option("--takeover-owner", "Boot and health-check before retiring the current external owner")
     .option("--replace-owner", "Resume a prepared durable owner replacement")
+    .addOption(new Option("--guardian-daemon-log-path <path>").hideHelp())
+    .addOption(new Option("--guardian-daemon-pid-path <path>").hideHelp())
+    .addOption(new Option("--guardian-daemon-start-timeout-ms <ms>").hideHelp())
     .addOption(new Option("--legacy-incumbent-pid <pid>").hideHelp())
     .action(async (options) => {
       const bootstrap = await validateDaemonBootstrapOptions(options)
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const runtime = await loadDaemonRuntimeIdentity(process.env.ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST)
+      const recoveryEnvironment = /** @type {Record<string, string>} */ (Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined)))
+      const recoveryLogPath = options.guardianDaemonLogPath ? path.resolve(options.guardianDaemonLogPath) : undefined
+      const recoveryPidPath = options.guardianDaemonPidPath ? path.resolve(options.guardianDaemonPidPath) : undefined
+      const recoveryStartupTimeoutMs = normalizeTimeoutMs(options.guardianDaemonStartTimeoutMs)
       const daemon = new RollbridgeDaemon({
         bootstrap,
         config,
         configPath,
         legacyIncumbentPid: positiveIntegerOrUndefined(options.legacyIncumbentPid, "legacy incumbent pid"),
+        recoveryCommand: {
+          args: [
+            path.resolve(argv[1]), "daemon", "--config", configPath,
+            ...(recoveryLogPath ? ["--guardian-daemon-log-path", recoveryLogPath] : []),
+            ...(recoveryPidPath ? ["--guardian-daemon-pid-path", recoveryPidPath] : []),
+            "--guardian-daemon-start-timeout-ms", String(recoveryStartupTimeoutMs)
+          ],
+          cwd: process.cwd(),
+          env: recoveryEnvironment,
+          executable: process.execPath,
+          logPath: recoveryLogPath,
+          pidPath: recoveryPidPath,
+          startupTimeoutMs: recoveryStartupTimeoutMs
+        },
         runtime
       })
+      let startupPromise = Promise.resolve()
+      let shutdownRequested = false
+      const shutdown = async () => {
+        shutdownRequested = true
+        await startupPromise.catch(() => undefined)
+        await daemon.shutdown()
+        process.exit(0)
+      }
+
+      process.once("SIGINT", () => { void shutdown() })
+      process.once("SIGTERM", () => { void shutdown() })
 
       if (options.takeoverOwner && (!bootstrap || !bootstrap.attestation)) throw new Error("Daemon --takeover-owner requires the complete bootstrap release tuple and --boot-attestation.")
 
       if (options.replaceOwner) {
         if (bootstrap || options.takeoverOwner) throw new Error("Daemon --replace-owner cannot be combined with bootstrap takeover options.")
-        await daemon.replaceIncompatibleOwner()
+        startupPromise = daemon.replaceIncompatibleOwner()
+        await startupPromise
       }
 
       if (!options.takeoverOwner && !options.replaceOwner) {
         try {
-          await daemon.start({exposeControl: !bootstrap})
+          startupPromise = daemon.start({exposeControl: !bootstrap})
+          await startupPromise
         } catch (error) {
           if (!config.ownerRecovery) throw error
 
           const winner = await sendControlCommand({command: {command: "status"}, path: config.control.path}).catch(() => undefined)
           const matchingWinner = winner?.application === config.application &&
             winner.ownerRecovery && typeof winner.ownerRecovery === "object" && !Array.isArray(winner.ownerRecovery) &&
-            winner.ownerRecovery.configDigest === daemon.ownerRecoveryConfigDigest() &&
+            winner.ownerRecovery.configDigest === daemon.ownerRecoveryConfigDigest() && winner.ownerRecovery.ready === true &&
             ((!runtime && !winner.daemonRuntime) || (runtime && winner.daemonRuntime && typeof winner.daemonRuntime === "object" && !Array.isArray(winner.daemonRuntime) && winner.daemonRuntime.digest === runtime.digest))
 
           if (!matchingWinner) throw error
@@ -79,14 +113,7 @@ export async function runCli(argv) {
           return
         }
       }
-
-      const shutdown = async () => {
-        await daemon.shutdown()
-        process.exit(0)
-      }
-
-      process.once("SIGINT", () => { void shutdown() })
-      process.once("SIGTERM", () => { void shutdown() })
+      if (shutdownRequested) return
 
       if (bootstrap) {
         try {
@@ -105,6 +132,7 @@ export async function runCli(argv) {
           if (config.ownerRecovery && daemon.releases.size > 0) {
             if (daemon.activeRelease) {
               await daemon.exposeControl()
+              await publishDaemonReadiness(daemon, recoveryPidPath)
               return
             }
             await daemon.abandonOwnerRecoveryAttempt()
@@ -124,6 +152,7 @@ export async function runCli(argv) {
           return
         }
       }
+      if (!shutdownRequested) await publishDaemonReadiness(daemon, recoveryPidPath)
     })
 
   program
@@ -839,6 +868,8 @@ async function validateDaemonBootstrapOptions(options) {
  */
 async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtimePath, timeoutMs}) {
   const runtime = await prepareDaemonRuntime(runtimePath || defaultDaemonRuntimePath(config))
+  const resolvedConfigPath = path.resolve(configPath)
+  const resolvedLogPath = path.resolve(logPath || defaultDaemonLogPath(config))
   const existingStatus = await daemonStatus(config)
   const expectedConfigDigest = ownerConfigDigest(config)
 
@@ -848,26 +879,30 @@ async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtim
       existingStatus.ownerRecovery.configDigest === expectedConfigDigest
     )
 
-    if (compatibleDaemonRuntime(existingStatus, runtime) && matchingRecoveryAuthority) return existingStatus
+    if (compatibleDaemonRuntime(existingStatus, runtime) && matchingRecoveryAuthority) {
+      if (!config.ownerRecovery || (existingStatus.ownerRecovery && typeof existingStatus.ownerRecovery === "object" && !Array.isArray(existingStatus.ownerRecovery) && existingStatus.ownerRecovery.ready === true)) return existingStatus
+      return await waitForDaemonStatus(config, timeoutMs, {configDigest: expectedConfigDigest, runtime})
+    }
     if (!config.ownerRecovery) assertCompatibleDaemonRuntime(existingStatus, runtime)
   }
 
   const persistedState = config.ownerRecovery && config.statePath ? await readState(config.statePath) : undefined
   const persistedOwner = persistedState && typeof persistedState === "object" && !Array.isArray(persistedState) ? persistedState : undefined
   const persistedRecovery = persistedOwner?.recovery
-  const replacement = Boolean(config.ownerRecovery && (existingStatus || (persistedRecovery && typeof persistedRecovery === "object" && !Array.isArray(persistedRecovery) && (
-    persistedRecovery.configDigest !== expectedConfigDigest || !compatibleDaemonRuntime(/** @type {Record<string, import("./json.js").JsonValue>} */ (persistedOwner), runtime)
-  ))))
-  const resolvedPidPath = pidPath || defaultDaemonPidPath(config)
+  const replacement = Boolean(config.ownerRecovery && (existingStatus || (persistedRecovery && typeof persistedRecovery === "object" && !Array.isArray(persistedRecovery))))
+  const resolvedPidPath = path.resolve(pidPath || defaultDaemonPidPath(config))
   const legacyIncumbentPid = replacement ? await readDaemonPid(resolvedPidPath) : undefined
 
   await fsPromises.mkdir(path.dirname(resolvedPidPath), {recursive: true})
   const candidate = await startDaemonProcess({
-    configPath,
-    logPath: logPath || defaultDaemonLogPath(config),
+    configPath: resolvedConfigPath,
+    cwd: path.dirname(resolvedConfigPath),
+    logPath: resolvedLogPath,
+    pidPath: resolvedPidPath,
     replacement,
     legacyIncumbentPid,
-    runtime
+    runtime,
+    timeoutMs
   })
   let startedStatus
 
@@ -885,8 +920,11 @@ async function ensureDaemonRunning({config, configPath, logPath, pidPath, runtim
     )
 
     if (!startedPid) throw new Error("Started Rollbridge daemon did not report its exact PID")
-    await fsPromises.writeFile(resolvedPidPath, `${startedPid}\n`)
+    if (!config.ownerRecovery) await fsPromises.writeFile(resolvedPidPath, `${startedPid}\n`)
     return startedStatus
+  } catch (error) {
+    killDetachedProcessGroup(candidate)
+    throw error
   } finally {
     candidate.unref()
   }
@@ -917,13 +955,16 @@ async function daemonStatus(config) {
  * Starts the foreground daemon command as a detached child.
  * @param {object} args - Options.
  * @param {string} args.configPath - Config path.
+ * @param {string} args.cwd - Durable daemon working directory.
  * @param {string} args.logPath - Log file path.
+ * @param {string} args.pidPath - PID file path.
  * @param {boolean} args.replacement - Whether to run the incompatible replacement transaction.
  * @param {number | undefined} args.legacyIncumbentPid - Exact incumbent recorded before candidate spawn.
  * @param {import("./daemon-runtime.js").DaemonRuntimeIdentity} args.runtime - Prepared runtime.
+ * @param {number} args.timeoutMs - Guardian recovery startup timeout.
  * @returns {Promise<import("node:child_process").ChildProcess>} Referenced child after exact spawn completion.
  */
-async function startDaemonProcess({configPath, legacyIncumbentPid, logPath, replacement = false, runtime}) {
+async function startDaemonProcess({configPath, cwd, legacyIncumbentPid, logPath, pidPath, replacement = false, runtime, timeoutMs}) {
   await fsPromises.mkdir(path.dirname(logPath), {recursive: true})
 
   const stdoutFd = fs.openSync(logPath, "a")
@@ -932,9 +973,13 @@ async function startDaemonProcess({configPath, legacyIncumbentPid, logPath, repl
   try {
     const child = spawn(process.execPath, [
       path.join(runtime.path, "bin", "rollbridge"), "daemon", "--config", configPath,
+      "--guardian-daemon-log-path", logPath,
+      "--guardian-daemon-pid-path", pidPath,
+      "--guardian-daemon-start-timeout-ms", String(timeoutMs),
       ...(replacement ? ["--replace-owner"] : []),
       ...(legacyIncumbentPid ? ["--legacy-incumbent-pid", String(legacyIncumbentPid)] : [])
     ], {
+      cwd,
       detached: true,
       env: {...process.env, ROLLBRIDGE_DAEMON_RUNTIME_MANIFEST: path.join(runtime.path, "runtime.json")},
       stdio: ["ignore", stdoutFd, stderrFd]
@@ -1026,11 +1071,10 @@ async function waitForDaemonStatus(config, timeoutMs, expected = {}) {
 
       if (status) {
         const statusPid = typeof status.daemonPid === "number" ? status.daemonPid : undefined
-        const candidateResolved = !expected.candidate || candidateExit || statusPid === expected.candidate.pid
-
         if (expected.runtime && !compatibleDaemonRuntime(status, expected.runtime)) {
           if (!expected.configDigest) assertCompatibleDaemonRuntime(status, expected.runtime)
-        } else if (candidateResolved && (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest))) {
+        } else if (!expected.configDigest || (status.ownerRecovery && typeof status.ownerRecovery === "object" && !Array.isArray(status.ownerRecovery) && status.ownerRecovery.configDigest === expected.configDigest && status.ownerRecovery.ready === true)) {
+          if (expected.candidate && !candidateExit && statusPid !== expected.candidate.pid) killDetachedProcessGroup(expected.candidate)
           return status
         }
       }
@@ -1055,6 +1099,31 @@ async function waitForDaemonStatus(config, timeoutMs, expected = {}) {
   } finally {
     expected.candidate?.off("exit", onCandidateExit)
     wakeDelay = undefined
+  }
+}
+
+/**
+ * Publishes the exact daemon PID before confirming completed startup to its guardian.
+ * @param {RollbridgeDaemon} daemon - Started daemon.
+ * @param {string | undefined} pidPath - Optional daemon PID file.
+ */
+async function publishDaemonReadiness(daemon, pidPath) {
+  if (daemon.guardian) {
+    await daemon.markOwnerReady()
+  } else if (pidPath) {
+    await fsPromises.mkdir(path.dirname(pidPath), {recursive: true})
+    await fsPromises.writeFile(pidPath, `${process.pid}\n`)
+  }
+}
+
+/** @param {import("node:child_process").ChildProcess} child - Exact detached process-group leader. */
+function killDetachedProcessGroup(child) {
+  if (!child.pid) return
+  try {
+    process.kill(-child.pid, "SIGKILL")
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") return
+    throw error
   }
 }
 

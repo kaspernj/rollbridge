@@ -525,6 +525,27 @@ test("opt-in generation lifecycle retires the old generation before activating a
   }
 })
 
+test("manual restart reaches the active handoff coordinator and restores its lifecycle role", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const before = statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.pid
+    const result = await daemon.restartProcesses({processId: "beacon"})
+    const after = statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.pid
+
+    assert.deepEqual(result, {restarted: ["beacon"]})
+    assert.ok(before)
+    assert.ok(after)
+    assert.notEqual(after, before)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1"])
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("generation commit is durable before awaited post-transition work", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, includeSingleton: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)

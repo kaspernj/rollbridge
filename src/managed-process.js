@@ -5,6 +5,7 @@ import {spawn} from "node:child_process"
 import {processGroupHasLiveMembers, processGroupMembers} from "./process-memory.js"
 
 const ACTIVATION_HOOK_TIMEOUT_MS = 30000
+const MAX_BUFFERED_OUTPUT_CHARACTERS = 64 * 1024
 
 /**
  * @typedef {import("./json.js").JsonValue} JsonValue
@@ -54,6 +55,7 @@ export default class ManagedProcess extends EventEmitter {
     this.state = /** @type {ManagedProcessState} */ ("stopped")
     this.lastStartReason = /** @type {ManagedProcessStartReason | undefined} */ (undefined)
     this.logs = /** @type {ManagedProcessLog[]} */ ([])
+    this.outputBuffers = {stderr: "", stdout: ""}
     this.restarts = 0
     this.recentRestarts = /** @type {number[]} */ ([])
     this.rssBytes = /** @type {number | undefined} */ (undefined)
@@ -67,9 +69,11 @@ export default class ManagedProcess extends EventEmitter {
     this.intentionalStop = false
     this.lifecycleRole = /** @type {LifecycleRole} */ ("candidate")
     this.intentionalStopSignal = /** @type {ProcessExitSignal | undefined} */ (undefined)
+    this.lifecycleRestoreBarrier = /** @type {Promise<void> | undefined} */ (undefined)
     this.quiescePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.quiesceError = /** @type {Error | undefined} */ (undefined)
     this.stopPromise = /** @type {Promise<void> | undefined} */ (undefined)
+    this.operationRevision = 0
     this.restartTimer = undefined
     this.child = undefined
     this.exitPromise = undefined
@@ -84,6 +88,10 @@ export default class ManagedProcess extends EventEmitter {
    * @returns {Promise<void>} Resolves after spawn and lifecycle-role restoration.
    */
   async start(reason = "deploy", lifecycleRole) {
+    const operationRevision = ++this.operationRevision
+
+    if (this.stopPromise) await this.stopPromise
+    if (operationRevision !== this.operationRevision) return
     if (lifecycleRole) this.lifecycleRole = lifecycleRole
     if (this.child) return
 
@@ -97,6 +105,7 @@ export default class ManagedProcess extends EventEmitter {
     this.state = "starting"
 
     await new Promise((resolve, reject) => {
+      const outputBuffers = {stderr: "", stdout: ""}
       const child = spawn(this.command, {
         cwd: this.cwd,
         detached: true,
@@ -118,16 +127,26 @@ export default class ManagedProcess extends EventEmitter {
         void (async () => {
           this.startedAtMs = Date.now()
           this.lastStartReason = reason
+          const lifecycleRestore = this.restoreLifecycleRole()
+          const lifecycleRestoreBarrier = lifecycleRestore.then(() => undefined, () => undefined)
+
+          this.lifecycleRestoreBarrier = lifecycleRestoreBarrier
           try {
-            await this.restoreLifecycleRole()
+            await lifecycleRestore
           } catch (error) {
             this.state = "failed"
             this.logger("process lifecycle role restoration failed", {error: error instanceof Error ? error.message : String(error), id: this.id, role: this.lifecycleRole})
             reject(error)
             return
+          } finally {
+            if (this.lifecycleRestoreBarrier === lifecycleRestoreBarrier) this.lifecycleRestoreBarrier = undefined
           }
           if (this.child !== child) {
             reject(new Error(`Process ${this.id} exited before lifecycle role ${this.lifecycleRole} was restored`))
+            return
+          }
+          if (this.intentionalStop || this.state !== "starting") {
+            reject(new Error(`Process ${this.id} was quiesced before lifecycle role ${this.lifecycleRole} was restored`))
             return
           }
           this.state = "running"
@@ -148,17 +167,20 @@ export default class ManagedProcess extends EventEmitter {
       })
       child.stdout.setEncoding("utf8")
       child.stderr.setEncoding("utf8")
-      child.stdout.on("data", (chunk) => this.appendLog("stdout", chunk))
-      child.stderr.on("data", (chunk) => this.appendLog("stderr", chunk))
+      child.stdout.on("data", (chunk) => this.appendLog("stdout", chunk, outputBuffers))
+      child.stdout.on("end", () => this.flushLogBuffer("stdout", outputBuffers))
+      child.stderr.on("data", (chunk) => this.appendLog("stderr", chunk, outputBuffers))
+      child.stderr.on("end", () => this.flushLogBuffer("stderr", outputBuffers))
     })
   }
 
   /**
    * Updates the command template used for future restarts without touching the currently running child.
    * @param {ManagedProcessDefinition} definition - Replacement process definition.
-   * @returns {void}
+   * @param {import("./json.js").JsonValue} [_ownerState] - Private owner state committed atomically by remote implementations.
+   * @returns {void | Promise<void>} Definition replacement completion for remote implementations.
    */
-  updateDefinition(definition) {
+  updateDefinition(definition, _ownerState) {
     this.command = definition.command
     this.cwd = definition.cwd
     this.env = definition.env
@@ -176,10 +198,19 @@ export default class ManagedProcess extends EventEmitter {
   /**
    * @param {"stdout" | "stderr"} stream - Stream name.
    * @param {string} chunk - Output chunk.
+   * @param {{stderr: string, stdout: string}} [buffers] - Per-process stream fragments.
    * @returns {void}
    */
-  appendLog(stream, chunk) {
-    for (const line of String(chunk).split(/\r?\n/)) {
+  appendLog(stream, chunk, buffers = this.outputBuffers) {
+    const lines = `${buffers[stream]}${String(chunk)}`.split(/\r?\n/)
+    let fragment = lines.pop() ?? ""
+
+    while (fragment.length > MAX_BUFFERED_OUTPUT_CHARACTERS) {
+      lines.push(fragment.slice(0, MAX_BUFFERED_OUTPUT_CHARACTERS))
+      fragment = fragment.slice(MAX_BUFFERED_OUTPUT_CHARACTERS)
+    }
+    buffers[stream] = fragment
+    for (const line of lines) {
       if (!line) continue
 
       const entry = {at: new Date().toISOString(), line, stream}
@@ -191,6 +222,15 @@ export default class ManagedProcess extends EventEmitter {
       }
       this.emit("log", entry)
     }
+  }
+
+  /**
+   * Retains a final output line that did not end with a newline.
+   * @param {"stdout" | "stderr"} stream - Stream name.
+   * @param {{stderr: string, stdout: string}} buffers - Per-process stream fragments.
+   */
+  flushLogBuffer(stream, buffers) {
+    if (buffers[stream]) this.appendLog(stream, "\n", buffers)
   }
 
   /**
@@ -375,6 +415,7 @@ export default class ManagedProcess extends EventEmitter {
    * @returns {Promise<void>} Resolves when stopped.
    */
   async stop(options = {}) {
+    this.operationRevision += 1
     if (!this.stopPromise) this.stopPromise = this.performStop(options)
     return await this.stopPromise
   }
@@ -442,6 +483,7 @@ export default class ManagedProcess extends EventEmitter {
         clearTimeout(this.restartTimer)
         this.restartTimer = undefined
       }
+      if (this.lifecycleRestoreBarrier) await this.lifecycleRestoreBarrier
       if (!this.child?.pid) {
         this.state = "stopped"
         if (this.lifecycle.activateCommand) this.lifecycleRole = "retired"
@@ -475,9 +517,14 @@ export default class ManagedProcess extends EventEmitter {
     const command = this.lifecycle.activateCommand
 
     if (!command) return
-    const error = await this.runHook(command, ACTIVATION_HOOK_TIMEOUT_MS, "activate command", this.pid)
+    const child = this.child
+    const pid = this.pid
+
+    if (!child?.pid || child.pid !== pid || this.state !== "running") throw new Error(`Process ${this.id} is not running for activation`)
+    const error = await this.runHook(command, ACTIVATION_HOOK_TIMEOUT_MS, "activate command", pid)
 
     if (error) throw error
+    if (this.child !== child || this.pid !== pid || this.state !== "running") throw new Error(`Process ${this.id} exited before activation completed`)
     this.lifecycleRole = "active"
   }
 
