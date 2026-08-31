@@ -700,8 +700,12 @@ test("candidate activation failure reports restoration failure and exact recover
 
     assert.ok(failedCandidate)
     await failedCandidate.stop()
-    assert.equal(failedCandidate.state, "stopped")
     incumbentCoordinator.reactivateStrict = reactivate
+    await incumbentCoordinator.stop()
+    assert.equal(failedCandidate.state, "stopped")
+    assert.equal(incumbentCoordinator.status().state, "stopped")
+    daemon.config = structuredClone(daemon.config)
+    daemon.config.processes[0].lifecycle.activateTimeoutMs = (daemon.config.processes[0].lifecycle.activateTimeoutMs ?? 30000) + 1
     const recovery = await sendControlCommand({
       command: {
         command: "recover-generation-transition",

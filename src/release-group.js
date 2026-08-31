@@ -290,10 +290,19 @@ export default class ReleaseGroup extends EventEmitter {
     if (!coordinator) throw new Error(`Generation activation process ${processConfig.id} is not retained for release ${this.releaseId}`)
     const generationIds = new Set([...this.handoffServiceIds, ...this.nonBlockingDrainIds])
 
-    for (const [id, processInstance] of this.processes) {
-      if (generationIds.has(id) && processInstance !== coordinator.process) await processInstance.reactivateStrict()
+    /** @param {import("./managed-process.js").default} processInstance - Retained generation process. */
+    const reactivate = async (processInstance) => {
+      const {pid, state} = processInstance.status()
+
+      if (pid !== undefined) await processInstance.reactivateStrict()
+      else if (state === "stopped" || state === "failed") await processInstance.start("crash", "active")
+      else throw new Error(`Generation process is ${state}; refusing active-role restoration`)
     }
-    await coordinator.process.reactivateStrict()
+
+    for (const [id, processInstance] of this.processes) {
+      if (generationIds.has(id) && processInstance !== coordinator.process) await reactivate(processInstance)
+    }
+    await reactivate(coordinator.process)
     this.state = "active"
     this.activatedAt = new Date().toISOString()
     this.drainStartedAt = undefined

@@ -1917,7 +1917,14 @@ export default class RollbridgeDaemon {
    * @param {{config: import("./config.js").RollbridgeConfig, releaseId: string, releasePath: string, revision: string}} candidate - Requested identity.
    */
   assertExactGenerationTransition(transition, candidate) {
-    if (transition.candidateReleaseId !== candidate.releaseId || transition.candidateReleasePath !== candidate.releasePath || transition.candidateRevision !== candidate.revision || transition.configDigest !== ownerConfigDigest(candidate.config)) {
+    const retainedCandidate = this.releases.get(transition.candidateReleaseId)
+    const retainedAuthorityMatches = transition.phase !== "committed" &&
+      retainedCandidate?.releasePath === transition.candidateReleasePath &&
+      retainedCandidate.revision === transition.candidateRevision &&
+      ownerConfigDigest(retainedCandidate.config) === transition.configDigest
+    const requestedAuthorityMatches = ownerConfigDigest(candidate.config) === transition.configDigest
+
+    if (transition.candidateReleaseId !== candidate.releaseId || transition.candidateReleasePath !== candidate.releasePath || transition.candidateRevision !== candidate.revision || (!requestedAuthorityMatches && !retainedAuthorityMatches)) {
       throw new Error(`Release generation transition for ${transition.candidateReleaseId} is unresolved at ${transition.phase}; only the exact same release, path, revision, and config authority may resume it`)
     }
   }
