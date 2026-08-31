@@ -279,6 +279,66 @@ export default class ReleaseGroup extends EventEmitter {
     await instance.process.activateStrict()
   }
 
+  /**
+   * Restarts only the exact processes reconstructed for a committed generation.
+   * The caller must prove the durable transition identity before using this path.
+   */
+  async restartCommittedGeneration() {
+    if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
+    this.assertCommittedGenerationRecoverable()
+    this.state = "starting"
+    try {
+      for (const processConfig of this.releaseProcessStartOrder()) {
+        const instances = this.getProcesses(processConfig.id)
+
+        if (instances.length !== processConfig.replicas) throw new Error(`Committed generation ${this.releaseId} is missing process ${processConfig.id}`)
+        for (const {process} of instances) {
+          if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
+          await process.start("deploy", processConfig.lifecycle.activateCommand ? "candidate" : undefined)
+        }
+
+        if (processConfig.policy === "proxied" && processConfig.port && processConfig.health) {
+          await waitForHealth({
+            health: processConfig.health,
+            host: this.config.proxy.upstreamHost,
+            port: this.ports[processConfig.id]
+          })
+          if (!this.shouldStart()) throw new Error("Rollbridge is shutting down")
+        }
+      }
+    } catch (error) {
+      await this.abortCommittedGenerationRestart()
+      throw error
+    }
+  }
+
+  /** Fails closed unless every exact candidate process has finished external retirement. */
+  assertCommittedGenerationStopped() {
+    if (this.state !== "draining") throw new Error(`Committed generation ${this.releaseId} is not retained as draining`)
+    const statuses = [...this.processes.values()].map((processInstance) => processInstance.status())
+
+    if (statuses.some(({pid, state}) => pid !== undefined || (state !== "stopped" && state !== "failed"))) {
+      throw new Error(`Committed generation ${this.releaseId} is still retiring; exact bootstrap recovery will retry after its processes stop`)
+    }
+  }
+
+  /** Accepts only process states produced after the exact recovery phase was journaled. */
+  assertCommittedGenerationRecoverable() {
+    if (this.state !== "draining" && this.state !== "starting") throw new Error(`Committed generation ${this.releaseId} is not retained in its journaled recovery state`)
+    const statuses = [...this.processes.values()].map((processInstance) => processInstance.status())
+    const resumableStates = new Set(["failed", "running", "stopped"])
+
+    if (statuses.some(({pid, state}) => !resumableStates.has(state) || (state === "running") !== (pid !== undefined))) {
+      throw new Error(`Committed generation ${this.releaseId} has a process outside its journaled restart states`)
+    }
+  }
+
+  /** Stops only a failed committed-bootstrap restart while retaining its exact identity. */
+  async abortCommittedGenerationRestart() {
+    await Promise.allSettled([...this.processes.values()].map((processInstance) => processInstance.stop()))
+    this.state = "draining"
+  }
+
   /** @returns {Promise<void>} Allocates all configured per-process ports. */
   async allocatePorts() {
     if (this.portsAllocated) return

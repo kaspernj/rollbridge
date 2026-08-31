@@ -889,10 +889,10 @@ function setRetiredLocalSource(retirement, sourceId, releaseId, connections) {
  * @param {string} sourceId - Stable listener source.
  * @param {string} releaseId - Retained release.
  * @param {{http: number, websocket: number}} connections - Exact live counts.
+ * @param {Set<net.Socket>} [delivered] - Successors that already received this update.
  */
-function publishOwnerConnectionState(firstSuccessor, sourceId, releaseId, connections) {
+function publishOwnerConnectionState(firstSuccessor, sourceId, releaseId, connections, delivered = new Set()) {
   let successor = firstSuccessor
-  const delivered = new Set()
 
   while (successor && !delivered.has(successor)) {
     delivered.add(successor)
@@ -908,9 +908,14 @@ function publishClosedLocalSources(retirement) {
   for (const [sourceId, releases] of retirement.localSources) {
     for (const releaseId of releases.keys()) {
       const connections = {http: 0, websocket: 0}
+      const delivered = /** @type {Set<net.Socket>} */ (new Set())
 
       applyOwnerConnectionState(ownerState, sourceId, releaseId, connections)
-      publishOwnerConnectionState(retirement.successor, sourceId, releaseId, connections)
+      if (replacementOwnerState) {
+        applyOwnerConnectionState(replacementOwnerState, sourceId, releaseId, connections)
+        publishOwnerConnectionState(replacementClient, sourceId, releaseId, connections, delivered)
+      }
+      publishOwnerConnectionState(retirement.successor, sourceId, releaseId, connections, delivered)
     }
   }
 }

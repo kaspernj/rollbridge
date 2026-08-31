@@ -795,6 +795,70 @@ test("staged replacement receives cleared local sources when the incumbent disco
   }
 })
 
+test("staged successor state receives tombstones when an older completed listener disconnects", {timeout: 3000}, async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const successor = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const authority = {configDigest: "owner", runtime: null}
+  const snapshot = {activeReleaseId: "v1"}
+
+  try {
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const first = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(first.replacementId, {authority, listenerSourceId: "candidate-local", snapshot})
+    const firstCommitted = candidate.waitForEvent("replacement-committed")
+
+    await fixture.client.commitOwnerReplacement(first.replacementId)
+    const sourcePublished = candidate.waitForEvent("owner-connection-state")
+
+    await fixture.client.publishOwnerConnectionState(first.replacementId, "retired-local", "v1", {http: 0, websocket: 1}, true)
+    await sourcePublished
+    const firstListenersRetired = candidate.waitForEvent("replacement-listeners-retired")
+
+    await fixture.client.completeOwnerListenerRetirement(first.replacementId)
+    await firstListenersRetired
+    await candidate.finalizeOwnerReplacement(first.replacementId)
+    await firstCommitted
+
+    await successor.connect()
+    const second = await successor.prepareOwnerReplacement(authority, authority)
+
+    await successor.stageOwnerReplacement(second.replacementId, {
+      authority,
+      listenerConnectionSources: {"retired-local": {v1: {http: 0, websocket: 1}}},
+      listenerSourceId: "successor-local",
+      snapshot
+    })
+    const sourceCleared = candidate.waitForEvent("owner-connection-state")
+    const stagedSourceCleared = successor.waitForEvent("owner-connection-state")
+
+    fixture.client.disconnect()
+    const tombstone = {connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "retired-local"}
+
+    assert.deepEqual(await Promise.all([sourceCleared, stagedSourceCleared]), [tombstone, tombstone])
+
+    await candidate.commitOwnerReplacement(second.replacementId)
+    const successorState = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await successor.ownerState())
+
+    assert.deepEqual(successorState.listenerConnectionSources, {})
+    const secondCommitted = successor.waitForEvent("replacement-committed")
+    const secondListenersRetired = successor.waitForEvent("replacement-listeners-retired")
+
+    await candidate.completeOwnerListenerRetirement(second.replacementId)
+    await secondListenersRetired
+    await successor.finalizeOwnerReplacement(second.replacementId)
+    await secondCommitted
+    await successor.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    successor.disconnect()
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("replacement abort notifies both the candidate and committed owner", async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
@@ -1190,9 +1254,20 @@ test("incumbent listener disconnect before state completion aborts without commi
     const handoffRequested = fixture.client.waitForEvent("replacement-listener-handoff-requested")
     const failed = candidate.waitForEvent("replacement-retirement-failed")
     const aborted = candidate.waitForEvent("replacement-aborted")
+    let tombstones = 0
+
+    candidate.onEvent("owner-connection-state", (event) => {
+      if (event.sourceId === "incumbent-local" && event.releaseId === "v1" && event.connections && typeof event.connections === "object" && !Array.isArray(event.connections) && event.connections.http === 0 && event.connections.websocket === 0) {
+        tombstones += 1
+      }
+    })
 
     await candidate.prepareRetiredOwnerListenerHandoff(prepared.replacementId, processKey)
     await handoffRequested
+    const sourcePublished = candidate.waitForEvent("owner-connection-state")
+
+    await fixture.client.publishOwnerConnectionState(prepared.replacementId, "incumbent-local", "v1", {http: 0, websocket: 1}, true)
+    await sourcePublished
     fixture.client.disconnect()
     assert.deepEqual(await failed, {
       event: "replacement-retirement-failed",
@@ -1203,6 +1278,7 @@ test("incumbent listener disconnect before state completion aborts without commi
       event: "replacement-aborted",
       reason: "Incumbent listener disconnected during the prepared handoff"
     })
+    assert.equal(tombstones, 1)
     assert.deepEqual(await candidate.replacementStatus(), {
       committedReplacementId: null,
       ownerClaimed: false,

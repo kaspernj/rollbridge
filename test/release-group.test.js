@@ -7,9 +7,10 @@ import {normalizeConfig} from "../src/config.js"
 
 /**
  * @param {import("../src/json.js").JsonValue} webProcess - The single proxied process definition.
+ * @param {() => boolean} [shouldStart] - Whether process starts remain allowed.
  * @returns {ReleaseGroup} A release group ready for buildProcess.
  */
-function buildRelease(webProcess) {
+function buildRelease(webProcess, shouldStart = () => true) {
   const config = normalizeConfig({
     application: "demo",
     control: {path: "/tmp/rollbridge-release-group.sock"},
@@ -17,7 +18,7 @@ function buildRelease(webProcess) {
     proxy: {host: "127.0.0.1", port: 0}
   })
 
-  return new ReleaseGroup({config, logger: () => {}, releaseId: "v1", releasePath: "/tmp/rel", revision: "v1"})
+  return new ReleaseGroup({config, logger: () => {}, releaseId: "v1", releasePath: "/tmp/rel", revision: "v1", shouldStart})
 }
 
 test("templates interpolate values from the daemon environment", () => {
@@ -77,4 +78,20 @@ test("a referenced daemon environment variable that is unset fails fast", () => 
     () => release.buildProcess(release.config.processes[0]),
     /Missing template value for \{\{env.ROLLBRIDGE_ENV_MISSING\}\}/
   )
+})
+
+test("committed generation restoration does not start after shutdown begins", async () => {
+  const release = buildRelease({command: "run web", id: "web", policy: "proxied", port: {from: 0, to: 0}}, () => false)
+  const process = release.buildProcess(release.config.processes[0])
+  let starts = 0
+
+  release.state = "draining"
+  process.start = async () => {
+    starts += 1
+    throw new Error("process started after shutdown")
+  }
+  release.processes.set("web", process)
+
+  await assert.rejects(() => release.restartCommittedGeneration(), /shutting down/)
+  assert.equal(starts, 0)
 })
