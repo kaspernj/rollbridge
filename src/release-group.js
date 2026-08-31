@@ -281,7 +281,7 @@ export default class ReleaseGroup extends EventEmitter {
    * The caller must prove the durable transition identity before using this path.
    */
   async restartCommittedGeneration() {
-    this.assertCommittedGenerationStopped()
+    this.assertCommittedGenerationRecoverable()
     this.state = "starting"
     try {
       for (const processConfig of this.releaseProcessStartOrder()) {
@@ -311,6 +311,17 @@ export default class ReleaseGroup extends EventEmitter {
 
     if (statuses.some(({pid, state}) => pid !== undefined || (state !== "stopped" && state !== "failed"))) {
       throw new Error(`Committed generation ${this.releaseId} is still retiring; exact bootstrap recovery will retry after its processes stop`)
+    }
+  }
+
+  /** Accepts only process states produced after the exact recovery phase was journaled. */
+  assertCommittedGenerationRecoverable() {
+    if (this.state !== "draining") throw new Error(`Committed generation ${this.releaseId} is not retained as draining`)
+    const statuses = [...this.processes.values()].map((processInstance) => processInstance.status())
+    const resumableStates = new Set(["failed", "running", "stopped"])
+
+    if (statuses.some(({pid, state}) => !resumableStates.has(state) || (state === "running") !== (pid !== undefined))) {
+      throw new Error(`Committed generation ${this.releaseId} has a process outside its journaled restart states`)
     }
   }
 

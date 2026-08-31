@@ -23,7 +23,7 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
  * @typedef {{disruptive: true, mode: "legacy-first-upgrade", reason: string}} OwnerTransition
- * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "committed_pending" | "committed"} GenerationTransitionPhase
+ * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "committed_pending" | "committed" | "restoring_committed"} GenerationTransitionPhase
  * @typedef {{candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, configDigest: string, error?: string, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
  * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, generationTransition?: GenerationTransition, ownerRecovery: {configDigest: string} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
@@ -1245,7 +1245,10 @@ export default class RollbridgeDaemon {
     }
     if (transition?.phase === "committed" && transition.candidateReleaseId === newReleaseId && !this.activeRelease) {
       this.assertExactGenerationTransition(transition, {config: nextConfig, releaseId: newReleaseId, releasePath, revision: revision || newReleaseId})
-      return await this.restoreCommittedBootstrapGeneration(nextConfig)
+      this.assertCommittedBootstrapRecoveryReady()
+      this.config = nextConfig
+      await this.updateGenerationTransition("restoring_committed")
+      return await this.resumeGenerationTransition()
     }
     const release = new ReleaseGroup({
       config: nextConfig,
@@ -1392,6 +1395,16 @@ export default class RollbridgeDaemon {
       this.logger("traffic switched", {previousReleaseId: previousRelease?.releaseId ?? null, releaseId: release.releaseId})
     }
 
+    if (transition.phase === "restoring_committed") {
+      await this.resumeCommittedBootstrapGeneration(release)
+      release.activate()
+      this.activeRelease = release
+      transition.phase = "committed_pending"
+      transition.error = undefined
+      transition.updatedAt = new Date().toISOString()
+      this.logger("committed bootstrap generation restored", {releaseId: release.releaseId})
+    }
+
     if (transition.phase === "committed_pending") {
       await this.checkpointGenerationTransition()
       this.refreshServiceDefinitions(release)
@@ -1434,7 +1447,7 @@ export default class RollbridgeDaemon {
     const bootstrap = this.bootstrap
     const transition = this.generationTransition
 
-    if (!bootstrap || !transition || transition.phase !== "committed" || transition.candidateReleaseId !== bootstrap.releaseId || transition.candidateReleasePath !== bootstrap.releasePath || transition.candidateRevision !== bootstrap.revision || transition.configDigest !== ownerConfigDigest(this.config)) return undefined
+    if (!bootstrap || !transition || (transition.phase !== "committed" && transition.phase !== "restoring_committed") || transition.candidateReleaseId !== bootstrap.releaseId || transition.candidateReleasePath !== bootstrap.releasePath || transition.candidateRevision !== bootstrap.revision || transition.configDigest !== ownerConfigDigest(this.config)) return undefined
     const release = this.releases.get(bootstrap.releaseId)
 
     if (!release || release.releasePath !== bootstrap.releasePath || release.revision !== bootstrap.revision) return undefined
@@ -1442,12 +1455,11 @@ export default class RollbridgeDaemon {
   }
 
   /**
-   * Restores the exact committed candidate after the prior external owner has finished
-   * retiring its processes. No retained previous generation is stopped or replayed.
-   * @param {import("./config.js").RollbridgeConfig} nextConfig - Exact current config authority.
-   * @returns {Promise<Record<string, JsonValue>>} Restored active generation identity.
+   * Fails closed before journaling recovery unless external retirement has fully stopped
+   * the exact candidate and daemon-owned processes.
+   * @returns {void}
    */
-  async restoreCommittedBootstrapGeneration(nextConfig) {
+  assertCommittedBootstrapRecoveryReady() {
     const release = this.committedBootstrapRelease()
 
     if (!release) throw new Error("Committed generation has no exact foreground bootstrap recovery proof")
@@ -1465,34 +1477,38 @@ export default class RollbridgeDaemon {
     for (const [singletonId, singletonReleaseId] of this.singletonReleaseIds) {
       if (singletonReleaseId !== release.releaseId) throw new Error(`Committed generation singleton ${singletonId} belongs to retained release ${singletonReleaseId}`)
     }
+  }
 
-    const restarted = /** @type {import("./managed-process.js").default[]} */ ([])
+  /**
+   * Resumes a durably journaled committed-candidate restart. Running processes are
+   * necessarily owned by this exact recovery phase; stopped processes are restarted.
+   * Singleton completion remains in the established committed_pending phase.
+   * @param {ReleaseGroup} release - Exact committed candidate.
+   * @returns {Promise<void>}
+   */
+  async resumeCommittedBootstrapGeneration(release) {
+    if (this.generationTransition?.phase !== "restoring_committed" || release !== this.committedBootstrapRelease()) {
+      throw new Error("Committed bootstrap recovery is not durably journaled for this exact candidate")
+    }
+    const resumableStates = new Set(["failed", "running", "stopped"])
+    const invalidProcess = [...this.services.values(), ...this.singletons.values()].find((processInstance) => {
+      const {pid, state} = processInstance.status()
+      return !resumableStates.has(state) || (state === "running") !== (pid !== undefined)
+    })
+
+    if (invalidProcess) throw new Error(`Committed bootstrap recovery found daemon process ${invalidProcess.id} outside its journaled restart states`)
+    release.assertCommittedGenerationRecoverable()
 
     try {
       for (const processInstance of this.services.values()) {
         await processInstance.start("deploy")
-        restarted.push(processInstance)
       }
       await release.restartCommittedGeneration()
-      for (const processInstance of this.singletons.values()) {
-        await processInstance.start("deploy")
-        restarted.push(processInstance)
-      }
       await release.activateGeneration()
-      release.activate()
-      this.activeRelease = release
-      this.config = nextConfig
-      this.refreshServiceDefinitions(release)
-      const write = this.persistState({throwOnError: true})
-
-      if (write) await write
-      this.logger("committed bootstrap generation restored", {releaseId: release.releaseId})
-      return {activeReleaseId: release.releaseId, previousReleaseId: this.generationTransition?.previousReleaseId ?? null}
     } catch (error) {
-      this.activeRelease = undefined
       await Promise.allSettled([
         release.abortCommittedGenerationRestart(),
-        ...restarted.map((processInstance) => processInstance.stop())
+        ...[...this.services.values()].map((processInstance) => processInstance.stop())
       ])
       throw error
     }
