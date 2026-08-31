@@ -830,6 +830,40 @@ test("candidate activation recovery reverses a worker-specific quiet hook before
   }
 })
 
+test("candidate activation recovery keeps the fence when a worker-specific resume hook fails", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerReactivationFailure: true, workerReactivationLifecycle: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      error => {
+        const failure = /** @type {Error} */ (error)
+
+        assert.match(failure.message, /activate command exited non-zero/)
+        assert.match(failure.message, /reactivate command exited non-zero/)
+        return true
+      }
+    )
+
+    const status = daemon.status()
+    const restorationEvent = daemon.eventLog.recent().find((event) => event.message === "release generation compensation restoration failed")
+
+    assert.equal(status.activeReleaseId, "v1")
+    assert.equal(status.generationTransition?.phase, "restoring_previous")
+    assert.match(String(status.generationTransition?.activationError), /activate command exited non-zero/)
+    assert.match(String(status.generationTransition?.compensationError), /reactivate command exited non-zero/)
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "quiesced")
+    assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
+    assert.match(String(restorationEvent?.data.error), /reactivate command exited non-zero/)
+    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("compensation keeps the fence when the cleared checkpoint cannot be persisted", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
@@ -1845,7 +1879,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{companionReplicas?: number, handoffService?: boolean, handoffServiceActivate?: boolean, handoffServiceActivateAmbiguousFailure?: boolean, handoffServiceActivateFailure?: boolean | string, handoffServiceQuiet?: boolean, handoffServiceQuietFailure?: boolean, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number, workerReactivationLifecycle?: boolean, workerStopDelayMs?: number}} [options] - Fixture options.
+ * @param {{companionReplicas?: number, handoffService?: boolean, handoffServiceActivate?: boolean, handoffServiceActivateAmbiguousFailure?: boolean, handoffServiceActivateFailure?: boolean | string, handoffServiceQuiet?: boolean, handoffServiceQuietFailure?: boolean, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number, workerReactivationFailure?: boolean, workerReactivationLifecycle?: boolean, workerStopDelayMs?: number}} [options] - Fixture options.
  * @returns {Promise<{activationGatePath: string, config: import("../src/config.js").RollbridgeConfig, lifecycleLogPath: string, retirementGatePath: string, root: string, serviceLogPath: string, serviceQuietPath: string, singletonLogPath: string, statePath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -1906,7 +1940,7 @@ async function createFixture(options = {}) {
       id: "worker",
       ...(options.workerReactivationLifecycle ? {lifecycle: {
         quietCommand: `printf 'worker-retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`,
-        reactivateCommand: `printf 'worker-reactivate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+        reactivateCommand: `${options.workerReactivationFailure ? "exit 25; " : ""}printf 'worker-reactivate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
       }} : {}),
       nonBlockingDrain: true,
       policy: "companion"
