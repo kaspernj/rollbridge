@@ -27,6 +27,7 @@ test("TensorBuzz example config loads", async () => {
       ["web", "proxied"]
     ]
   )
+  assert.equal(config.processes[2].lifecycle.reactivateCommand, "appctl jobs-worker-reactivate --pid $ROLLBRIDGE_PID")
   assert.equal(config.processes[3].env.VELOCIOUS_BACKGROUND_JOBS_PORT, "{{ports.background-jobs-main}}")
 })
 

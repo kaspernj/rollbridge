@@ -762,7 +762,7 @@ test("owner recovery preserves a completed activation compensation without repla
       sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath}),
       /activate command exited non-zero/
     )
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1", "retire:v2"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
 
     owner.kill("SIGKILL")
     await once(owner, "exit")
@@ -773,7 +773,7 @@ test("owner recovery preserves a completed activation compensation without repla
 
     assert.equal(recovered.activeReleaseId, "v1")
     assert.equal(recovered.generationTransition, undefined)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1", "retire:v2"], "owner recovery must not replay completed compensation hooks")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"], "owner recovery must not replay completed compensation hooks")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))

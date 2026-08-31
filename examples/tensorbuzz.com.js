@@ -4,7 +4,7 @@
 // binds that stable HTTP port, forwards to the active release's internal web
 // port and keeps Beacon daemon-wide. The lifecycle socket path must match the
 // reviewed release-local Velocious jobs-main configuration; the worker appctl
-// command remains an illustrative application-specific quiescence control.
+// commands remain illustrative application-specific quiescence/reactivation controls.
 
 export default {
   application: "tensorbuzz",
@@ -68,7 +68,10 @@ export default {
         VELOCIOUS_BACKGROUND_JOBS_PORT: "{{ports.background-jobs-main}}"
       },
       command: "wait-for-it 127.0.0.1:{{ports.beacon}} --strict -- wait-for-it 127.0.0.1:{{ports.background-jobs-main}} --strict -- npx velocious background-jobs-worker",
-      lifecycle: {quietCommand: "appctl jobs-worker-retire --pid $ROLLBRIDGE_PID"},
+      lifecycle: {
+        quietCommand: "appctl jobs-worker-retire --pid $ROLLBRIDGE_PID",
+        reactivateCommand: "appctl jobs-worker-reactivate --pid $ROLLBRIDGE_PID"
+      },
       nonBlockingDrain: true,
       gracefulStopMs: "indefinite"
     },

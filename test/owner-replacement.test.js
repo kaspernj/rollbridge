@@ -1677,7 +1677,7 @@ test("same-authority owner replacement preserves completed activation compensati
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
     await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath}), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nactivate:v1\nretire:v2\n")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
 
     await writeConfig(configPath, failedConfig(oldSocketPath, false))
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
@@ -1685,7 +1685,7 @@ test("same-authority owner replacement preserves completed activation compensati
     const status = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
     assert.equal(status.activeReleaseId, "v1")
     assert.equal(status.generationTransition, undefined)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nactivate:v1\nretire:v2\n", "replacement must not replay completed compensation hooks")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n", "replacement must not replay completed compensation hooks")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -1736,7 +1736,7 @@ test("config-changing owner replacement proceeds after activation compensation c
 
     assert.equal(status.activeReleaseId, "v1")
     assert.equal(status.generationTransition, undefined)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nactivate:v1\nretire:v2\n")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
 
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
