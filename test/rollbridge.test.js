@@ -660,25 +660,248 @@ test("retirement failure retains the exact transition, blocks other deploys, and
   }
 })
 
-test("candidate activation failure never reactivates old and exact resume activates only the candidate", async () => {
+test("candidate activation failure reports restoration failure and exact recovery clears the fence", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /activate command exited non-zero/)
+    const incumbentCoordinator = daemon.releases.get("v1")?.getProcess("beacon")
+    const reactivate = incumbentCoordinator?.reactivateStrict.bind(incumbentCoordinator)
+
+    assert.ok(incumbentCoordinator && reactivate)
+    incumbentCoordinator.reactivateStrict = async () => { throw new Error("incumbent restoration rejected") }
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      error => {
+        assert.ok(error instanceof AggregateError)
+        assert.match(error.message, /activate command exited non-zero/)
+        assert.match(error.message, /incumbent v1 restoration failed: incumbent restoration rejected/i)
+        return true
+      }
+    )
 
     const failed = daemon.status()
 
     assert.equal(failed.activeReleaseId, "v1")
-    assert.equal(failed.generationTransition?.phase, "activating_candidate")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1"])
+    assert.equal(failed.generationTransition?.phase, "restoring_previous")
+    assert.match(String(failed.generationTransition?.activationError), /activate command exited non-zero/)
+    assert.match(String(failed.generationTransition?.compensationError), /incumbent restoration rejected/)
+    const failedEvents = daemon.eventLog.recent()
+    const activationEvent = failedEvents.find((event) => event.message === "release generation activation failed")
+    const restorationEvent = failedEvents.find((event) => event.message === "release generation compensation restoration failed")
 
-    await fs.writeFile(fixture.activationGatePath, "allow\n")
-    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    assert.match(String(activationEvent?.data.error), /activate command exited non-zero/)
+    assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
+    assert.match(String(restorationEvent?.data.error), /incumbent restoration rejected/)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2"])
+    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
 
-    assert.equal(daemon.status().activeReleaseId, "v2")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+    incumbentCoordinator.reactivateStrict = reactivate
+    const recovery = await sendControlCommand({
+      command: {
+        command: "recover-generation-transition",
+        previousReleaseId: "v1",
+        releaseId: "v2",
+        releasePath: fixture.root,
+        revision: "v2"
+      },
+      path: fixture.config.control.path
+    })
+
+    assert.equal(recovery.recoveryStatus, "recovered")
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(daemon.status().generationTransition, undefined)
+    const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
+
+    assert.equal(persisted?.generationTransition, undefined)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+
+    const idempotent = await sendControlCommand({
+      command: {
+        command: "recover-generation-transition",
+        previousReleaseId: "v1",
+        releaseId: "v2",
+        releasePath: fixture.root,
+        revision: "v2"
+      },
+      path: fixture.config.control.path
+    })
+
+    assert.equal(idempotent.recoveryStatus, "already_recovered")
+    await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
+    await assert.rejects(
+      () => sendControlCommand({
+        command: {
+          command: "recover-generation-transition",
+          previousReleaseId: "v1",
+          releaseId: "v3",
+          releasePath: fixture.root,
+          revision: "v3"
+        },
+        path: fixture.config.control.path
+      }),
+      /not a safe failed pre-commit transition/i
+    )
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("candidate activation failure compensates to the incumbent and admits a different later release", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /activate command exited non-zero.*compensation restored incumbent v1 as authoritative and retired failed candidate v2/i
+    )
+
+    const compensated = daemon.status()
+
+    assert.equal(compensated.activeReleaseId, "v1")
+    assert.equal(compensated.generationTransition, undefined)
+    assert.equal(await fetchText(daemon, "/release"), "v1")
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "running")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+
+    await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
+
+    assert.equal(daemon.status().activeReleaseId, "v3")
+    assert.equal(await fetchText(daemon, "/release"), "v3")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("ambiguous candidate activation retires the candidate before reactivating the incumbent", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateAmbiguousFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /activate command exited non-zero.*compensation restored incumbent v1 as authoritative and retired failed candidate v2/i
+    )
+
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), [
+      "activate:v1",
+      "retire:v1",
+      "activate:v2",
+      "retire:v2",
+      "activate:v1"
+    ])
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(daemon.status().generationTransition, undefined)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("candidate activation recovery reverses a worker-specific quiet hook before reporting active", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerReactivationLifecycle: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /compensation restored incumbent v1 as authoritative/i
+    )
+
+    const events = await lifecycleEvents(fixture.lifecycleLogPath)
+    const candidateRetired = events.indexOf("worker-retire:v2")
+    const workerReactivated = events.indexOf("worker-reactivate:v1")
+
+    assert.ok(candidateRetired >= 0, JSON.stringify(events))
+    assert.ok(workerReactivated > candidateRetired, JSON.stringify(events))
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "running")
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(daemon.status().generationTransition, undefined)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("candidate activation recovery keeps the fence when a worker-specific resume hook fails", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerReactivationFailure: true, workerReactivationLifecycle: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      error => {
+        const failure = /** @type {Error} */ (error)
+
+        assert.match(failure.message, /activate command exited non-zero/)
+        assert.match(failure.message, /reactivate command exited non-zero/)
+        return true
+      }
+    )
+
+    const status = daemon.status()
+    const restorationEvent = daemon.eventLog.recent().find((event) => event.message === "release generation compensation restoration failed")
+
+    assert.equal(status.activeReleaseId, "v1")
+    assert.equal(status.generationTransition?.phase, "restoring_previous")
+    assert.match(String(status.generationTransition?.activationError), /activate command exited non-zero/)
+    assert.match(String(status.generationTransition?.compensationError), /reactivate command exited non-zero/)
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "quiesced")
+    assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
+    assert.match(String(restorationEvent?.data.error), /reactivate command exited non-zero/)
+    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("compensation keeps the fence when the cleared checkpoint cannot be persisted", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceActivateFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
+  const daemon = await startDaemon(fixture.config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const checkpoint = daemon.checkpointGenerationTransition.bind(daemon)
+
+    daemon.checkpointGenerationTransition = async () => {
+      if (!daemon.generationTransition) throw new Error("cleared checkpoint unavailable")
+      await checkpoint()
+    }
+    await assert.rejects(
+      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
+      /activate command exited non-zero.*compensation checkpoint clear failed: cleared checkpoint unavailable/i
+    )
+
+    assert.equal(daemon.status().activeReleaseId, "v1")
+    assert.equal(daemon.status().generationTransition?.phase, "restoring_previous")
+    const persisted = /** @type {{generationTransition?: {phase?: string}} | undefined} */ (await readState(fixture.statePath))
+
+    assert.equal(persisted?.generationTransition?.phase, "restoring_previous")
+    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+
+    daemon.checkpointGenerationTransition = checkpoint
+    const recovery = await sendControlCommand({
+      command: {
+        command: "recover-generation-transition",
+        previousReleaseId: "v1",
+        releaseId: "v2",
+        releasePath: fixture.root,
+        revision: "v2"
+      },
+      path: fixture.config.control.path
+    })
+
+    assert.equal(recovery.recoveryStatus, "recovered")
+    assert.equal(daemon.status().generationTransition, undefined)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -691,6 +914,10 @@ test("unresolved generation transition fences stop, restart, and rollback mutati
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const incumbentCoordinator = daemon.releases.get("v1")?.getProcess("beacon")
+
+    assert.ok(incumbentCoordinator)
+    incumbentCoordinator.reactivateStrict = async () => { throw new Error("incumbent restoration rejected") }
     await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /activate command exited non-zero/)
 
     await assert.rejects(() => daemon.stopRelease("v2"), /cannot stop.*generation transition.*unresolved/i)
@@ -698,9 +925,7 @@ test("unresolved generation transition fences stop, restart, and rollback mutati
     await assert.rejects(() => daemon.rollback({releaseId: "v2"}), /cannot rollback.*generation transition.*unresolved/i)
 
     assert.notEqual(statusRelease(daemon, "v2").processes.find((entry) => entry.id === "web")?.state, "stopped")
-    await fs.writeFile(fixture.activationGatePath, "allow\n")
-    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
-    assert.equal(await fetchText(daemon, "/release"), "v2")
+    assert.equal(await fetchText(daemon, "/release"), "v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1654,7 +1879,7 @@ test("deploy can ensure the daemon before sending the release command", async ()
 })
 
 /**
- * @param {{companionReplicas?: number, handoffService?: boolean, handoffServiceActivate?: boolean, handoffServiceActivateFailure?: boolean | string, handoffServiceQuiet?: boolean, handoffServiceQuietFailure?: boolean, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number, workerStopDelayMs?: number}} [options] - Fixture options.
+ * @param {{companionReplicas?: number, handoffService?: boolean, handoffServiceActivate?: boolean, handoffServiceActivateAmbiguousFailure?: boolean, handoffServiceActivateFailure?: boolean | string, handoffServiceQuiet?: boolean, handoffServiceQuietFailure?: boolean, includeCompanion?: boolean, includeService?: boolean, includeSingleton?: boolean, memoryLimitBytes?: number, nonBlockingDrainWorker?: boolean, persistState?: boolean, proxyHost?: string, singletonCwd?: string, webCommand?: string, webDependsOnService?: boolean, webHealthTimeoutMs?: number, workerReactivationFailure?: boolean, workerReactivationLifecycle?: boolean, workerStopDelayMs?: number}} [options] - Fixture options.
  * @returns {Promise<{activationGatePath: string, config: import("../src/config.js").RollbridgeConfig, lifecycleLogPath: string, retirementGatePath: string, root: string, serviceLogPath: string, serviceQuietPath: string, singletonLogPath: string, statePath: string}>} Fixture data.
  */
 async function createFixture(options = {}) {
@@ -1672,7 +1897,7 @@ async function createFixture(options = {}) {
   if (options.includeService || options.handoffService) {
     const activationFailureRelease = typeof options.handoffServiceActivateFailure === "string" ? options.handoffServiceActivateFailure : "v2"
     const lifecycle = options.handoffServiceActivate ? {
-      activateCommand: `${options.handoffServiceActivateFailure ? `[ "$ROLLBRIDGE_RELEASE_ID" != ${JSON.stringify(activationFailureRelease)} ] || [ -f ${JSON.stringify(activationGatePath)} ] || exit 24; ` : ""}printf 'activate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`,
+      activateCommand: `${options.handoffServiceActivateFailure && !options.handoffServiceActivateAmbiguousFailure ? `[ "$ROLLBRIDGE_RELEASE_ID" != ${JSON.stringify(activationFailureRelease)} ] || [ -f ${JSON.stringify(activationGatePath)} ] || exit 24; ` : ""}printf 'activate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}${options.handoffServiceActivateAmbiguousFailure ? `; [ "$ROLLBRIDGE_RELEASE_ID" != ${JSON.stringify(activationFailureRelease)} ] || [ -f ${JSON.stringify(activationGatePath)} ] || exit 24` : ""}`,
       quietCommand: `${options.handoffServiceQuietFailure ? `[ -f ${JSON.stringify(retirementGatePath)} ] || exit 23; ` : ""}printf 'retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
     } : options.handoffServiceQuiet || options.handoffServiceQuietFailure ? {
       quietCommand: options.handoffServiceQuietFailure ? "exit 23" : `printf '%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(serviceQuietPath)}`
@@ -1713,6 +1938,10 @@ async function createFixture(options = {}) {
     processes.push({
       command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.on('SIGTERM', () => setTimeout(() => process.exit(0), ${options.workerStopDelayMs || 0})); setInterval(() => {}, 1000)`)}`,
       id: "worker",
+      ...(options.workerReactivationLifecycle ? {lifecycle: {
+        quietCommand: `printf 'worker-retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`,
+        reactivateCommand: `${options.workerReactivationFailure ? "exit 25; " : ""}printf 'worker-reactivate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+      }} : {}),
       nonBlockingDrain: true,
       policy: "companion"
     })

@@ -250,6 +250,24 @@ test("validateConfig accepts one durable handoff activation lifecycle and reject
     {...base.processes[1], id: "jobs-secondary", port: {from: 18200, to: 18299}}
   ]})
   assert.ok(duplicate.issues.some((issue) => /at most one lifecycle\.activateCommand/.test(issue.message)))
+
+  const worker = {
+    command: "run worker",
+    id: "worker",
+    lifecycle: {quietCommand: "worker quiet", reactivateCommand: "worker resume"},
+    nonBlockingDrain: true,
+    policy: "companion"
+  }
+  const pairedWorker = validateConfig({...base, processes: [...base.processes, worker]})
+
+  assert.deepEqual(pairedWorker.issues, [])
+  assert.equal(pairedWorker.config.processes[2].lifecycle.reactivateCommand, "worker resume")
+
+  const unpairedWorker = validateConfig({...base, processes: [...base.processes, {...worker, lifecycle: {quietCommand: "worker quiet"}}]})
+  assert.ok(unpairedWorker.issues.some((issue) => /quietCommand requires lifecycle\.reactivateCommand/.test(issue.message)))
+
+  const unsupportedPlacement = validateConfig({...base, processes: [...base.processes, {...worker, nonBlockingDrain: false}]})
+  assert.ok(unsupportedPlacement.issues.some((issue) => /reactivateCommand.*nonBlockingDrain companion/.test(issue.message)))
 })
 
 test("validateConfig accepts indefinite graceful stop windows", () => {

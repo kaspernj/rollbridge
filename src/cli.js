@@ -214,6 +214,31 @@ export async function runCli(argv) {
     })
 
   program
+    .command("recover-generation-transition")
+    .description("Restore the exact incumbent and retire a failed pre-commit generation candidate.")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .requiredOption("--release-path <path>", "Failed candidate release path")
+    .requiredOption("--release-id <id>", "Failed candidate release id")
+    .requiredOption("--revision <sha>", "Failed candidate revision")
+    .requiredOption("--previous-release-id <id>", "Expected authoritative incumbent release id")
+    .action(async (options) => {
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const response = await sendControlCommand({
+        command: {
+          command: "recover-generation-transition",
+          previousReleaseId: options.previousReleaseId,
+          releaseId: options.releaseId,
+          releasePath: options.releasePath,
+          revision: options.revision
+        },
+        path: config.control.path
+      })
+
+      console.log(JSON.stringify(response, null, 2))
+    })
+
+  program
     .command("ensure-daemon")
     .description("Start the daemon if the control socket is not already accepting commands.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")

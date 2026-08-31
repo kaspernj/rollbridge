@@ -259,7 +259,7 @@ async function handleLine(socket, line) {
 async function execute(request, socket) {
   if (shuttingDown) throw new Error("Process guardian is shutting down")
 
-  if (request.command === "capabilities") return {daemonRecovery: 1}
+  if (request.command === "capabilities") return {daemonRecovery: 1, generationReactivation: 1}
 
   if (request.command === "owner-replacement-capabilities") {
     return {commands: ["commit-retired-owner-replacement"], protocol: "owner-replacement", version: 1}
@@ -655,6 +655,9 @@ async function execute(request, socket) {
     await record.process.start(request.reason, request.lifecycleRole)
   } else if (request.command === "activate") {
     await record.process.activateStrict()
+  } else if (request.command === "reactivate" || request.command === "reactivate-with-command") {
+    await record.process.reactivateStrict()
+    record.desired = true
   } else if (request.command === "quiesce") {
     record.desired = false
     await record.process.quiesceStrict()

@@ -14,7 +14,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {"proxied" | "companion" | "singleton" | "service"} ProcessPolicy
  * @typedef {{backoffFactor: number, maxDelayMs: number, maxRestarts: number | undefined, windowMs: number}} RestartConfig
  * @typedef {{checkIntervalMs: number, limitBytes: number, warnBytes: number}} MemoryConfig
- * @typedef {{activateCommand?: string, drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, stopCommand?: string}} LifecycleConfig
+ * @typedef {{activateCommand?: string, drainCommand?: string, drainTimeoutMs: number, quietCommand?: string, reactivateCommand?: string, stopCommand?: string}} LifecycleConfig
  * @typedef {number | "indefinite"} StopTimeoutMs
  * @typedef {"persistent" | "handoff"} ServiceDeployStrategy
  * @typedef {{cwd?: string, deployStrategy: ServiceDeployStrategy, env: Record<string, string>, gracefulStopMs: StopTimeoutMs, health?: HealthConfig, id: string, lifecycle: LifecycleConfig, memory?: MemoryConfig, nonBlockingDrain: boolean, outputLines: number, policy: ProcessPolicy, port?: PortRange, replicas: number, restart: RestartConfig, restartDelayMs: number, stopSignal: string, command: string}} ProcessConfig
@@ -346,7 +346,7 @@ function normalizeLifecycle(value, key, issues) {
   if (value === undefined || value === null) return {drainTimeoutMs: 0}
 
   if (!isPlainObject(value)) {
-    issues.push({fix: `Set ${key} to a mapping with optional activateCommand, quietCommand, drainCommand, stopCommand, and drainTimeoutMs.`, message: `${key} must be an object`})
+    issues.push({fix: `Set ${key} to a mapping with optional activateCommand, quietCommand, reactivateCommand, drainCommand, stopCommand, and drainTimeoutMs.`, message: `${key} must be an object`})
 
     return {drainTimeoutMs: 0}
   }
@@ -357,6 +357,7 @@ function normalizeLifecycle(value, key, issues) {
 
   if (value.activateCommand !== undefined) lifecycle.activateCommand = normalizeString(value.activateCommand, `${key}.activateCommand`, issues, {nonEmpty: true})
   if (value.quietCommand !== undefined) lifecycle.quietCommand = normalizeString(value.quietCommand, `${key}.quietCommand`, issues, {nonEmpty: true})
+  if (value.reactivateCommand !== undefined) lifecycle.reactivateCommand = normalizeString(value.reactivateCommand, `${key}.reactivateCommand`, issues, {nonEmpty: true})
   if (value.drainCommand !== undefined) lifecycle.drainCommand = normalizeString(value.drainCommand, `${key}.drainCommand`, issues, {nonEmpty: true})
   if (value.stopCommand !== undefined) lifecycle.stopCommand = normalizeString(value.stopCommand, `${key}.stopCommand`, issues, {nonEmpty: true})
 
@@ -376,6 +377,7 @@ function normalizeLifecycle(value, key, issues) {
  */
 function validateActivationLifecycle(processes, ownerRecovery, statePath, issues) {
   const activated = processes.filter((processConfig) => processConfig.lifecycle.activateCommand !== undefined)
+  const reactivated = processes.filter((processConfig) => processConfig.lifecycle.reactivateCommand !== undefined)
 
   if (activated.length > 1) {
     issues.push({fix: "Configure lifecycle.activateCommand on only one release-generation coordinator.", message: "Config may define at most one lifecycle.activateCommand"})
@@ -387,6 +389,23 @@ function validateActivationLifecycle(processes, ownerRecovery, statePath, issues
     }
     if (!processConfig.lifecycle.quietCommand) {
       issues.push({fix: `Add lifecycle.quietCommand to "${processConfig.id}" so every activated generation has a paired retirement command.`, message: `Process "${processConfig.id}" lifecycle.activateCommand requires lifecycle.quietCommand`})
+    }
+  }
+
+  for (const processConfig of reactivated) {
+    if (processConfig.policy !== "companion" || !processConfig.nonBlockingDrain) {
+      issues.push({fix: `Set lifecycle.reactivateCommand only on a nonBlockingDrain companion; "${processConfig.id}" is ${processConfig.policy} with nonBlockingDrain: ${processConfig.nonBlockingDrain}.`, message: `Process "${processConfig.id}" can only set lifecycle.reactivateCommand on a nonBlockingDrain companion`})
+    }
+    if (!processConfig.lifecycle.quietCommand) {
+      issues.push({fix: `Add lifecycle.quietCommand to "${processConfig.id}" so worker reactivation has a paired retirement command.`, message: `Process "${processConfig.id}" lifecycle.reactivateCommand requires lifecycle.quietCommand`})
+    }
+  }
+
+  if (activated.length > 0) {
+    for (const processConfig of processes) {
+      if (processConfig.nonBlockingDrain && processConfig.lifecycle.quietCommand && !processConfig.lifecycle.reactivateCommand) {
+        issues.push({fix: `Add lifecycle.reactivateCommand to "${processConfig.id}" so failed candidate recovery reverses its external quiet hook.`, message: `Process "${processConfig.id}" lifecycle.quietCommand requires lifecycle.reactivateCommand during generation activation recovery`})
+      }
     }
   }
 
