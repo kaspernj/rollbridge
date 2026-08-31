@@ -294,8 +294,11 @@ export default class ReleaseGroup extends EventEmitter {
     const reactivate = async (processInstance) => {
       const {pid, state} = processInstance.status()
 
-      if (pid !== undefined) await processInstance.reactivateStrict()
-      else if (state === "stopped" || state === "failed") await processInstance.start("crash", "active")
+      if (state === "failed") {
+        await processInstance.stop()
+        await processInstance.start("crash", "active")
+      } else if (pid !== undefined) await processInstance.reactivateStrict()
+      else if (state === "stopped") await processInstance.start("crash", "active")
       else throw new Error(`Generation process is ${state}; refusing active-role restoration`)
     }
 
