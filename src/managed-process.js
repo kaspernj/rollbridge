@@ -531,7 +531,7 @@ export default class ManagedProcess extends EventEmitter {
     const child = this.child
     const pid = this.pid
 
-    if (!child?.pid || child.pid !== pid || (this.state !== "quiesced" && this.state !== "running")) {
+    if (!child?.pid || child.pid !== pid || (this.state !== "failed" && this.state !== "quiesced" && this.state !== "running")) {
       throw new Error(`Process ${this.id} is not retained for reactivation`)
     }
     await this.runReactivationHook(pid)

@@ -532,6 +532,31 @@ test("reactivateStrict restores a retained quiesced process only after activatio
   }
 })
 
+test("reactivateStrict retries a failed active-role startup against the retained child", async () => {
+  const managed = buildLongLived(() => false)
+  let attempts = 0
+
+  managed.lifecycle = {activateCommand: "jobs activate", drainTimeoutMs: 0}
+  managed.runHook = async () => {
+    attempts += 1
+    return attempts === 1 ? new Error("startup activation raced readiness") : undefined
+  }
+
+  try {
+    await assert.rejects(() => managed.start("deploy", "active"), /startup activation raced readiness/)
+    const failed = managed.status()
+
+    assert.equal(failed.state, "failed")
+    assert.ok(failed.pid)
+    await managed.reactivateStrict()
+    assert.equal(managed.status().state, "running")
+    assert.equal(managed.status().lifecycleRole, "active")
+    assert.equal(managed.status().pid, failed.pid)
+  } finally {
+    await managed.stop()
+  }
+})
+
 test("quiesce waits for active-role restoration before retiring a restarted process", async () => {
   const managed = buildLongLived(() => false)
   const hooks = /** @type {string[]} */ ([])
