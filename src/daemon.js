@@ -340,7 +340,7 @@ export default class RollbridgeDaemon {
       if (!transfer?.config || !transfer.snapshot) throw new Error("Committed owner published incomplete replacement state")
       const registeredProcesses = new Map((await this.guardian.inventory()).map(({key, provenance}) => [key, provenance]))
 
-      reservedProcessKey = legacyBridge ? undefined : ownerSnapshotProcessKeys(transfer.snapshot, transfer.singletonReleaseIds)
+      reservedProcessKey = legacyBridge ? undefined : reconstructableOwnerSnapshotProcessKeys(transfer.snapshot, transfer.singletonReleaseIds)
         .find((key) => registeredProcesses.has(key))
       if (reservedProcessKey) this.guardian.reserveProcessRecovery(reservedProcessKey, /** @type {string} */ (registeredProcesses.get(reservedProcessKey)))
       await this.restoreOwnerState(transfer.snapshot, {config: transfer.config, releaseConfigs: transfer.releaseConfigs, resumeDrains: false, singletonReleaseIds: transfer.singletonReleaseIds, synchronizeLifecycleRoles: false})
@@ -547,13 +547,14 @@ export default class RollbridgeDaemon {
     if (!releaseId || !connections || typeof connections !== "object" || Array.isArray(connections)) {
       throw new Error("Incumbent listener sent invalid connection state")
     }
-    const release = this.releases.get(releaseId)
-
-    if (!release) throw new Error(`Incumbent listener reported unknown release ${releaseId}`)
-    release.setTransferredConnections({
+    const transferredConnections = {
       http: requiredNonNegativeInteger(connections.http, "connections.http"),
       websocket: requiredNonNegativeInteger(connections.websocket, "connections.websocket")
-    })
+    }
+    const release = this.releases.get(releaseId)
+
+    if (!release && (transferredConnections.http > 0 || transferredConnections.websocket > 0)) throw new Error(`Incumbent listener reported unknown release ${releaseId}`)
+    if (release) release.setTransferredConnections(transferredConnections)
     if (this.incumbentListenerControl === session && ![...this.releases.values()].some((candidate) => candidate.hasTransferredConnections())) {
       this.incumbentListenerControl = undefined
       session.close()
@@ -2119,6 +2120,27 @@ function ownerSnapshotProcessKeys(snapshot, singletonReleaseIds = {}) {
     if (releaseId) keys.push(`singleton:${releaseId}:${singleton.id}`)
   }
   return keys
+}
+
+/**
+ * Selects only committed guardian registrations that restoreOwnerState will reconstruct.
+ * @param {OwnerRecoverySnapshot} snapshot - Serialized owner process snapshot.
+ * @param {Record<string, string>} [singletonReleaseIds] - Exact singleton owner releases.
+ * @returns {string[]} Exact reconstructable guardian registration keys.
+ */
+function reconstructableOwnerSnapshotProcessKeys(snapshot, singletonReleaseIds = {}) {
+  const singletonOwnerReleaseIds = new Set(Object.values(singletonReleaseIds))
+  const releaseProcessKeys = new Set()
+
+  for (const release of snapshot.releases) {
+    const transitionCandidate = snapshot.generationTransition?.candidateReleaseId === release.releaseId && snapshot.generationTransition.phase !== "committed"
+    const singletonOwner = singletonOwnerReleaseIds.has(release.releaseId)
+
+    if (release.state !== "active" && release.state !== "draining" && !transitionCandidate && !singletonOwner) continue
+    for (const processStatus of release.processes) releaseProcessKeys.add(`release:${release.releaseId}:${processStatus.id}`)
+  }
+  return ownerSnapshotProcessKeys(snapshot, singletonReleaseIds)
+    .filter((key) => !key.startsWith("release:") || releaseProcessKeys.has(key))
 }
 
 /**

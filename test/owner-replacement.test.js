@@ -10,7 +10,7 @@ import path from "node:path"
 import test from "node:test"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
-import {sendControlCommand} from "../src/control-client.js"
+import {openControlSession, sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic} from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
 import {findAvailablePort} from "../src/port-allocator.js"
@@ -1186,6 +1186,88 @@ test("owner replacement preserves committed generation metadata without firing l
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }
+})
+
+test("owner replacement excludes stopped retained releases from reserved process recovery", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-stopped-proof-"))
+  const oldSocketPath = path.join(root, "old.sock")
+  const newSocketPath = path.join(root, "new.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
+  let owner
+  let candidate
+
+  try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path)])
+    await Promise.all([makeFifo(path.join(v1Path, "worker.fifo")), makeFifo(path.join(v2Path, "worker.fifo"))])
+    await writeConfig(configPath, config({controlPath: oldSocketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
+    const stopped = sendControlCommand({command: {command: "stop", releaseId: "v1"}, path: oldSocketPath})
+
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await stopped
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath})
+    const before = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
+    const activeWorkerPid = releaseProcessPid(before, "v2", "worker")
+    const retained = /** @type {{releaseId: string, state: string}[]} */ (before.releases)
+
+    assert.equal(retained.find(({releaseId}) => releaseId === "v1")?.state, "stopped")
+    const persisted = JSON.parse(await fs.readFile(statePath, "utf8"))
+    const guardian = new GuardianClient(persisted.recovery.guardian)
+
+    await guardian.connect()
+    assert.ok((await guardian.inventory()).some(({key}) => key === "release:v1:worker"), "stopped release registration remains in authenticated guardian inventory")
+    guardian.disconnect()
+    await writeConfig(configPath, config({controlPath: newSocketPath, extraCompanion: true, statePath}))
+    candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
+    const output = await collectUntilExitOrLog(candidate, "owner replacement committed")
+
+    assert.equal(output.message, "owner replacement committed", output.output)
+    const recovered = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
+
+    assert.equal(recovered.activeReleaseId, "v2")
+    assert.equal(releaseProcessPid(recovered, "v2", "worker"), activeWorkerPid)
+    assert.equal(/** @type {{releaseId: string}[]} */ (recovered.releases).some(({releaseId}) => releaseId === "v1"), false)
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
+
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    for (const child of [owner, candidate]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("pruned release connection completion closes the incumbent listener session", () => {
+  const daemon = new RollbridgeDaemon({
+    config: normalizeConfig(config({controlPath: "/unused/control.sock", extraCompanion: false, statePath: "/unused/state.json"})),
+    logger: () => {}
+  })
+  let closeCount = 0
+  const session = {close: () => { closeCount += 1 }}
+  const controlSession = /** @type {Awaited<ReturnType<typeof openControlSession>>} */ (session)
+
+  daemon.releases = /** @type {Map<string, import("../src/release-group.js").default>} */ (new Map([
+    ["active", /** @type {import("../src/release-group.js").default} */ ({hasTransferredConnections: () => false})]
+  ]))
+  daemon.incumbentListenerControl = controlSession
+  daemon.handleIncumbentListenerEvent({connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session)
+
+  assert.equal(closeCount, 1)
+  assert.equal(daemon.incumbentListenerControl, undefined)
+
+  daemon.incumbentListenerControl = controlSession
+  assert.throws(
+    () => daemon.handleIncumbentListenerEvent({connections: {http: 1, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session),
+    /unknown release pruned/
+  )
+  assert.equal(closeCount, 1)
+  assert.equal(daemon.incumbentListenerControl, session)
 })
 
 test("owner replacement preserves a failed generation transition without retrying its hook", async () => {
