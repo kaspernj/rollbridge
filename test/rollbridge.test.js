@@ -696,7 +696,11 @@ test("candidate activation failure reports restoration failure and exact recover
     assert.match(String(restorationEvent?.data.error), /incumbent restoration rejected/)
     assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2"])
     await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+    const failedCandidate = daemon.releases.get("v2")
 
+    assert.ok(failedCandidate)
+    await failedCandidate.stop()
+    assert.equal(failedCandidate.state, "stopped")
     incumbentCoordinator.reactivateStrict = reactivate
     const recovery = await sendControlCommand({
       command: {

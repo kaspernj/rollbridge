@@ -1814,7 +1814,7 @@ export default class RollbridgeDaemon {
     }
 
     if (transition.phase === "restoring_previous") {
-      if (candidate.state !== "draining") throw new Error(`Failed candidate ${candidate.releaseId} is not retired before incumbent restoration`)
+      if (candidate.state !== "draining" && candidate.state !== "stopped") throw new Error(`Failed candidate ${candidate.releaseId} is not retired before incumbent restoration`)
       try {
         await previous.reactivateGeneration()
       } catch (error) {
