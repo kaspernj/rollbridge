@@ -316,7 +316,7 @@ export default class ReleaseGroup extends EventEmitter {
 
   /** Accepts only process states produced after the exact recovery phase was journaled. */
   assertCommittedGenerationRecoverable() {
-    if (this.state !== "draining") throw new Error(`Committed generation ${this.releaseId} is not retained as draining`)
+    if (this.state !== "draining" && this.state !== "starting") throw new Error(`Committed generation ${this.releaseId} is not retained in its journaled recovery state`)
     const statuses = [...this.processes.values()].map((processInstance) => processInstance.status())
     const resumableStates = new Set(["failed", "running", "stopped"])
 

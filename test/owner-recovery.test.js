@@ -217,6 +217,7 @@ test("journaled committed bootstrap recovery resumes after a restart begins", as
     assert.ok(candidate)
     for (const processInstance of interrupted.services.values()) await processInstance.start("deploy")
     await candidate.restartCommittedGeneration()
+    await interrupted.checkpointGenerationTransition()
     const restarted = interrupted.status()
     const restartedCandidatePids = restarted.releases.find(({releaseId}) => releaseId === "v2")?.processes.map(({pid}) => pid)
     const restartedServicePids = restarted.services.map(({process}) => process.pid)
@@ -246,6 +247,101 @@ test("journaled committed bootstrap recovery resumes after a restart begins", as
       await shutdown.catch(() => undefined)
     }
     interrupted?.guardian?.disconnect()
+    retired.guardian?.disconnect()
+    await stopFixtureGuardian(fixture.statePath)
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
+test("committed bootstrap tuple mismatches fail closed without singletons", async () => {
+  const fixture = await createFixture()
+  fixture.config.processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
+    .filter((processConfig) => processConfig.id !== "singleton")
+  await writeConfig(fixture.configPath, fixture.config)
+  const config = normalizeConfig(fixture.config, fixture.configPath)
+  const retired = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
+  /** @type {RollbridgeDaemon | undefined} */
+  let recovered
+  const v1Path = await prepareRelease(fixture.root, "v1")
+  const v2Path = await prepareRelease(fixture.root, "v2")
+  const wrongPath = await prepareRelease(fixture.root, "wrong")
+
+  try {
+    await retired.start()
+    await retired.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
+    await retired.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    const committed = retired.status()
+    const v1WorkerPid = releaseProcessPid(committed, "v1", "worker")
+    const retiringPids = [
+      ...(committed.releases.find(({releaseId}) => releaseId === "v2")?.processes.map(({pid}) => pid) || []),
+      ...committed.services.map(({process}) => process.pid)
+    ].filter((pid) => typeof pid === "number")
+
+    await retired.retireOwner({attestation: `sha256:${"c".repeat(64)}`})
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    await Promise.all(retiringPids.map((pid) => waitForProcessExit(pid, 3000)))
+    recovered = new RollbridgeDaemon({
+      bootstrap: {releaseId: "v2", releasePath: v2Path, revision: "v2"},
+      config,
+      configPath: fixture.configPath,
+      logger: () => {}
+    })
+    await recovered.start({exposeControl: false})
+    const owner = recovered
+
+    await assert.rejects(
+      () => owner.deploy({releaseId: "v2", releasePath: wrongPath, revision: "v2"}),
+      /only the exact same release, path, revision, and config authority/u
+    )
+    await assert.rejects(
+      () => owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "wrong"}),
+      /only the exact same release, path, revision, and config authority/u
+    )
+    const changedConfig = structuredClone(fixture.config)
+    const jobs = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (changedConfig.processes)
+      .find((processConfig) => processConfig.id === "jobs")
+
+    assert.ok(jobs)
+    jobs.env = {.../** @type {Record<string, import("../src/json.js").JsonValue>} */ (jobs.env), MISMATCHED_AUTHORITY: "true"}
+    await writeConfig(fixture.configPath, changedConfig)
+    await assert.rejects(
+      () => owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"}),
+      /only the exact same release, path, revision, and config authority/u
+    )
+    await writeConfig(fixture.configPath, fixture.config)
+    await assert.rejects(
+      () => owner.deploy({releaseId: "wrong", releasePath: wrongPath, revision: "wrong"}),
+      /only the exact same release, path, revision, and config authority/u
+    )
+    const preserved = owner.status()
+
+    assert.equal(preserved.activeReleaseId, null)
+    assert.equal(preserved.generationTransition?.candidateReleaseId, "v2")
+    assert.equal(preserved.generationTransition?.phase, "committed")
+    assert.equal(preserved.releases.find(({releaseId}) => releaseId === "v2")?.state, "draining")
+    assert.equal(releaseProcessPid(preserved, "v1", "worker"), v1WorkerPid)
+    assert.equal(isAlive(v1WorkerPid), true)
+    assert.equal(preserved.releases.some(({releaseId}) => releaseId === "wrong"), false)
+
+    await owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
+    await Promise.all([
+      owner.stopRelease("v2"),
+      fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    ])
+    const afterIntentionalStop = await owner.deploy({releaseId: "wrong", releasePath: wrongPath, revision: "wrong"})
+
+    assert.equal(afterIntentionalStop.activeReleaseId, "wrong")
+    assert.equal(owner.status().activeReleaseId, "wrong")
+  } finally {
+    if (recovered) {
+      const activeReleaseId = recovered.status().activeReleaseId
+      const shutdown = recovered.shutdown()
+
+      await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      if (activeReleaseId === "v2") await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
+      if (activeReleaseId === "wrong") await fs.writeFile(path.join(wrongPath, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => undefined)
+    }
     retired.guardian?.disconnect()
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
