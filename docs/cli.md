@@ -106,7 +106,8 @@ the candidate binds and validates its listeners, and an authenticated fenced
 transaction commits guardian authority and the final control socket. A lost
 control response is accepted only when the guardian confirms the exact committed
 transaction id. The first authenticated upgrade from a genuine pre-replacement
-guardian/daemon is the sole exception: `ensure-daemon` preserves its exact
+guardian/daemon, or from a retained prepare/stage guardian that explicitly lacks
+the retired-owner commit capability, is the sole exception: `ensure-daemon` preserves its exact
 guardian-owned processes but deliberately retires the old listeners before the
 Node 20 candidate binds, so existing proxy/control connections may close.
 Successful status JSON records this as `ownerTransition.disruptive: true` and

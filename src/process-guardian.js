@@ -9,6 +9,7 @@ import {isDeepStrictEqual} from "node:util"
 import path from "node:path"
 import GuardianClient from "./guardian-client.js"
 import ManagedProcess from "./managed-process.js"
+import {writeState} from "./state-store.js"
 
 const OWNER_RESTART_RETRY_MS = 1000
 
@@ -22,15 +23,16 @@ const OWNER_RESTART_RETRY_MS = 1000
  * @property {number} [graceMs] - Owner reconnection grace.
  * @property {number} id - Request id.
  * @property {string} [key] - Stable process key.
+ * @property {boolean} [localSource] - Whether the retired daemon physically owns the published source.
  * @property {{timeoutMs?: number}} [options] - Stop options.
  * @property {string} [previousProvenance] - Expected current provenance.
  * @property {string} [provenance] - New or registered provenance.
  * @property {string} [releaseId] - Retained release identity.
+ * @property {string} [sourceId] - Stable retired-listener source identity.
  * @property {import("./json.js").JsonValue} [ownerState] - Private owner transfer state.
  * @property {string} [replacementId] - Prepared replacement transaction id.
  * @property {string} [mutationId] - Owner mutation lease id.
  * @property {string} [operation] - Owner mutation diagnostic name.
- * @property {number} [incumbentPid] - Exact legacy daemon PID crossed by the bridge.
  * @property {number} [ownerPid] - Exact claimant process PID.
  * @property {import("./json.js").JsonValue} [recoverySnapshot] - Public bridge recovery snapshot.
  * @property {string} [statePath] - Exact public recovery state path.
@@ -40,6 +42,7 @@ const OWNER_RESTART_RETRY_MS = 1000
  * @property {import("./managed-process.js").LifecycleRole} [lifecycleRole] - Desired generation role restored during start.
  * @property {string} token - Authentication token.
  */
+/** @typedef {{listenerStateComplete: boolean, localSources: Map<string, Map<string, {http: number, websocket: number}>>, replacementId: string, successor: net.Socket}} RetiredListenerTransaction */
 
 const [socketPath] = process.argv.slice(2)
 
@@ -70,8 +73,10 @@ const backpressuredClients = new Set()
 const pendingStatusEvents = new Map()
 /** @type {Map<net.Socket, number>} */
 const ownerUpdatesInFlight = new Map()
-/** @type {Map<net.Socket, string>} */
+/** @type {Map<net.Socket, RetiredListenerTransaction>} */
 const retiredListenerClients = new Map()
+/** @type {Set<RetiredListenerTransaction>} */
+const disconnectedOwnerSuccessors = new Set()
 /** @type {net.Socket | undefined} */
 let ownerClient
 /** @type {number | undefined} */
@@ -94,7 +99,6 @@ let ownerRevision = ownerState === undefined ? 0 : 1
 /** @type {number | undefined} */
 let replacementRevision
 const legacyKeys = legacyGuardian ? committedOwnerProcessKeys(ownerState) : new Set()
-let legacyBoundaryCrossed = false
 /** @type {net.Socket | undefined} */
 let ownerMutationClient
 /** @type {string | undefined} */
@@ -103,6 +107,14 @@ let ownerMutationId
 let retiringClient
 /** @type {string | undefined} */
 let retiringReplacementId
+let retiringListenerReady = false
+let retirementFailed = false
+/** @type {Promise<Error | undefined> | undefined} */
+let legacyOwnerClaim
+/** @type {import("./json.js").JsonValue | undefined} */
+let legacyRecoverySnapshot
+/** @type {string | undefined} */
+let legacyRecoveryStatePath
 let shuttingDown = false
 /** @type {net.Socket | undefined} */
 let shutdownClient
@@ -130,12 +142,11 @@ const server = net.createServer((socket) => {
   let buffer = ""
 
   socket.once("close", () => {
-    const controlLessRetirement = retiredListenerClients.has(socket)
+    const controlLessRetirement = retiredListenerClients.get(socket)
 
     clients.delete(socket)
     backpressuredClients.delete(socket)
     pendingStatusEvents.delete(socket)
-    retiredListenerClients.delete(socket)
     const waiterIndex = claimWaiters.findIndex((waiter) => waiter.socket === socket)
 
     if (waiterIndex >= 0) {
@@ -143,26 +154,45 @@ const server = net.createServer((socket) => {
       clearTimeout(waiter.timer)
       waiter.reject(new Error("Owner claimant disconnected"))
     }
-    if (ownerClient === socket && !ownerUpdatesInFlight.has(socket)) releaseClosedOwner(socket)
     if (ownerMutationClient === socket && ownerClient !== socket) {
       ownerMutationClient = undefined
       ownerMutationId = undefined
     }
-    if (retiringClient === socket && !controlLessRetirement) finalizeReplacementRetirement()
+    if (controlLessRetirement) {
+      const preCommitHandoff = replacementClient && ownerClient === socket && retiringReplacementId === replacementId
+
+      if (preCommitHandoff) {
+        publishClosedLocalSources(controlLessRetirement)
+        if (!controlLessRetirement.successor.destroyed) {
+          controlLessRetirement.successor.write(`${JSON.stringify({event: "replacement-retirement-failed", reason: "Incumbent listener disconnected during the prepared handoff", replacementId: controlLessRetirement.replacementId})}\n`)
+        }
+        abortReplacement("Incumbent listener disconnected during the prepared handoff", false)
+      } else if (retiringClient === socket && !controlLessRetirement.listenerStateComplete) {
+        retirementFailed = true
+        retiringClient = undefined
+        retiringReplacementId = undefined
+        if (ownerClient && !ownerClient.destroyed) {
+          ownerClient.write(`${JSON.stringify({event: "replacement-retirement-failed", reason: "Retired listener disconnected before publishing complete connection state", replacementId: controlLessRetirement.replacementId})}\n`)
+        }
+      } else if (controlLessRetirement.listenerStateComplete) {
+        publishClosedLocalSources(controlLessRetirement)
+        if (retiringClient === socket) finalizeReplacementRetirement()
+      }
+    } else if (retiringClient === socket) finalizeReplacementRetirement()
+    if (controlLessRetirement && retiredListenerClients.has(socket)) {
+      for (const transaction of retiredListenerClients.values()) {
+        if (transaction.successor === socket) transaction.successor = controlLessRetirement.successor
+      }
+      disconnectedOwnerSuccessors.delete(controlLessRetirement)
+      retiredListenerClients.delete(socket)
+    }
+    if (ownerClient === socket && !ownerUpdatesInFlight.has(socket)) releaseClosedOwner(socket)
     if (replacementClient === socket) {
-      replacementClient = undefined
-      replacementId = undefined
-      replacementAuthority = undefined
-      replacementOwnerState = undefined
-      replacementOwnerPid = undefined
-      if (legacyGuardian && !legacyBoundaryCrossed && !ownerClient && !committedReplacementId) {
+      abortReplacement("Replacement candidate disconnected before commit")
+      if (legacyGuardian && !legacyOwnerClaim && !ownerClient && !committedReplacementId) {
         legacyGuardian.disconnect()
         shuttingDown = true
         beginSuccessfulShutdown(socket)
-      } else if (ownerClient && !ownerClient.destroyed) {
-        ownerClient.write(`${JSON.stringify({event: "replacement-aborted"})}\n`)
-      } else {
-        scheduleOwnerRestart()
       }
     }
     if (shutdownClient === socket) void finishShutdown()
@@ -231,14 +261,22 @@ async function execute(request, socket) {
 
   if (request.command === "capabilities") return {daemonRecovery: 1}
 
+  if (request.command === "owner-replacement-capabilities") {
+    return {commands: ["commit-retired-owner-replacement"], protocol: "owner-replacement", version: 1}
+  }
+
   if (request.command === "claim-owner") {
+    if (retirementFailed) throw new Error("Guardian owner replacement is fenced after incomplete retired-listener state transfer")
     if (ownerState !== undefined && !isDeepStrictEqual(request.authority, ownerAuthority(ownerState))) {
-      throw new Error("Owner recovery authority does not match the guardian's committed authority")
+      const waitsForPreparedAuthority = Boolean(ownerClient && replacementOwnerState && isDeepStrictEqual(request.authority, replacementAuthority))
+
+      if (!waitsForPreparedAuthority) throw new Error("Owner recovery authority does not match the guardian's committed authority")
     }
     if (!ownerClient) {
       acceptOwnerClaim(request.ownerPid)
       ownerClient = socket
       ownerClientPid = request.ownerPid
+      reattachRetiredListenerSuccessors(socket)
       return {claimed: true}
     }
     if (ownerClient === socket) return {claimed: true}
@@ -259,6 +297,8 @@ async function execute(request, socket) {
     if (replacementClient) throw new Error("Committed owner cannot retire while an owner replacement is prepared")
     for (const entry of processes.values()) entry.desired = false
     void Promise.allSettled([...processes.values()].map((entry) => entry.process.stop()))
+    clearOwnerLocalListenerSource()
+    rememberDisconnectedOwnerSuccessors(socket)
     ownerClient = undefined
     ownerClientPid = undefined
     ownerMutationClient = undefined
@@ -298,7 +338,6 @@ async function execute(request, socket) {
 
   if (request.command === "abandon-legacy-upgrade") {
     if (!legacyGuardian) throw new Error("Guardian is not a legacy upgrade coordinator")
-    if (legacyBoundaryCrossed) throw new Error("Guardian cannot abandon a legacy upgrade after crossing the disruptive boundary")
     if (ownerClient || committedReplacementId) throw new Error("Committed guardian authority cannot abandon its legacy backend")
     if (replacementClient && replacementClient !== socket) throw new Error("Only the prepared replacement can abandon the legacy upgrade")
     if (replacementClient) abortReplacement("Legacy guardian upgrade candidate abandoned before the disruptive boundary")
@@ -308,40 +347,40 @@ async function execute(request, socket) {
     return {abandoned: true}
   }
 
-  if (request.command === "cross-legacy-upgrade-boundary") {
-    requireReplacement(socket, request)
+  if (request.command === "begin-legacy-owner-claim") {
     if (!legacyGuardian) throw new Error("Guardian is not a legacy upgrade coordinator")
-    if (legacyBoundaryCrossed) throw new Error("Guardian already crossed the legacy disruptive boundary")
-    if (!request.incumbentPid || !Number.isSafeInteger(request.incumbentPid) || request.incumbentPid <= 0) throw new Error("Legacy disruptive boundary requires the exact incumbent PID")
-    if (!request.statePath || !path.isAbsolute(request.statePath)) throw new Error("Legacy disruptive boundary requires an absolute state path")
-    if (request.statePath !== ownerStatePath(ownerState)) throw new Error("Legacy disruptive boundary state path does not match the committed owner config")
+    requireReplacement(socket, request)
+    if (legacyOwnerClaim) throw new Error("Legacy guardian owner claim is already pending")
+    if (replacementAuthority === undefined) throw new Error("Legacy guardian owner claim is missing replacement authority")
+    if (!request.statePath || !path.isAbsolute(request.statePath)) throw new Error("Legacy guardian owner claim requires an absolute state path")
+    if (request.statePath !== ownerStatePath(ownerState)) throw new Error("Legacy guardian owner claim state path does not match the committed owner config")
     assertBridgeRecoverySnapshot(request.recoverySnapshot)
-    const temporaryPath = `${request.statePath}.${process.pid}.${crypto.randomUUID()}.tmp`
-    const previousState = fsSync.readFileSync(request.statePath)
+    legacyRecoveryStatePath = request.statePath
+    legacyRecoverySnapshot = request.recoverySnapshot
+    legacyOwnerClaim = legacyGuardian.claimOwner(request.graceMs ?? 30000, replacementAuthority).then(
+      () => undefined,
+      (error) => error instanceof Error ? error : new Error(String(error))
+    )
+    return {prepared: true}
+  }
 
-    try {
-      fsSync.writeFileSync(temporaryPath, `${JSON.stringify(request.recoverySnapshot, null, 2)}\n`, {flag: "wx", mode: 0o600})
-      fsSync.renameSync(temporaryPath, request.statePath)
-      try {
-        process.kill(request.incumbentPid, "SIGKILL")
-        legacyBoundaryCrossed = true
-      } catch (error) {
-        fsSync.writeFileSync(temporaryPath, previousState, {flag: "wx", mode: 0o600})
-        fsSync.renameSync(temporaryPath, request.statePath)
-        throw error
-      }
-    } finally {
-      fsSync.rmSync(temporaryPath, {force: true})
-    }
-    return {crossed: true}
+  if (request.command === "complete-legacy-owner-claim") {
+    if (!legacyGuardian || !legacyOwnerClaim) throw new Error("Legacy guardian owner claim was not prepared")
+    requireReplacement(socket, request)
+    const claimError = await legacyOwnerClaim
+
+    if (claimError) throw claimError
+    if (!legacyRecoveryStatePath || legacyRecoverySnapshot === undefined) throw new Error("Legacy guardian owner claim is missing durable recovery state")
+    await writeState(legacyRecoveryStatePath, legacyRecoverySnapshot)
+    return {claimed: true}
   }
 
   if (request.command === "publish-owner-state") {
     requireOwner(socket, request.command)
     if (request.ownerState === undefined) throw new Error("Guardian owner publication requires ownerState")
-    ownerState = request.ownerState
+    ownerState = mergeOwnerConnectionState(ownerState, request.ownerState)
     ownerRevision += 1
-    committedReplacementId = undefined
+    if (!retiringClient) committedReplacementId = undefined
     return {published: true}
   }
 
@@ -352,7 +391,7 @@ async function execute(request, socket) {
   }
 
   if (request.command === "replacement-status") {
-    return {committedReplacementId: committedReplacementId ?? null, ownerClaimed: Boolean(ownerClient), retirementPending: Boolean(retiringClient)}
+    return {committedReplacementId: committedReplacementId ?? null, ownerClaimed: Boolean(ownerClient), retirementFailed, retirementPending: Boolean(retiringClient), retirementReady: retiringListenerReady}
   }
 
   if (request.command === "begin-owner-mutation") {
@@ -373,6 +412,8 @@ async function execute(request, socket) {
   }
 
   if (request.command === "prepare-owner-replacement") {
+    if (retirementFailed) throw new Error("Guardian owner replacement is fenced after incomplete retired-listener state transfer")
+    if (retiringClient) throw new Error("Guardian owner replacement cannot prepare while listener retirement is pending")
     if (socket === ownerClient) throw new Error("Committed owner cannot prepare itself as a replacement")
     if (replacementClient && replacementClient !== socket) throw new Error("Another owner replacement candidate is already prepared")
     if (ownerMutationClient) throw new Error("Owner replacement cannot prepare while an owner mutation is in progress")
@@ -392,6 +433,8 @@ async function execute(request, socket) {
       if (supersededRestartChild) killDetachedProcessGroup(supersededRestartChild)
     }
     if (!replacementId) replacementId = crypto.randomUUID()
+    retirementFailed = false
+    retiringListenerReady = false
     replacementClient = socket
     replacementOwnerPid = request.ownerPid
     replacementAuthority = request.nextAuthority
@@ -406,7 +449,7 @@ async function execute(request, socket) {
     if (request.ownerState === undefined || !isDeepStrictEqual(ownerAuthority(request.ownerState), replacementAuthority)) {
       throw new Error("Prepared replacement state does not match the requested authority")
     }
-    replacementOwnerState = request.ownerState
+    replacementOwnerState = mergeOwnerConnectionState(ownerState, request.ownerState)
     if (!ownerClient) commitReplacement()
     return {committed: ownerClient === socket}
   }
@@ -417,36 +460,51 @@ async function execute(request, socket) {
     return {aborted: true}
   }
 
+  if (request.command === "prepare-retired-owner-listener-handoff") {
+    requireReplacement(socket, request)
+    requireRetiredOwnerReplacement(request)
+    await requireMissingOwnerControlPath(ownerState)
+    requireReplacement(socket, request)
+    if (!ownerClient || ownerClient.destroyed) throw new Error("Retired owner listener handoff requires the connected committed owner")
+    if (retiringClient) throw new Error("Another owner listener retirement is already pending")
+    retiringClient = ownerClient
+    retiringReplacementId = /** @type {string} */ (request.replacementId)
+    retiredListenerClients.set(ownerClient, {
+      listenerStateComplete: false,
+      localSources: new Map(),
+      replacementId: /** @type {string} */ (request.replacementId),
+      successor: socket
+    })
+    ownerClient.write(`${JSON.stringify({event: "replacement-listener-handoff-requested", replacementId: request.replacementId})}\n`)
+    return {prepared: true}
+  }
+
   if (request.command === "commit-retired-owner-replacement") {
     requireReplacement(socket, request)
-    requireProcess(request)
-    if (!committedOwnerProcessKeys(ownerState).has(/** @type {string} */ (request.key))) {
-      throw new Error(`Guardian process ${request.key} does not belong to the committed owner`)
-    }
-    if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
-    if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
-    const controlPath = ownerControlPath(ownerState)
+    requireRetiredOwnerReplacement(request)
+    await requireMissingOwnerControlPath(ownerState)
+    const listener = retiringClient
 
-    try {
-      await fs.lstat(controlPath)
-      throw new Error(`Retired owner control socket ${controlPath} still exists`)
-    } catch (error) {
-      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+    if (!listener || listener !== ownerClient || listener.destroyed || !retiringListenerReady || retiredListenerClients.get(listener)?.successor !== socket) {
+      throw new Error("Retired owner replacement requires a complete prepared listener handoff")
     }
     commitReplacement()
-    if (retiringClient && !retiringClient.destroyed) {
-      retiredListenerClients.set(retiringClient, /** @type {string} */ (request.replacementId))
-      retiringClient.write(`${JSON.stringify({event: "replacement-retirement-requested", replacementId: request.replacementId})}\n`)
-    } else {
-      finalizeReplacementRetirement()
+    if (ownerClient) {
+      const retirement = retiredListenerClients.get(listener)
+
+      if (!retirement) throw new Error("Retired owner replacement lost its prepared listener handoff")
+      retirement.successor = ownerClient
+      listener.write(`${JSON.stringify({event: "replacement-retirement-requested", replacementId: request.replacementId})}\n`)
     }
     return {committed: true}
   }
 
   if (request.command === "publish-owner-connection-state") {
-    if (retiredListenerClients.get(socket) !== request.replacementId) throw new Error("Owner connection state requires the exact retired listener transaction")
-    if (typeof request.releaseId !== "string" || !request.connections || typeof request.connections !== "object" || Array.isArray(request.connections)) {
-      throw new Error("Owner connection state requires a release and connection counts")
+    const retirement = retiredListenerClients.get(socket)
+
+    if (!retirement || retirement.replacementId !== request.replacementId) throw new Error("Owner connection state requires the exact retired listener transaction")
+    if (typeof request.sourceId !== "string" || !request.sourceId || typeof request.releaseId !== "string" || !request.connections || typeof request.connections !== "object" || Array.isArray(request.connections)) {
+      throw new Error("Owner connection state requires a source, release, and connection counts")
     }
     const connections = request.connections
     const http = connections.http
@@ -455,15 +513,41 @@ async function execute(request, socket) {
     if (typeof http !== "number" || !Number.isSafeInteger(http) || http < 0 || typeof websocket !== "number" || !Number.isSafeInteger(websocket) || websocket < 0) {
       throw new Error("Owner connection state requires non-negative integer counts")
     }
-    if (ownerClient && ownerClient !== socket && !ownerClient.destroyed) {
-      ownerClient.write(`${JSON.stringify({connections: {http, websocket}, event: "owner-connection-state", releaseId: request.releaseId})}\n`)
-    }
+    const normalized = {http, websocket}
+
+    if (request.localSource) setRetiredLocalSource(retirement, request.sourceId, request.releaseId, normalized)
+    applyOwnerConnectionState(ownerState, request.sourceId, request.releaseId, normalized)
+    if (replacementOwnerState) applyOwnerConnectionState(replacementOwnerState, request.sourceId, request.releaseId, normalized)
+    publishOwnerConnectionState(retirement.successor, request.sourceId, request.releaseId, normalized)
     return {published: true}
+  }
+
+  if (request.command === "complete-owner-listener-retirement") {
+    if (retiredListenerClients.get(socket)?.replacementId !== request.replacementId || retiringClient !== socket) {
+      throw new Error("Owner listener retirement completion requires the exact retired listener transaction")
+    }
+    retiringListenerReady = true
+    const retirement = retiredListenerClients.get(socket)
+
+    if (!retirement) throw new Error("Owner listener retirement completion lost its transaction")
+    retirement.listenerStateComplete = true
+    const successor = retirement.successor
+
+    if (successor && !successor.destroyed) {
+      successor.write(`${JSON.stringify({event: "replacement-listeners-retired", replacementId: request.replacementId})}\n`)
+    }
+    return {completed: true}
   }
 
   if (request.command === "commit-owner-replacement") {
     requireOwner(socket, request.command)
     if (!replacementClient || request.replacementId !== replacementId || !replacementOwnerState) throw new Error("Owner replacement transaction is not the prepared ready candidate")
+    retiredListenerClients.set(socket, {
+      listenerStateComplete: false,
+      localSources: new Map(),
+      replacementId: /** @type {string} */ (request.replacementId),
+      successor: replacementClient
+    })
     commitReplacement()
     return {committed: true}
   }
@@ -475,7 +559,15 @@ async function execute(request, socket) {
   }
 
   if (request.command === "finalize-owner-replacement") {
-    if (retiringClient !== socket || request.replacementId !== retiringReplacementId) throw new Error("Owner replacement retirement finalization requires the committed incumbent transaction")
+    const incumbentRetirement = retiredListenerClients.get(socket)
+    const incumbentFinalization = retiringClient === socket && (!incumbentRetirement || incumbentRetirement.listenerStateComplete)
+    const candidateFinalization = ownerClient === socket && retiringListenerReady && !retirementFailed
+    const alreadyFinalized = ownerClient === socket && !retiringClient && request.replacementId === committedReplacementId && !retirementFailed
+
+    if (alreadyFinalized) return {finalized: true}
+    if ((!incumbentFinalization && !candidateFinalization) || request.replacementId !== retiringReplacementId) {
+      throw new Error("Owner replacement retirement finalization requires the committed listener transaction")
+    }
     finalizeReplacementRetirement()
     return {finalized: true}
   }
@@ -589,7 +681,7 @@ async function execute(request, socket) {
     })
     record.provenance = request.provenance
     if (request.ownerState !== undefined) {
-      ownerState = request.ownerState
+      ownerState = mergeOwnerConnectionState(ownerState, request.ownerState)
       committedReplacementId = undefined
     }
   } else if (request.command === "status") {
@@ -622,6 +714,8 @@ function releaseClosedOwner(socket) {
   if (ownerClient !== socket) return
   const incompleteRestartChild = ownerRestartChild?.pid === ownerClientPid ? ownerRestartChild : undefined
 
+  clearOwnerLocalListenerSource()
+  rememberDisconnectedOwnerSuccessors(socket)
   ownerClient = undefined
   ownerClientPid = undefined
   if (ownerMutationClient === socket) {
@@ -637,6 +731,7 @@ function releaseClosedOwner(socket) {
       ownerRestartRetryDelayMs = OWNER_RESTART_RETRY_MS
     }
     if (replacementClient) abortReplacement("Committed owner disconnected before replacement candidate was ready", false)
+    if (retirementFailed) return
     if (!shuttingDown) {
       grantNextOwner()
       const retryDelayMs = ownerRestartRetryDelayMs
@@ -667,8 +762,20 @@ function completeOwnerUpdate(socket) {
  * @param {boolean} [scheduleRecovery] - Whether this call owns recovery scheduling.
  */
 function abortReplacement(reason, scheduleRecovery = true) {
+  const abortedReplacementId = replacementId
+
   if (replacementClient && !replacementClient.destroyed) replacementClient.write(`${JSON.stringify({event: "replacement-aborted", reason})}\n`)
   if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: "replacement-aborted", reason})}\n`)
+  if (retiringClient && retiringClient === ownerClient && retiringReplacementId === abortedReplacementId) {
+    const retirement = retiredListenerClients.get(retiringClient)
+
+    if (retirement) disconnectedOwnerSuccessors.delete(retirement)
+    retiredListenerClients.delete(retiringClient)
+    retiringClient = undefined
+    retiringReplacementId = undefined
+    retiringListenerReady = false
+    retirementFailed = false
+  }
   replacementClient = undefined
   replacementId = undefined
   replacementAuthority = undefined
@@ -691,16 +798,20 @@ function commitReplacement() {
 
   clearOwnerRestartTracking()
   if (supersededRestartChild && !restartChildIsIncumbent) killDetachedProcessGroup(supersededRestartChild)
-  for (const waiter of claimWaiters.splice(0)) {
-    clearTimeout(waiter.timer)
-    waiter.reject(new Error("Durable owner authority changed while the claim was queued"))
-  }
   ownerClient = committedClient
   ownerClientPid = replacementOwnerPid
   ownerRestartRetryDelayMs = undefined
   ownerState = replacementOwnerState
   ownerRevision += 1
   committedReplacementId = committedId
+  for (const waiter of claimWaiters.splice(0)) {
+    if (isDeepStrictEqual(waiter.authority, ownerAuthority(ownerState))) {
+      claimWaiters.push(waiter)
+    } else {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error("Durable owner authority changed while the claim was queued"))
+    }
+  }
   replacementClient = undefined
   replacementId = undefined
   replacementAuthority = undefined
@@ -723,6 +834,8 @@ function finalizeReplacementRetirement() {
 
   retiringClient = undefined
   retiringReplacementId = undefined
+  retiringListenerReady = false
+  retirementFailed = false
   if (!committedClient || !committedId) return
   publishReplacementCommitted(committedClient, committedId)
   if (previousOwner && !previousOwner.destroyed) previousOwner.write(`${JSON.stringify({event: "replacement-retired", replacementId: committedId})}\n`)
@@ -754,6 +867,139 @@ function requireProcess(request) {
 
   if (!record) throw new Error(`Guardian process ${request.key} is not registered`)
   return record
+}
+
+/**
+ * @param {RetiredListenerTransaction} retirement - Retired listener transaction.
+ * @param {string} sourceId - Physically-owned source.
+ * @param {string} releaseId - Retained release.
+ * @param {{http: number, websocket: number}} connections - Exact live counts.
+ */
+function setRetiredLocalSource(retirement, sourceId, releaseId, connections) {
+  const releases = retirement.localSources.get(sourceId) || new Map()
+
+  if (connections.http + connections.websocket === 0) releases.delete(releaseId)
+  else releases.set(releaseId, connections)
+  if (releases.size === 0) retirement.localSources.delete(sourceId)
+  else retirement.localSources.set(sourceId, releases)
+}
+
+/**
+ * @param {net.Socket | undefined} firstSuccessor - First daemon that inherited the source.
+ * @param {string} sourceId - Stable listener source.
+ * @param {string} releaseId - Retained release.
+ * @param {{http: number, websocket: number}} connections - Exact live counts.
+ */
+function publishOwnerConnectionState(firstSuccessor, sourceId, releaseId, connections) {
+  let successor = firstSuccessor
+  const delivered = new Set()
+
+  while (successor && !delivered.has(successor)) {
+    delivered.add(successor)
+    if (!successor.destroyed) {
+      successor.write(`${JSON.stringify({connections, event: "owner-connection-state", releaseId, sourceId})}\n`)
+    }
+    successor = retiredListenerClients.get(successor)?.successor
+  }
+}
+
+/** @param {RetiredListenerTransaction} retirement - Disconnected completed listener. */
+function publishClosedLocalSources(retirement) {
+  for (const [sourceId, releases] of retirement.localSources) {
+    for (const releaseId of releases.keys()) {
+      const connections = {http: 0, websocket: 0}
+
+      applyOwnerConnectionState(ownerState, sourceId, releaseId, connections)
+      publishOwnerConnectionState(retirement.successor, sourceId, releaseId, connections)
+    }
+  }
+}
+
+/**
+ * @param {import("./json.js").JsonValue | undefined} state - Candidate or committed private owner state.
+ * @param {string} sourceId - Stable listener source.
+ * @param {string} releaseId - Retained release.
+ * @param {{http: number, websocket: number}} connections - Exact live counts.
+ */
+function applyOwnerConnectionState(state, sourceId, releaseId, connections) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) throw new Error("Guardian owner connection state requires transferable owner state")
+  const transferable = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (state)
+  const sources = transferable.listenerConnectionSources || {}
+  const releases = sources[sourceId] || {}
+
+  if (connections.http + connections.websocket === 0) {
+    delete releases[releaseId]
+  } else {
+    releases[releaseId] = connections
+  }
+  if (Object.keys(releases).length === 0) delete sources[sourceId]
+  else sources[sourceId] = releases
+  transferable.listenerConnectionSources = sources
+}
+
+/** Clears the physically-owned source before another daemon reconstructs committed state. */
+function clearOwnerLocalListenerSource() {
+  if (!ownerState || typeof ownerState !== "object" || Array.isArray(ownerState)) return
+  const transferable = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>, listenerSourceId?: string}} */ (ownerState)
+  const sourceId = transferable.listenerSourceId
+
+  if (!sourceId) return
+  for (const releaseId of Object.keys(transferable.listenerConnectionSources?.[sourceId] || {})) {
+    const connections = {http: 0, websocket: 0}
+
+    applyOwnerConnectionState(ownerState, sourceId, releaseId, connections)
+    if (replacementOwnerState) {
+      applyOwnerConnectionState(replacementOwnerState, sourceId, releaseId, connections)
+      publishOwnerConnectionState(replacementClient, sourceId, releaseId, connections)
+    }
+  }
+}
+
+/**
+ * Preserves guardian-confirmed source updates while accepting the publisher's own local source.
+ * @param {import("./json.js").JsonValue | undefined} previousState - Current guardian state.
+ * @param {import("./json.js").JsonValue} nextState - Incoming owner publication.
+ * @returns {import("./json.js").JsonValue} Publication with guardian source state merged in.
+ */
+function mergeOwnerConnectionState(previousState, nextState) {
+  if (!nextState || typeof nextState !== "object" || Array.isArray(nextState)) throw new Error("Guardian owner publication requires transferable owner state")
+  const next = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>, listenerSourceId?: string}} */ (nextState)
+  const publishesSources = next.listenerConnectionSources !== undefined
+  const localSourceId = next.listenerSourceId
+
+  if (!previousState || typeof previousState !== "object" || Array.isArray(previousState) || !localSourceId) return nextState
+  const previous = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (previousState)
+  const sources = /** @type {Record<string, Record<string, {http: number, websocket: number}>>} */ ({})
+  const localReleases = next.listenerConnectionSources?.[localSourceId]
+
+  if (localReleases && Object.keys(localReleases).length > 0) sources[localSourceId] = localReleases
+  for (const [sourceId, releases] of Object.entries(previous.listenerConnectionSources || {})) {
+    if (sourceId !== localSourceId) sources[sourceId] = releases
+  }
+  if (publishesSources || Object.keys(sources).length > 0) next.listenerConnectionSources = sources
+  return nextState
+}
+
+/** @param {GuardianRequest} request - Staged same-authority listener handoff request. */
+function requireRetiredOwnerReplacement(request) {
+  requireProcess(request)
+  if (!committedOwnerProcessKeys(ownerState).has(/** @type {string} */ (request.key))) {
+    throw new Error(`Guardian process ${request.key} does not belong to the committed owner`)
+  }
+  if (!replacementOwnerState) throw new Error("Retired owner replacement transaction is not staged")
+  if (!isDeepStrictEqual(ownerAuthority(ownerState), replacementAuthority)) throw new Error("Retired owner replacement requires unchanged owner authority")
+}
+
+/** @param {import("./json.js").JsonValue | undefined} state - Committed transferable state. */
+async function requireMissingOwnerControlPath(state) {
+  const controlPath = ownerControlPath(state)
+
+  try {
+    await fs.lstat(controlPath)
+    throw new Error(`Retired owner control socket ${controlPath} still exists`)
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+  }
 }
 
 /**
@@ -794,14 +1040,14 @@ function ownerStatePath(state) {
 
 /** @param {import("./json.js").JsonValue | undefined} snapshot - Candidate public recovery snapshot. */
 function assertBridgeRecoverySnapshot(snapshot) {
-  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) || !("recovery" in snapshot)) throw new Error("Legacy disruptive boundary requires a recovery snapshot")
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) || !("recovery" in snapshot)) throw new Error("Legacy guardian owner claim requires a recovery snapshot")
   const recovery = snapshot.recovery
 
-  if (!recovery || typeof recovery !== "object" || Array.isArray(recovery) || !("guardian" in recovery)) throw new Error("Legacy disruptive boundary recovery snapshot is missing its guardian")
+  if (!recovery || typeof recovery !== "object" || Array.isArray(recovery) || !("guardian" in recovery)) throw new Error("Legacy guardian owner claim recovery snapshot is missing its guardian")
   const guardian = recovery.guardian
 
   if (!guardian || typeof guardian !== "object" || Array.isArray(guardian) || guardian.socketPath !== socketPath || guardian.token !== token) {
-    throw new Error("Legacy disruptive boundary recovery snapshot does not identify this guardian")
+    throw new Error("Legacy guardian owner claim recovery snapshot does not identify this guardian")
   }
 }
 
@@ -840,10 +1086,16 @@ function broadcast(event) {
   for (const client of clients) {
     if (client.destroyed) continue
     if (backpressuredClients.has(client)) {
-      if (event.event !== "process-log" && typeof event.key === "string") {
+      if (typeof event.key === "string") {
         const pending = pendingStatusEvents.get(client) || new Map()
 
-        pending.set(event.key, line)
+        if (event.event === "process-log") {
+          const record = processes.get(event.key)
+
+          if (record) pending.set(event.key, `${JSON.stringify({event: "status", key: event.key, status: record.process.status()})}\n`)
+        } else {
+          pending.set(event.key, line)
+        }
         pendingStatusEvents.set(client, pending)
       }
       continue
@@ -871,6 +1123,19 @@ function flushStatusEvents(client) {
   if (pending.size === 0) pendingStatusEvents.delete(client)
 }
 
+/** @param {net.Socket} owner - Disconnected or retiring committed owner. */
+function rememberDisconnectedOwnerSuccessors(owner) {
+  for (const transaction of retiredListenerClients.values()) {
+    if (transaction.successor === owner) disconnectedOwnerSuccessors.add(transaction)
+  }
+}
+
+/** @param {net.Socket} successor - Newly claimed recovery owner. */
+function reattachRetiredListenerSuccessors(successor) {
+  for (const transaction of disconnectedOwnerSuccessors) transaction.successor = successor
+  disconnectedOwnerSuccessors.clear()
+}
+
 /** @returns {void} Grants the next queued owner claim. */
 function grantNextOwner() {
   let next = claimWaiters.shift()
@@ -886,6 +1151,7 @@ function grantNextOwner() {
   acceptOwnerClaim(next.ownerPid)
   ownerClient = next.socket
   ownerClientPid = next.ownerPid
+  reattachRetiredListenerSuccessors(next.socket)
   next.resolve({claimed: true})
   for (const waiter of claimWaiters.splice(0)) {
     clearTimeout(waiter.timer)

@@ -24,6 +24,7 @@ if (!authorityText || !markerPath || !socketPath || !token || !Number.isInteger(
 let buffer = ""
 /** @type {string | undefined} */
 let replacementId
+let replacementCommitted = false
 
 if (startedPath) fs.writeFileSync(startedPath, `${process.pid}\n`)
 if (startedLogPath) fs.appendFileSync(startedLogPath, `${JSON.stringify({at: Date.now(), pid: process.pid})}\n`)
@@ -59,11 +60,22 @@ const timer = setTimeout(() => {
         replacementId = response.replacementId
         if (replacementPreparedPath) fs.writeFileSync(replacementPreparedPath, `${replacementId}\n`)
       }
-      if (response.id === 3 && replacementCommittedPath) fs.writeFileSync(replacementCommittedPath, `${replacementId}\n`)
+      if (response.id === 3) {
+        replacementCommitted = true
+        if (replacementCommittedPath) fs.writeFileSync(replacementCommittedPath, `${replacementId}\n`)
+      }
+      if (response.id === 4) socket.write(`${JSON.stringify({command: "finalize-owner-replacement", id: 5, replacementId, token})}\n`)
+      if (response.id === 5) socket.destroy()
       newline = buffer.indexOf("\n")
     }
   })
-  process.once("SIGUSR1", () => socket.destroy())
+  process.once("SIGUSR1", () => {
+    if (!replacementCommitted) {
+      socket.destroy()
+      return
+    }
+    socket.write(`${JSON.stringify({command: "complete-owner-listener-retirement", id: 4, replacementId, token})}\n`)
+  })
   process.once("SIGUSR2", () => {
     if (!replacementId) throw new Error("Guardian recovery owner fixture has no prepared replacement")
     socket.write(`${JSON.stringify({command: "commit-owner-replacement", id: 3, replacementId, token})}\n`)

@@ -29,8 +29,8 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, generationTransition?: GenerationTransition, ownerRecovery: {configDigest: string, ready: boolean} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
  * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
  * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>}} OwnerRecoverySnapshot
- * @typedef {{authority: JsonValue, config: import("./config.js").RollbridgeConfig, recovery?: {command: JsonValue, reconnectGraceMs: number, startupTimeoutMs: number}, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, retiredListenerHandoff?: number, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>, snapshot: OwnerRecoverySnapshot}} PrivateOwnerState
- * @typedef {{boundaryCrossed: boolean, incumbentControl: Awaited<ReturnType<typeof openControlSession>>, incumbentStartTime: string, prepared: {ownerState: JsonValue, replacementId: string}, recoverySnapshot: OwnerRecoverySnapshot}} LegacyOwnerBridge
+ * @typedef {{authority: JsonValue, config: import("./config.js").RollbridgeConfig, listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>, listenerSourceId?: string, recovery?: {command: JsonValue, reconnectGraceMs: number, startupTimeoutMs: number}, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, retiredListenerHandoff?: number, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>, snapshot: OwnerRecoverySnapshot}} PrivateOwnerState
+ * @typedef {{boundaryCrossed: boolean, incumbentControl?: Awaited<ReturnType<typeof openControlSession>>, incumbentStartTime: string, legacyGuardian: GuardianClient, legacyInventory: {key: string, provenance: string}[], legacyPrepared?: {ownerState: JsonValue, replacementId: string}, legacySnapshot: OwnerRecoverySnapshot, prepared: {ownerState: JsonValue, replacementId: string}, recoverySnapshot: OwnerRecoverySnapshot}} LegacyOwnerBridge
  */
 
 export default class RollbridgeDaemon {
@@ -92,9 +92,15 @@ export default class RollbridgeDaemon {
     this.ownerRetired = false
     this.controlClosePromise = /** @type {Promise<void> | undefined} */ (undefined)
     this.proxyClosePromise = /** @type {Promise<void> | undefined} */ (undefined)
-    this.listenerHandoff = /** @type {{control: boolean, proxy: boolean, replacementId: string} | undefined} */ (undefined)
+    this.listenerHandoff = /** @type {{completionSocket: net.Socket, control: boolean, proxy: boolean, replacementId: string, retired: Promise<Record<string, JsonValue>>} | undefined} */ (undefined)
     this.listenerHandoffFailure = /** @type {Error | undefined} */ (undefined)
     this.incumbentListenerControl = /** @type {Awaited<ReturnType<typeof openControlSession>> | undefined} */ (undefined)
+    this.incumbentListenerSourceIds = /** @type {WeakMap<object, string>} */ (new WeakMap())
+    this.listenerConnectionSources = /** @type {Map<string, Map<string, {http: number, websocket: number}>>} */ (new Map())
+    this.listenerSourceId = crypto.randomUUID()
+    this.retiredConnectionPublication = Promise.resolve()
+    this.retiredReplacementId = /** @type {string | undefined} */ (undefined)
+    this.retiredListenerHandoff = /** @type {{releases: ReleaseGroup[], replacementId: string, replacementRetired: boolean, retired: Promise<Record<string, JsonValue>>} | undefined} */ (undefined)
     this.ownerTransition = /** @type {OwnerTransition | undefined} */ (undefined)
     this.controlCommandsReady = true
     this.startingReleases = /** @type {Set<ReleaseGroup>} */ (new Set())
@@ -119,12 +125,13 @@ export default class RollbridgeDaemon {
     else if (reportOrphans) await this.reportOrphans()
     if (this.ownerRetired) return
     const transition = this.generationTransition
+    const recoveredReplacementProxy = this.guardian ? await this.finalizeRecoveredOwnerReplacement() : false
 
     if (this.guardian && transition && transition.phase !== "committed" && !transition.error) {
       this.generationTransitionRecovery = true
       try {
         await this.executeOwnerMutation("recover generation transition", async () => {
-          await this.startProxy()
+          if (!recoveredReplacementProxy) await this.startProxy()
           if (this.ownerRetired) return {}
           if (exposeControl) await this.exposeControl()
           if (this.ownerRetired) return {}
@@ -142,8 +149,41 @@ export default class RollbridgeDaemon {
       if (!this.ownerRetired) this.logger("release generation transition recovery settled", {phase: transition.phase, releaseId: transition.candidateReleaseId})
       return
     }
-    await this.startProxy()
+    if (!recoveredReplacementProxy) await this.startProxy()
     if (!this.ownerRetired && exposeControl) await this.exposeControl()
+  }
+
+  /** @returns {Promise<boolean>} Whether startup bound a proxy for a pending committed replacement. */
+  async finalizeRecoveredOwnerReplacement() {
+    if (!this.guardian) return false
+    let status = await this.guardian.replacementStatus()
+
+    if (status.retirementFailed) throw new Error("Guardian owner replacement is fenced after incomplete retired-listener state transfer")
+    if (!status.retirementPending) return false
+    if (!status.committedReplacementId) throw new Error("Guardian reports listener retirement without a committed replacement")
+    if (!status.retirementReady) {
+      const settled = Promise.race([
+        this.guardian.waitForEvent("replacement-listeners-retired").then(() => undefined, (error) => error instanceof Error ? error : new Error(String(error))),
+        this.guardian.waitForEvent("replacement-retirement-failed").then((event) => new Error(stringOrUndefined(event.reason) || "Retired listener state transfer failed"), (error) => error instanceof Error ? error : new Error(String(error))),
+        this.guardian.waitForEvent("replacement-committed").then(() => undefined, (error) => error instanceof Error ? error : new Error(String(error)))
+      ])
+
+      status = await this.guardian.replacementStatus()
+      if (status.retirementPending && !status.retirementReady) {
+        const settlementError = await settled
+
+        if (settlementError) throw settlementError
+        status = await this.guardian.replacementStatus()
+      }
+      if (!status.retirementPending) return false
+      if (!status.retirementReady) throw new Error("Guardian listener retirement did not publish complete state")
+    }
+    const replacementId = status.committedReplacementId
+
+    if (!replacementId) throw new Error("Guardian listener retirement lost its committed replacement")
+    await this.startProxy()
+    await this.guardian.finalizeOwnerReplacement(replacementId)
+    return true
   }
 
   /** Connects to the durable process guardian and reconstructs a matching persisted owner snapshot. */
@@ -218,6 +258,7 @@ export default class RollbridgeDaemon {
       }
       await this.restoreOwnerState(recoverySnapshot, {
         config: ownerState.config,
+        listenerConnectionSources: ownerState.listenerConnectionSources,
         releaseConfigs: ownerState.releaseConfigs,
         resumeDrains: false,
         serviceReleaseIds: recoverySnapshot === snapshot ? snapshot.serviceReleaseIds || ownerState.serviceReleaseIds : ownerState.serviceReleaseIds || snapshot.serviceReleaseIds,
@@ -248,22 +289,41 @@ export default class RollbridgeDaemon {
   /** Installs event-driven drain fencing for the next prepared owner transaction. */
   watchOwnerReplacementEvents() {
     if (!this.guardian) throw new Error("Owner replacement event fencing requires the durable guardian")
+    this.guardian.onEvent("owner-connection-state", (event) => this.handleIncumbentListenerEvent(event))
     this.guardian.onEvent("replacement-prepared", () => {
       for (const release of this.releases.values()) release.pauseDrainForOwnerHandoff()
     })
     this.guardian.onEvent("replacement-aborted", () => {
+      if (this.retiredListenerHandoff) {
+        void this.resumeControlLessOwnerListeners().catch((error) => {
+          this.listenerHandoffFailure = error instanceof Error ? error : new Error(String(error))
+          this.logger("control-less owner listener handoff recovery failed", {error: this.listenerHandoffFailure.message})
+        })
+        return
+      }
       if (this.listenerHandoff || this.ownerRetired) return
       for (const release of this.releases.values()) {
         release.resumeDrainAfterOwnerHandoff()
         if (release.state === "draining" && this.shouldResumeDrain(release)) void this.drainAndPrune(release, release.config)
       }
     })
+    this.guardian.onEvent("replacement-listener-handoff-requested", (event) => {
+      if (this.ownerRetired) return
+      const replacementId = stringOrUndefined(event.replacementId)
+
+      if (!replacementId) throw new Error("Owner listener handoff request is missing its replacement id")
+      void this.yieldControlLessOwnerListeners(replacementId).catch((error) => {
+        this.listenerHandoffFailure = error instanceof Error ? error : new Error(String(error))
+        this.logger("control-less owner listener handoff failed", {error: this.listenerHandoffFailure.message, replacementId})
+        this.guardian?.disconnect()
+      })
+    })
     this.guardian.onEvent("replacement-retirement-requested", (event) => {
       if (this.ownerRetired) return
       const replacementId = stringOrUndefined(event.replacementId)
 
       if (!replacementId) throw new Error("Committed owner retirement request is missing its replacement id")
-      void this.retireControlLessCommittedOwner(replacementId).catch((error) => {
+      void this.completeControlLessOwnerRetirement(replacementId).catch((error) => {
         this.listenerHandoffFailure = error instanceof Error ? error : new Error(String(error))
         this.logger("committed owner retirement failed", {error: this.listenerHandoffFailure.message, replacementId})
         this.guardian?.disconnect()
@@ -280,13 +340,14 @@ export default class RollbridgeDaemon {
    * @param {OwnerRecoverySnapshot} snapshot - Validated persisted owner state.
    * @param {object} [options] - Recovery definition options.
    * @param {import("./config.js").RollbridgeConfig} [options.config] - Owner config for daemon-wide processes.
+   * @param {Record<string, Record<string, {http: number, websocket: number}>>} [options.listenerConnectionSources] - Exact inherited listener sources.
    * @param {Record<string, import("./config.js").RollbridgeConfig>} [options.releaseConfigs] - Exact generation configs.
    * @param {boolean} [options.resumeDrains] - Whether to resume draining generations immediately.
    * @param {Record<string, string>} [options.serviceReleaseIds] - Exact release owner for each persistent service definition.
    * @param {Record<string, string>} [options.singletonReleaseIds] - Exact release owner for each singleton registration.
    * @param {boolean} [options.synchronizeLifecycleRoles] - Whether the caller owns guardian role mutation authority.
    */
-  async restoreOwnerState(snapshot, {config = this.config, releaseConfigs = /** @type {Record<string, import("./config.js").RollbridgeConfig>} */ ({}), resumeDrains = true, serviceReleaseIds = snapshot.serviceReleaseIds || /** @type {Record<string, string>} */ ({}), singletonReleaseIds = snapshot.singletonReleaseIds || /** @type {Record<string, string>} */ ({}), synchronizeLifecycleRoles = true} = {}) {
+  async restoreOwnerState(snapshot, {config = this.config, listenerConnectionSources = /** @type {Record<string, Record<string, {http: number, websocket: number}>>} */ ({}), releaseConfigs = /** @type {Record<string, import("./config.js").RollbridgeConfig>} */ ({}), resumeDrains = true, serviceReleaseIds = snapshot.serviceReleaseIds || /** @type {Record<string, string>} */ ({}), singletonReleaseIds = snapshot.singletonReleaseIds || /** @type {Record<string, string>} */ ({}), synchronizeLifecycleRoles = true} = {}) {
     if (!Array.isArray(snapshot.releases) || (snapshot.activeReleaseId !== null && typeof snapshot.activeReleaseId !== "string")) {
       throw new Error("Owner recovery state is partial or corrupt; active release metadata is required.")
     }
@@ -322,6 +383,11 @@ export default class RollbridgeDaemon {
       await release.restore(releaseStatus, {synchronizeLifecycleRole: synchronizeLifecycleRoles})
       this.releases.set(release.releaseId, release)
       if (release.releaseId === snapshot.activeReleaseId) this.activeRelease = release
+    }
+    for (const [sourceId, releases] of Object.entries(listenerConnectionSources)) {
+      for (const [releaseId, connections] of Object.entries(releases)) {
+        this.setListenerConnectionSource(sourceId, releaseId, connections)
+      }
     }
 
     if (snapshot.activeReleaseId !== null && !this.activeRelease) throw new Error(`Owner recovery state does not contain active release ${snapshot.activeReleaseId}.`)
@@ -391,8 +457,10 @@ export default class RollbridgeDaemon {
         reconnectGraceMs: this.config.ownerRecovery?.reconnectGraceMs ?? 30000,
         startupTimeoutMs: this.recoveryCommand.startupTimeoutMs
       } : undefined,
+      listenerConnectionSources: this.serializedListenerConnectionSources(),
+      listenerSourceId: this.listenerSourceId,
       releaseConfigs: Object.fromEntries([...this.releases].map(([releaseId, release]) => [releaseId, release.config])),
-      retiredListenerHandoff: 1,
+      retiredListenerHandoff: 2,
       serviceReleaseIds: Object.fromEntries(this.serviceReleaseIds),
       singletonReleaseIds: Object.fromEntries(this.singletonReleaseIds),
       snapshot: this.status()
@@ -414,23 +482,46 @@ export default class RollbridgeDaemon {
     this.guardian = new GuardianClient(this.guardianIdentity)
     await this.guardian.connect()
     this.watchOwnerReplacementEvents()
-    this.guardian.onEvent("owner-connection-state", (event) => this.handleIncumbentListenerEvent(event))
     const persistedAuthority = {
       configDigest: persisted.recovery.configDigest,
       runtime: persisted.daemonRuntime ? {...persisted.daemonRuntime} : null
     }
-    let legacyBridge
-    let prepared
+    const replacementProtocol = await this.guardian.ownerReplacementProtocol()
+    const legacyBridge = replacementProtocol === "legacy"
+      ? await this.prepareLegacyOwnerReplacement({persisted, persistedAuthority})
+      : undefined
+    const prepared = legacyBridge?.prepared ?? await this.guardian.prepareOwnerReplacement(persistedAuthority, this.ownerAuthority())
+    let preparedStatus
+    let reservedProcessKey
+    let transfer
 
     try {
-      prepared = await this.guardian.prepareOwnerReplacement(persistedAuthority, this.ownerAuthority())
+      preparedStatus = await this.guardian.replacementStatus()
+      transfer = /** @type {PrivateOwnerState} */ (prepared.ownerState)
+      if (!transfer?.config || !transfer.snapshot) throw new Error("Committed owner published incomplete replacement state")
+      const unresolvedTransition = transfer.snapshot.generationTransition
+
+      if (unresolvedTransition && unresolvedTransition.phase !== "committed" && unresolvedTransition.configDigest !== this.ownerRecoveryConfigDigest()) {
+        throw new Error(`Owner replacement cannot change config authority while unresolved generation transition ${unresolvedTransition.candidateReleaseId} remains at ${unresolvedTransition.phase}`)
+      }
+      const registeredProcesses = new Map((await this.guardian.inventory()).map(({key, provenance}) => [key, provenance]))
+
+      reservedProcessKey = legacyBridge ? undefined : ownerSnapshotProcessKeys(transfer.snapshot, transfer.singletonReleaseIds)
+        .find((key) => registeredProcesses.has(key))
+      if (reservedProcessKey) this.guardian.reserveProcessRecovery(reservedProcessKey, /** @type {string} */ (registeredProcesses.get(reservedProcessKey)))
+      await this.restoreOwnerState(transfer.snapshot, {config: transfer.config, listenerConnectionSources: transfer.listenerConnectionSources, releaseConfigs: transfer.releaseConfigs, resumeDrains: false, serviceReleaseIds: transfer.serviceReleaseIds, singletonReleaseIds: transfer.singletonReleaseIds, synchronizeLifecycleRoles: false})
     } catch (error) {
-      legacyBridge = await this.prepareLegacyOwnerReplacement({
-        error: error instanceof Error ? error : String(error),
-        persisted,
-        persistedAuthority
-      })
-      prepared = legacyBridge.prepared
+      legacyBridge?.incumbentControl?.close()
+      if (legacyBridge) {
+        try {
+          await this.abandonLegacyOwnerBridge(legacyBridge)
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Legacy owner replacement reconstruction failed and its upgrade coordinator could not be abandoned", {cause: cleanupError})
+        }
+      } else {
+        this.guardian.disconnect()
+      }
+      throw error
     }
     if (!legacyBridge) {
       try {
@@ -442,22 +533,6 @@ export default class RollbridgeDaemon {
         throw error
       }
     }
-    const preparedStatus = await this.guardian.replacementStatus()
-    const transfer = /** @type {PrivateOwnerState} */ (prepared.ownerState)
-
-    if (!transfer?.config || !transfer.snapshot) throw new Error("Committed owner published incomplete replacement state")
-    const unresolvedTransition = transfer.snapshot.generationTransition
-
-    if (unresolvedTransition && unresolvedTransition.phase !== "committed" && unresolvedTransition.configDigest !== this.ownerRecoveryConfigDigest()) {
-      this.guardian.disconnect()
-      throw new Error(`Owner replacement cannot change config authority while unresolved generation transition ${unresolvedTransition.candidateReleaseId} remains at ${unresolvedTransition.phase}`)
-    }
-    const registeredProcesses = new Map((await this.guardian.inventory()).map(({key, provenance}) => [key, provenance]))
-    const reservedProcessKey = legacyBridge ? undefined : ownerSnapshotProcessKeys(transfer.snapshot, transfer.singletonReleaseIds)
-      .find((key) => registeredProcesses.has(key))
-
-    if (reservedProcessKey) this.guardian.reserveProcessRecovery(reservedProcessKey, /** @type {string} */ (registeredProcesses.get(reservedProcessKey)))
-    await this.restoreOwnerState(transfer.snapshot, {config: transfer.config, releaseConfigs: transfer.releaseConfigs, resumeDrains: false, serviceReleaseIds: transfer.serviceReleaseIds, singletonReleaseIds: transfer.singletonReleaseIds, synchronizeLifecycleRoles: false})
     for (const release of this.releases.values()) release.preserveConfigOnRetirement = true
     this.logger("owner replacement candidate prepared", {activeReleaseId: this.activeRelease?.releaseId ?? null, replacementId: prepared.replacementId})
 
@@ -512,37 +587,61 @@ export default class RollbridgeDaemon {
           listenersYielded = true
         }
       }
-      if (sharedFixedProxy) await this.startProxy()
+      if (sharedFixedProxy && !retiredIncumbentControl) await this.startProxy()
       if (!retiredIncumbentControl) {
         await fs.rename(stagingControlPath, this.config.control.path)
         finalControlPublished = true
         this.boundControlPath = this.config.control.path
       }
-      committed = this.guardian.waitForEvent("replacement-committed").then(
-        () => undefined,
+      const retirementFailure = this.guardian.waitForEvent("replacement-retirement-failed").then(
+        (event) => new Error(stringOrUndefined(event.reason) || "Retired listener state transfer failed"),
         (error) => error instanceof Error ? error : new Error(String(error))
       )
+      committed = Promise.race([
+        this.guardian.waitForEvent("replacement-committed").then(
+          () => undefined,
+          (error) => error instanceof Error ? error : new Error(String(error))
+        ),
+        retirementFailure
+      ])
+      const listenerRetirement = retiredIncumbentControl
+        ? Promise.race([
+            this.guardian.waitForEvent("replacement-listeners-retired").then(() => undefined, (error) => error instanceof Error ? error : new Error(String(error))),
+            retirementFailure
+          ])
+        : undefined
       const staged = await this.guardian.stageOwnerReplacement(prepared.replacementId, this.transferableOwnerState())
 
       if (staged.committed && reservedProcessKey) {
         committedAuthority = true
         await this.guardian.recoverReservedProcess(reservedProcessKey)
       }
+      if (staged.committed && retiredIncumbentControl && sharedFixedProxy) await this.startProxy()
 
       if (!staged.committed) {
         if (retiredIncumbentControl) {
           const processKey = reservedProcessKey
 
           if (!processKey || !this.guardian.processes.has(processKey)) throw new Error("Retired owner replacement requires an exact reserved process from committed owner state")
-          if (transfer.retiredListenerHandoff !== 1) {
+          if (transfer.retiredListenerHandoff !== 2) {
             throw new Error("Cannot safely complete atomic owner replacement through the older retained guardian while the incumbent control socket is absent; incumbent owner and connections were preserved")
           }
           try {
+            await this.guardian.prepareRetiredOwnerListenerHandoff(prepared.replacementId, processKey)
+            const listenerRetirementError = await listenerRetirement
+
+            if (listenerRetirementError) throw listenerRetirementError
+            if (sharedFixedProxy) await this.startProxy()
             await this.guardian.commitRetiredOwnerReplacement(prepared.replacementId, processKey)
             committedAuthority = true
             await this.guardian.recoverReservedProcess(processKey)
+            await this.guardian.finalizeOwnerReplacement(prepared.replacementId)
           } catch (error) {
-            if (!(error instanceof Error) || error.message !== "Guardian commit-retired-owner-replacement requires the committed owner") throw error
+            if (!(error instanceof Error) || ![
+              "Guardian commit-retired-owner-replacement requires the committed owner",
+              "Guardian prepare-retired-owner-listener-handoff requires the committed owner",
+              "Unknown guardian command: prepare-retired-owner-listener-handoff"
+            ].includes(error.message)) throw error
             throw new Error(
               "Cannot safely complete atomic owner replacement through the older retained guardian while the incumbent control socket is absent; incumbent owner and connections were preserved",
               {cause: error}
@@ -552,10 +651,12 @@ export default class RollbridgeDaemon {
           try {
             if (!incumbentControl) throw new Error("Owner replacement incumbent control session is unavailable")
             await incumbentControl.request({command: "commit-owner-replacement", replacementId: prepared.replacementId})
+            committedAuthority = true
           } catch (error) {
             const status = await this.guardian.replacementStatus()
 
             if (status.committedReplacementId !== prepared.replacementId || !status.ownerClaimed) throw error
+            committedAuthority = true
             this.logger("owner replacement commit response lost; guardian commit confirmed", {replacementId: prepared.replacementId})
           }
         }
@@ -602,12 +703,13 @@ export default class RollbridgeDaemon {
       }
       if (legacyBridge && !legacyBridge.boundaryCrossed) {
         try {
-          await this.guardian.abandonLegacyUpgrade()
+          await this.abandonLegacyOwnerBridge(legacyBridge)
         } catch (failure) {
           abortError = failure instanceof Error ? failure : new Error(String(failure))
         }
       } else {
         this.guardian.disconnect()
+        legacyBridge?.legacyGuardian.disconnect()
       }
       if (committed) {
         const commitmentError = await committed
@@ -653,18 +755,37 @@ export default class RollbridgeDaemon {
   handleIncumbentListenerEvent(event, session) {
     if (event.event !== "owner-connection-state") return
     const releaseId = stringOrUndefined(event.releaseId)
+    let sourceId = stringOrUndefined(event.sourceId)
     const connections = event.connections
 
-    if (!releaseId || !connections || typeof connections !== "object" || Array.isArray(connections)) {
+    if (!sourceId && session) {
+      sourceId = this.incumbentListenerSourceIds.get(session)
+      if (!sourceId) {
+        sourceId = crypto.randomUUID()
+        this.incumbentListenerSourceIds.set(session, sourceId)
+      }
+    }
+    if (!sourceId || !releaseId || !connections || typeof connections !== "object" || Array.isArray(connections)) {
       throw new Error("Incumbent listener sent invalid connection state")
     }
-    const release = this.releases.get(releaseId)
-
-    if (!release) throw new Error(`Incumbent listener reported unknown release ${releaseId}`)
-    release.setTransferredConnections({
+    const normalized = {
       http: requiredNonNegativeInteger(connections.http, "connections.http"),
       websocket: requiredNonNegativeInteger(connections.websocket, "connections.websocket")
-    })
+    }
+
+    this.setListenerConnectionSource(sourceId, releaseId, normalized)
+    const handoffSocket = this.listenerHandoff?.completionSocket
+
+    if (handoffSocket && !handoffSocket.destroyed) {
+      handoffSocket.write(`${JSON.stringify({connections: normalized, event: "owner-connection-state", releaseId, sourceId})}\n`)
+    }
+    if (this.retiredReplacementId) {
+      void this.publishRetiredConnectionState(this.retiredReplacementId, sourceId, releaseId, normalized).catch((error) => {
+        this.listenerHandoffFailure = error instanceof Error ? error : new Error(String(error))
+        this.logger("retired owner connection-state relay failed", {error: this.listenerHandoffFailure.message, releaseId, replacementId: this.retiredReplacementId, sourceId})
+        this.guardian?.disconnect()
+      })
+    }
     if (session && this.incumbentListenerControl === session && ![...this.releases.values()].some((candidate) => candidate.hasTransferredConnections())) {
       this.incumbentListenerControl = undefined
       session.close()
@@ -672,58 +793,119 @@ export default class RollbridgeDaemon {
   }
 
   /**
-   * Authenticates and prepares the one-time disruptive bridge for a genuine pre-split guardian.
-   * @param {{error: Error | string, persisted: OwnerRecoverySnapshot, persistedAuthority: {configDigest: string, runtime: import("./daemon-runtime.js").DaemonRuntimeIdentity | null}}} options - Legacy evidence.
+   * Reconciles one physical listener source and applies its aggregate to the release.
+   * @param {string} sourceId - Stable listener source.
+   * @param {string} releaseId - Retained release.
+   * @param {{http: number, websocket: number}} connections - Exact source counts.
+   */
+  setListenerConnectionSource(sourceId, releaseId, connections) {
+    const release = this.releases.get(releaseId)
+
+    if (!release) throw new Error(`Incumbent listener reported unknown release ${releaseId}`)
+    const sourceReleases = this.listenerConnectionSources.get(sourceId) || new Map()
+
+    if (connections.http + connections.websocket === 0) sourceReleases.delete(releaseId)
+    else sourceReleases.set(releaseId, connections)
+    if (sourceReleases.size === 0) this.listenerConnectionSources.delete(sourceId)
+    else this.listenerConnectionSources.set(sourceId, sourceReleases)
+    let http = 0
+    let websocket = 0
+
+    for (const candidateReleases of this.listenerConnectionSources.values()) {
+      const counts = candidateReleases.get(releaseId)
+
+      if (!counts) continue
+      http += counts.http
+      websocket += counts.websocket
+    }
+    release.setTransferredConnections({http, websocket})
+  }
+
+  /** @returns {Record<string, Record<string, {http: number, websocket: number}>>} Exact live listener sources. */
+  serializedListenerConnectionSources() {
+    const sources = new Map([...this.listenerConnectionSources].map(([sourceId, releases]) => [sourceId, new Map(releases)]))
+    const local = new Map()
+
+    for (const release of this.releases.values()) {
+      const connections = release.localConnections()
+
+      if (connections.http + connections.websocket > 0) local.set(release.releaseId, connections)
+    }
+    if (local.size > 0) sources.set(this.listenerSourceId, local)
+    return Object.fromEntries([...sources].map(([sourceId, releases]) => [sourceId, Object.fromEntries(releases)]))
+  }
+
+  /**
+   * Authenticates and prepares the one-time disruptive bridge for an exact legacy guardian protocol.
+   * @param {{persisted: OwnerRecoverySnapshot, persistedAuthority: {configDigest: string, runtime: import("./daemon-runtime.js").DaemonRuntimeIdentity | null}}} options - Legacy evidence.
    * @returns {Promise<LegacyOwnerBridge>} Prepared bridge.
    */
-  async prepareLegacyOwnerReplacement({error, persisted, persistedAuthority}) {
-    const diagnostic = error instanceof Error ? error.message : String(error)
+  async prepareLegacyOwnerReplacement({persisted, persistedAuthority}) {
     const legacyProcessKey = ownerSnapshotProcessKeys(persisted, persisted.singletonReleaseIds)[0]
+    const legacyGuardian = this.guardian
+    let legacyPrepared
 
-    if (!isLegacyGuardianPrepareDiagnostic(diagnostic)) throw error
-    if (!legacyProcessKey) throw new Error("Legacy disruptive owner replacement requires an exact guardian-owned process registration in durable state", {cause: error})
-    if (diagnostic !== "Unknown guardian command: prepare-owner-replacement") {
+    if (!legacyProcessKey) throw new Error("Legacy disruptive owner replacement requires an exact guardian-owned process registration in durable state")
+    if (!legacyGuardian) throw new Error("Legacy disruptive replacement is missing its authenticated guardian connection")
+    try {
+      legacyPrepared = await legacyGuardian.prepareOwnerReplacement(persistedAuthority, this.ownerAuthority())
+    } catch (error) {
+      const diagnostic = error instanceof Error ? error.message : String(error)
+
+      if (!isLegacyGuardianPrepareDiagnostic(diagnostic)) throw error
+      let probeAccepted = false
+
       try {
-        await this.guardian?.request({
+        await legacyGuardian.request({
           authority: persistedAuthority,
           command: "prepare-owner-replacement",
           key: legacyProcessKey,
           nextAuthority: this.ownerAuthority()
         })
-        throw new Error("Legacy guardian protocol probe unexpectedly accepted owner replacement")
+        probeAccepted = true
       } catch (probeError) {
         if (!(probeError instanceof Error) || probeError.message !== "Unknown guardian command: prepare-owner-replacement") {
           throw new Error("Guardian does not match the authenticated pre-split replacement protocol signature", {cause: probeError})
         }
       }
+      if (probeAccepted) throw new Error("Legacy guardian protocol probe unexpectedly accepted owner replacement", {cause: error})
     }
-    if (persisted.recovery.configDigest !== this.ownerRecoveryConfigDigest()) {
-      throw new Error("The one-time legacy guardian bridge requires the incumbent config identity unchanged; retry the config change after the bridge establishes split-3 authority")
-    }
-    if (!this.legacyIncumbentPid) throw new Error("The authenticated pre-split guardian requires an exact incumbent PID from ensure-daemon for the disruptive bridge")
-    if (!this.guardianIdentity?.pid) throw new Error("The authenticated pre-split guardian state is missing its exact guardian PID")
-    const legacyGuardian = this.guardian
-
-    if (!legacyGuardian) throw new Error("Legacy disruptive replacement is missing its authenticated guardian connection")
-
-    await verifyLegacyGuardianProcess(this.guardianIdentity.pid, this.guardianIdentity.socketPath)
-    const incumbentStartTime = await verifyLegacyDaemonProcess(this.legacyIncumbentPid, this.configPath, persisted.control.path)
-    const incumbentControl = await openControlSession(persisted.control.path)
+    let incumbentControl
     let upgraded
 
     try {
-      const incumbentStatus = await incumbentControl.request({command: "status"})
-
-      assertLegacyIncumbentStatus(incumbentStatus, persisted)
-      const definitionReleaseId = persisted.activeReleaseId || persisted.releases.at(-1)?.releaseId
-      const ownerState = {
-        authority: persistedAuthority,
-        config: this.config,
-        releaseConfigs: Object.fromEntries(persisted.releases.map((release) => [release.releaseId, this.config])),
-        serviceReleaseIds: definitionReleaseId ? Object.fromEntries(persisted.services.map((service) => [service.id, definitionReleaseId])) : {},
-        singletonReleaseIds: definitionReleaseId ? Object.fromEntries(persisted.singletons.map((singleton) => [singleton.id, definitionReleaseId])) : {},
-        snapshot: persisted
+      if (persisted.recovery.configDigest !== this.ownerRecoveryConfigDigest()) {
+        throw new Error("The one-time legacy guardian bridge requires the incumbent config identity unchanged; retry the config change after the bridge establishes split-3 authority")
       }
+      if (!this.legacyIncumbentPid) throw new Error("The authenticated legacy guardian requires an exact incumbent PID from ensure-daemon for the disruptive bridge")
+      if (!this.guardianIdentity?.pid) throw new Error("The authenticated legacy guardian state is missing its exact guardian PID")
+      await verifyLegacyGuardianProcess(this.guardianIdentity.pid, this.guardianIdentity.socketPath)
+      const incumbentStartTime = await verifyLegacyDaemonProcess(this.legacyIncumbentPid, this.configPath, persisted.control.path)
+      if (legacyPrepared) assertLegacyPrivateOwnerState(legacyPrepared.ownerState, persisted, persistedAuthority)
+      try {
+        incumbentControl = await openControlSession(persisted.control.path)
+      } catch (error) {
+        if (!legacyPrepared || !error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error
+      }
+      if (incumbentControl) {
+        const incumbentStatus = await incumbentControl.request({command: "status"})
+
+        assertLegacyIncumbentStatus(incumbentStatus, persisted)
+      }
+      const definitionReleaseId = persisted.activeReleaseId || persisted.releases.at(-1)?.releaseId
+      const ownerState = legacyPrepared
+        ? legacyPrepared.ownerState
+        : {
+            authority: persistedAuthority,
+            config: this.config,
+            releaseConfigs: Object.fromEntries(persisted.releases.map((release) => [release.releaseId, this.config])),
+            serviceReleaseIds: definitionReleaseId ? Object.fromEntries(persisted.services.map((service) => [service.id, definitionReleaseId])) : {},
+            singletonReleaseIds: Object.fromEntries(persisted.singletons.map((singleton) => [singleton.id, persisted.activeReleaseId]).filter((entry) => entry[1] !== null)),
+            snapshot: persisted
+          }
+      const legacyInventory = normalizeLegacyGuardianInventory(await legacyGuardian.inventory())
+
+      assertLegacyGuardianInventoryMembership(legacyInventory, /** @type {PrivateOwnerState} */ (ownerState))
       const upgradedIdentity = /** @type {{pid?: number, socketPath: string, token: string}} */ ({
         socketPath: `${this.statePath}.split3-guardian.sock`,
         token: crypto.randomBytes(32).toString("hex")
@@ -732,7 +914,6 @@ export default class RollbridgeDaemon {
       await assertPathAbsent(upgradedIdentity.socketPath, "Legacy upgrade guardian socket")
       upgraded = await legacyGuardian.upgradeLegacyGuardian({ownerState, ...upgradedIdentity})
       upgradedIdentity.pid = upgraded.pid
-      legacyGuardian.disconnect()
       this.guardian = upgraded
       this.guardianIdentity = upgradedIdentity
       const prepared = await upgraded.prepareOwnerReplacement(persistedAuthority, this.ownerAuthority())
@@ -746,12 +927,40 @@ export default class RollbridgeDaemon {
         incumbentPid: this.legacyIncumbentPid,
         replacementId: prepared.replacementId
       })
-      return {boundaryCrossed: false, incumbentControl, incumbentStartTime, prepared, recoverySnapshot}
+      return {boundaryCrossed: false, incumbentControl, incumbentStartTime, legacyGuardian, legacyInventory, legacyPrepared, legacySnapshot: persisted, prepared, recoverySnapshot}
     } catch (upgradeError) {
-      incumbentControl.close()
-      if (upgraded) await upgraded.abandonLegacyUpgrade()
+      incumbentControl?.close()
+      let cleanupError
+
+      if (upgraded) {
+        try {
+          await upgraded.abandonLegacyUpgrade()
+        } catch (error) {
+          cleanupError = error instanceof Error ? error : new Error(String(error))
+        }
+      }
+      legacyGuardian.disconnect()
+      if (cleanupError) {
+        throw new AggregateError([upgradeError, cleanupError], "Legacy owner replacement validation failed and its upgrade coordinator could not be abandoned", {cause: upgradeError})
+      }
       throw upgradeError
     }
+  }
+
+  /**
+   * Abandons the uncommitted coordinator before releasing the incumbent guardian transaction.
+   * @param {LegacyOwnerBridge} bridge - Prepared bridge.
+   */
+  async abandonLegacyOwnerBridge(bridge) {
+    let cleanupError
+
+    try {
+      await this.guardian?.abandonLegacyUpgrade()
+    } catch (error) {
+      cleanupError = error instanceof Error ? error : new Error(String(error))
+    }
+    bridge.legacyGuardian.disconnect()
+    if (cleanupError) throw cleanupError
   }
 
   /**
@@ -760,27 +969,65 @@ export default class RollbridgeDaemon {
    */
   async crossLegacyDisruptiveBoundary(bridge) {
     if (!this.legacyIncumbentPid || !this.statePath) throw new Error("Legacy disruptive boundary is missing its exact incumbent identity")
+    if (!this.guardian) throw new Error("Legacy disruptive boundary is missing its authenticated upgraded guardian")
+    if (!bridge.legacyGuardian.pid) throw new Error("Legacy disruptive boundary is missing its authenticated retained guardian PID")
+    await verifyLegacyGuardianProcess(bridge.legacyGuardian.pid, bridge.legacyGuardian.socketPath)
     const currentStartTime = await verifyLegacyDaemonProcess(this.legacyIncumbentPid, this.configPath, bridge.recoverySnapshot.control.path)
 
     if (currentStartTime !== bridge.incumbentStartTime) throw new Error("Legacy incumbent PID identity changed before the disruptive boundary")
+    if (!isDeepStrictEqual(await readState(this.statePath), bridge.legacySnapshot)) {
+      throw new Error("Legacy owner recovery state changed before the disruptive boundary")
+    }
+    if (bridge.incumbentControl) {
+      assertLegacyIncumbentStatus(await bridge.incumbentControl.request({command: "status"}), bridge.legacySnapshot)
+    }
+    const currentInventory = normalizeLegacyGuardianInventory(await bridge.legacyGuardian.inventory())
+
+    if (!isDeepStrictEqual(currentInventory, bridge.legacyInventory)) {
+      throw new Error("Legacy guardian process inventory changed before the disruptive boundary")
+    }
+    const candidateOwnerState = {
+      authority: this.ownerAuthority(),
+      config: this.config,
+      releaseConfigs: Object.fromEntries([...this.releases].map(([releaseId, release]) => [releaseId, release.config])),
+      serviceReleaseIds: Object.fromEntries(this.serviceReleaseIds),
+      singletonReleaseIds: Object.fromEntries(this.singletonReleaseIds),
+      snapshot: this.status()
+    }
+
+    assertLegacyGuardianInventoryMembership(currentInventory, candidateOwnerState)
+    let legacyCommitted
+
+    if (bridge.legacyPrepared) {
+      const status = await bridge.legacyGuardian.replacementStatus()
+
+      if (!status.ownerClaimed) throw new Error("Legacy guardian incumbent ownership changed before the disruptive boundary")
+      legacyCommitted = bridge.legacyGuardian.waitForEvent("replacement-committed")
+      const staged = await bridge.legacyGuardian.stageOwnerReplacement(bridge.legacyPrepared.replacementId, candidateOwnerState)
+
+      if (staged.committed) throw new Error("Legacy guardian committed replacement before the authenticated disruptive boundary")
+    }
     this.logger("legacy owner replacement disruptive boundary", {
       disruptive: true,
       incumbentPid: this.legacyIncumbentPid,
-      reason: "pre-split guardian and daemon lacked atomic replacement protocol"
+      reason: "retained guardian and daemon lacked atomic replacement protocol"
     })
-    if (!this.guardian) throw new Error("Legacy disruptive boundary is missing its bridge guardian")
-    await this.guardian.crossLegacyUpgradeBoundary({
-      incumbentPid: this.legacyIncumbentPid,
-      recoverySnapshot: bridge.recoverySnapshot,
-      replacementId: bridge.prepared.replacementId,
-      statePath: this.statePath
-    })
+    await this.guardian.beginLegacyOwnerClaim(
+      bridge.prepared.replacementId,
+      bridge.recoverySnapshot.recovery.reconnectGraceMs,
+      this.statePath,
+      bridge.recoverySnapshot
+    )
+    process.kill(this.legacyIncumbentPid, "SIGKILL")
     bridge.boundaryCrossed = true
-    await bridge.incumbentControl.closed()
+    await bridge.incumbentControl?.closed()
+    if (legacyCommitted) await legacyCommitted
+    bridge.legacyGuardian.disconnect()
+    await this.guardian.completeLegacyOwnerClaim(bridge.prepared.replacementId)
     this.ownerTransition = /** @type {OwnerTransition} */ ({
       disruptive: true,
       mode: "legacy-first-upgrade",
-      reason: "pre-split guardian and daemon lacked atomic replacement protocol"
+      reason: "retained guardian and daemon lacked atomic replacement protocol"
     })
   }
 
@@ -1137,9 +1384,12 @@ export default class RollbridgeDaemon {
         await this.guardian.commitOwnerReplacement(replacementId)
         committed = true
         await this.retireCommittedOwner(controlSocket)
+        await this.beginRetiredListenerPublication(replacementId, this.listenerHandoff?.retired)
         await this.guardian.finalizeOwnerReplacement(replacementId)
-      } finally {
+        await this.completeRetiredListenerHandoff(replacementId)
+      } catch (error) {
         if (committed) this.guardian.disconnect()
+        throw error
       }
       return {message: "owner replacement committed"}
     }
@@ -1215,10 +1465,12 @@ export default class RollbridgeDaemon {
     if (!this.guardian) throw new Error("Owner listener handoff requires the durable process guardian")
     if (this.listenerHandoff) throw new Error("Owner listeners are already yielded to a replacement candidate")
     await this.guardian.validateOwnerReplacement(replacementId)
-    this.listenerHandoff = {control, proxy, replacementId}
+    if (!completionSocket) throw new Error("Owner listener handoff requires its authenticated control session")
+    const retired = this.guardian.waitForEvent("replacement-retired")
+
+    this.listenerHandoff = {completionSocket, control, proxy, replacementId, retired}
     this.listenerHandoffFailure = undefined
 
-    if (!completionSocket) throw new Error("Owner listener handoff requires its authenticated control session")
     for (const release of this.releases.values()) release.pauseDrainForOwnerHandoff()
     if (proxy) this.proxyClosePromise = this.closeServer(this.proxyServer)
     if (control) {
@@ -1226,22 +1478,27 @@ export default class RollbridgeDaemon {
       for (const socket of this.controlSockets) if (socket !== completionSocket) socket.destroy()
       await this.removeControlSocket()
     }
-    for (const release of this.releases.values()) {
-      const publishConnections = () => {
-        if (completionSocket.destroyed) return
-        completionSocket.write(`${JSON.stringify({
-          connections: release.status().connections,
-          event: "owner-connection-state",
-          releaseId: release.releaseId
-        })}\n`)
-      }
+    /** @type {(sourceId: string, releaseId: string, connections: {http: number, websocket: number}) => void} */
+    const publishConnections = (sourceId, releaseId, connections) => {
+      if (completionSocket.destroyed) return
+      completionSocket.write(`${JSON.stringify({connections, event: "owner-connection-state", releaseId, sourceId})}\n`)
+    }
 
-      publishConnections()
-      if (release.status().connectionCount > 0) release.once("drained", publishConnections)
+    for (const [sourceId, releases] of this.listenerConnectionSources) {
+      for (const [releaseId, connections] of releases) publishConnections(sourceId, releaseId, connections)
+    }
+    for (const release of this.releases.values()) {
+      const connections = release.localConnections()
+
+      if (release.state === "active" || release.state === "draining" || connections.http + connections.websocket > 0) {
+        publishConnections(this.listenerSourceId, release.releaseId, connections)
+      }
+      if (connections.http + connections.websocket > 0) {
+        release.once("drained", () => publishConnections(this.listenerSourceId, release.releaseId, release.localConnections()))
+      }
     }
 
     const aborted = this.guardian.waitForEvent("replacement-aborted").then(async () => await this.resumeYieldedListeners())
-    const retired = this.guardian.waitForEvent("replacement-retired")
 
     void Promise.race([aborted, retired]).catch((error) => {
       if (this.ownerRetired) return
@@ -1529,30 +1786,40 @@ export default class RollbridgeDaemon {
     this.logger("owner authority transferred", {activeReleaseId: this.activeRelease?.releaseId ?? null})
   }
 
+  /** @param {string} replacementId - Prepared same-authority transaction. */
+  async yieldControlLessOwnerListeners(replacementId) {
+    if (!this.guardian) throw new Error("Control-less owner listener handoff requires the durable process guardian")
+    this.proxyClosePromise = this.closeServer(this.proxyServer)
+    await this.beginRetiredListenerPublication(replacementId)
+  }
+
   /**
-   * Completes a control-less handoff while relaying retained listener counts.
-   * @param {string} replacementId - Committed replacement transaction.
+   * @param {string} replacementId - Transaction receiving durable source updates.
+   * @param {Promise<Record<string, JsonValue>>} [retired] - Existing direct-listener retirement event.
    */
-  async retireControlLessCommittedOwner(replacementId) {
-    if (!this.guardian) throw new Error("Committed owner retirement requires the durable process guardian")
+  async beginRetiredListenerPublication(replacementId, retired) {
+    if (!this.guardian) throw new Error("Retired listener publication requires the durable process guardian")
+    if (this.retiredListenerHandoff) throw new Error("Another retired listener handoff is already pending")
     const guardian = this.guardian
     const releases = [...this.releases.values()]
-    let finalized = false
-    let publication = Promise.resolve()
-    const publishConnections = (/** @type {ReleaseGroup} */ release) => {
-      const {connections} = release.status()
 
-      publication = publication.then(async () => await guardian.publishOwnerConnectionState(replacementId, release.releaseId, connections))
-      return publication
+    this.retiredListenerHandoff = {
+      releases,
+      replacementId,
+      replacementRetired: false,
+      retired: retired || guardian.waitForEvent("replacement-retired")
     }
-    const disconnectIfDrained = () => {
-      if (finalized && releases.every((release) => release.status().connectionCount === 0)) guardian.disconnect()
-    }
-
+    this.retiredReplacementId = replacementId
     for (const release of releases) {
       if (release.status().connectionCount > 0) {
         release.once("drained", () => {
-          void publishConnections(release).then(disconnectIfDrained).catch((error) => {
+          if (this.retiredReplacementId !== replacementId) return
+          const publication = this.publishRetiredConnectionState(replacementId, this.listenerSourceId, release.releaseId, release.localConnections(), true)
+
+          void publication.then(async () => {
+            await this.retiredConnectionPublication
+            this.disconnectRetiredOwnerIfDrained()
+          }).catch((error) => {
             this.listenerHandoffFailure = error instanceof Error ? error : new Error(String(error))
             this.logger("retired owner connection-state publication failed", {error: this.listenerHandoffFailure.message, releaseId: release.releaseId, replacementId})
             guardian.disconnect()
@@ -1560,11 +1827,80 @@ export default class RollbridgeDaemon {
         })
       }
     }
+    for (const [sourceId, sourceReleases] of this.listenerConnectionSources) {
+      for (const [releaseId, connections] of sourceReleases) {
+        await this.publishRetiredConnectionState(replacementId, sourceId, releaseId, connections)
+      }
+    }
+    for (const release of releases) {
+      const connections = release.localConnections()
+
+      if (release.state === "active" || release.state === "draining" || connections.http + connections.websocket > 0) {
+        await this.publishRetiredConnectionState(replacementId, this.listenerSourceId, release.releaseId, connections, true)
+      }
+    }
+    await guardian.completeOwnerListenerRetirement(replacementId)
+  }
+
+  /** Resumes the incumbent listener after a prepared candidate aborts before commit. */
+  async resumeControlLessOwnerListeners() {
+    const handoff = this.retiredListenerHandoff
+
+    if (!handoff || this.ownerRetired) return
+    void handoff.retired.catch(() => undefined)
+    this.retiredListenerHandoff = undefined
+    this.retiredReplacementId = undefined
+    for (const release of handoff.releases) {
+      release.resumeDrainAfterOwnerHandoff()
+      if (release.state === "draining" && this.shouldResumeDrain(release)) void this.drainAndPrune(release, release.config)
+    }
+    await this.startProxy()
+    this.listenerHandoffFailure = undefined
+    this.logger("control-less owner listeners resumed", {replacementId: handoff.replacementId})
+  }
+
+  /** @param {string} replacementId - Committed same-authority transaction. */
+  async completeControlLessOwnerRetirement(replacementId) {
+    const handoff = this.retiredListenerHandoff
+
+    if (!handoff || handoff.replacementId !== replacementId) throw new Error("Committed owner retirement does not match the prepared listener handoff")
     await this.retireCommittedOwner(undefined)
-    for (const release of releases) await publishConnections(release)
-    await guardian.finalizeOwnerReplacement(replacementId)
-    finalized = true
-    disconnectIfDrained()
+    await this.completeRetiredListenerHandoff(replacementId)
+  }
+
+  /** @param {string} replacementId - Finalized retired-listener transaction. */
+  async completeRetiredListenerHandoff(replacementId) {
+    const handoff = this.retiredListenerHandoff
+
+    if (!handoff || handoff.replacementId !== replacementId) throw new Error("Retired listener completion does not match its prepared handoff")
+    await handoff.retired
+    handoff.replacementRetired = true
+    this.disconnectRetiredOwnerIfDrained()
+  }
+
+  /** Disconnects the retired daemon only after every retained listener source drains. */
+  disconnectRetiredOwnerIfDrained() {
+    const handoff = this.retiredListenerHandoff
+
+    if (handoff?.replacementRetired && handoff.releases.every((release) => release.status().connectionCount === 0)) this.guardian?.disconnect()
+  }
+
+  /**
+   * Serializes one retired-listener source update over the authenticated guardian channel.
+   * @param {string} replacementId - Committed replacement transaction.
+   * @param {string} sourceId - Stable physical listener source.
+   * @param {string} releaseId - Retained release.
+   * @param {{http: number, websocket: number}} connections - Exact source counts.
+   * @param {boolean} [localSource] - Whether this daemon physically owns the source.
+   */
+  async publishRetiredConnectionState(replacementId, sourceId, releaseId, connections, localSource = false) {
+    if (!this.guardian) throw new Error("Retired listener state publication requires the durable process guardian")
+    const guardian = this.guardian
+
+    this.retiredConnectionPublication = this.retiredConnectionPublication.then(async () => {
+      await guardian.publishOwnerConnectionState(replacementId, sourceId, releaseId, connections, localSource)
+    })
+    await this.retiredConnectionPublication
   }
 
   /**
@@ -2245,7 +2581,7 @@ export function isLegacyGuardianPrepareDiagnostic(diagnostic) {
 }
 
 /**
- * @param {OwnerRecoverySnapshot} snapshot - Durable committed owner snapshot.
+ * @param {DaemonStatus} snapshot - Serialized owner process snapshot.
  * @param {Record<string, string>} [singletonReleaseIds] - Exact singleton owner releases.
  * @returns {string[]} Exact guardian registration keys present in the snapshot.
  */
@@ -2265,6 +2601,40 @@ function ownerSnapshotProcessKeys(snapshot, singletonReleaseIds = {}) {
 }
 
 /**
+ * Canonicalizes the authenticated guardian inventory without relying on map insertion order.
+ * @param {{key: string, provenance: string}[]} inventory - Guardian inventory response.
+ * @returns {{key: string, provenance: string}[]} Exact key/provenance fence.
+ */
+function normalizeLegacyGuardianInventory(inventory) {
+  const normalized = inventory.map((entry) => {
+    if (!entry || typeof entry.key !== "string" || !entry.key || typeof entry.provenance !== "string" || !entry.provenance) {
+      throw new Error("Legacy guardian returned an invalid process inventory")
+    }
+    return {key: entry.key, provenance: entry.provenance}
+  }).sort((left, right) => left.key.localeCompare(right.key))
+
+  if (new Set(normalized.map(({key}) => key)).size !== normalized.length) {
+    throw new Error("Legacy guardian returned duplicate process registrations")
+  }
+  return normalized
+}
+
+/**
+ * Requires every and only the process registrations serialized by committed private owner state.
+ * @param {{key: string, provenance: string}[]} inventory - Canonical guardian inventory.
+ * @param {{snapshot: DaemonStatus, singletonReleaseIds?: Record<string, string>}} ownerState - Authenticated owner process snapshot.
+ */
+function assertLegacyGuardianInventoryMembership(inventory, ownerState) {
+  if (!ownerState?.snapshot) throw new Error("Legacy guardian owner state is missing its committed process snapshot")
+  const inventoryKeys = inventory.map(({key}) => key)
+  const snapshotKeys = ownerSnapshotProcessKeys(ownerState.snapshot, ownerState.singletonReleaseIds).sort((left, right) => left.localeCompare(right))
+
+  if (!isDeepStrictEqual(inventoryKeys, snapshotKeys)) {
+    throw new Error("Legacy guardian process inventory does not match committed owner state")
+  }
+}
+
+/**
  * Verifies the exact authenticated guardian process and socket without scanning other PIDs.
  * @param {number} pid - Persisted guardian PID.
  * @param {string} socketPath - Persisted guardian socket.
@@ -2273,7 +2643,7 @@ async function verifyLegacyGuardianProcess(pid, socketPath) {
   const args = await processArguments(pid, "legacy guardian")
   const script = args.find((argument) => argument.endsWith("process-guardian.js"))
 
-  if (!script || !args.includes(socketPath)) throw new Error(`Persisted guardian PID ${pid} does not match the pre-split guardian command and socket`)
+  if (!script || !args.includes(socketPath)) throw new Error(`Persisted guardian PID ${pid} does not match the retained guardian command and socket`)
   await verifyProcessUser(pid, "legacy guardian")
   await verifyUnixSocketOwner(pid, socketPath, "legacy guardian")
 }
@@ -2294,7 +2664,7 @@ async function verifyLegacyDaemonProcess(pid, configPath, socketPath) {
   const configuredAbsolutePath = configuredPath ? path.resolve(await fs.readlink(`/proc/${pid}/cwd`), configuredPath) : undefined
 
   if (daemonIndex < 0 || configIndex < 0 || configuredAbsolutePath !== path.resolve(configPath)) {
-    throw new Error(`Daemon PID ${pid} does not match the exact pre-split daemon config command`)
+    throw new Error(`Daemon PID ${pid} does not match the exact retained daemon config command`)
   }
   await verifyProcessUser(pid, "legacy daemon")
   await verifyUnixSocketOwner(pid, socketPath, "legacy daemon")
@@ -2370,8 +2740,36 @@ function assertLegacyIncumbentStatus(status, persisted) {
   if (status.application !== persisted.application || !control || typeof control !== "object" || Array.isArray(control) || control.path !== persisted.control.path ||
     !runtime || typeof runtime !== "object" || Array.isArray(runtime) || runtime.digest !== persisted.daemonRuntime?.digest ||
     !ownerRecovery || typeof ownerRecovery !== "object" || Array.isArray(ownerRecovery) || ownerRecovery.configDigest !== persisted.recovery.configDigest) {
-    throw new Error("Responsive incumbent does not match the exact persisted pre-split daemon authority")
+    throw new Error("Responsive incumbent does not match the exact persisted retained-daemon authority")
   }
+}
+
+/**
+ * Validates private committed state returned by a partial transaction guardian.
+ * @param {JsonValue} value - Authenticated guardian owner state.
+ * @param {OwnerRecoverySnapshot} persisted - Durable expected identity.
+ * @param {{configDigest: string, runtime: import("./daemon-runtime.js").DaemonRuntimeIdentity | null}} persistedAuthority - Exact committed authority.
+ */
+function assertLegacyPrivateOwnerState(value, persisted, persistedAuthority) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Partial legacy guardian returned invalid committed owner state")
+  const state = /** @type {Record<string, JsonValue>} */ (value)
+  const config = state.config
+  const snapshot = state.snapshot
+
+  if (!isDeepStrictEqual(state.authority, persistedAuthority) || !config || typeof config !== "object" || Array.isArray(config) ||
+    ownerConfigDigest(/** @type {import("./config.js").RollbridgeConfig} */ (config)) !== persistedAuthority.configDigest ||
+    !snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("Partial legacy guardian committed owner state does not match the persisted authority")
+  }
+  const privateSnapshot = /** @type {OwnerRecoverySnapshot} */ (snapshot)
+
+  assertLegacyIncumbentStatus(/** @type {Record<string, JsonValue>} */ (snapshot), persisted)
+  if (!isDeepStrictEqual(
+    ownerSnapshotProcessKeys(privateSnapshot, state.singletonReleaseIds && typeof state.singletonReleaseIds === "object" && !Array.isArray(state.singletonReleaseIds)
+      ? /** @type {Record<string, string>} */ (state.singletonReleaseIds)
+      : {}).sort(),
+    ownerSnapshotProcessKeys(persisted, persisted.singletonReleaseIds).sort()
+  )) throw new Error("Partial legacy guardian committed process membership does not match durable recovery state")
 }
 
 /**

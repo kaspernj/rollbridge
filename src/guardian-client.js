@@ -54,7 +54,7 @@ export default class GuardianClient {
   }
 
   /**
-   * Starts a current transaction guardian in front of this authenticated pre-split guardian.
+   * Starts a current transaction guardian in front of this authenticated legacy guardian.
    * @param {{ownerState: import("./json.js").JsonValue, socketPath: string, token: string}} options - Upgrade identity and exact committed state.
    * @returns {Promise<GuardianClient>} Current guardian client backed by the legacy supervisor.
    */
@@ -78,14 +78,6 @@ export default class GuardianClient {
 
     socket.end()
     await closed
-  }
-
-  /**
-   * Atomically records the discoverable bridge identity while terminating the exact legacy daemon.
-   * @param {{incumbentPid: number, recoverySnapshot: import("./json.js").JsonValue, replacementId: string, statePath: string}} options - Verified legacy boundary state.
-   */
-  async crossLegacyUpgradeBoundary({incumbentPid, recoverySnapshot, replacementId, statePath}) {
-    await this.request({command: "cross-legacy-upgrade-boundary", incumbentPid, recoverySnapshot, replacementId, statePath})
   }
 
   /** Connects to an existing guardian. */
@@ -208,6 +200,32 @@ export default class GuardianClient {
   }
 
   /**
+   * Classifies the authenticated guardian's owner-replacement protocol without preparing a transaction.
+   * @returns {Promise<"atomic" | "legacy">} Compatible replacement route.
+   */
+  async ownerReplacementProtocol() {
+    try {
+      const response = await this.request({command: "owner-replacement-capabilities"})
+
+      if (!isOwnerReplacementCapabilities(response)) throw new Error("Guardian returned an invalid owner-replacement capability response")
+      return "atomic"
+    } catch (error) {
+      if (!(error instanceof Error) || !isLegacyCapabilityDispatchDiagnostic(error.message)) throw error
+    }
+
+    try {
+      await this.request({command: "commit-retired-owner-replacement", replacementId: "owner-replacement-capability-probe"})
+      throw new Error("Guardian unexpectedly accepted the retired-owner capability probe")
+    } catch (error) {
+      if (!(error instanceof Error)) throw error
+      if (error.message === "Owner replacement transaction is not the prepared candidate") return "atomic"
+      if (error.message === "Guardian commit-retired-owner-replacement requires a process key" ||
+        error.message === "Unknown guardian command: commit-retired-owner-replacement") return "legacy"
+      throw new Error("Guardian returned an ambiguous retired-owner capability response", {cause: error})
+    }
+  }
+
+  /**
    * @param {import("./json.js").JsonValue} authority - Persisted current authority.
    * @param {import("./json.js").JsonValue} nextAuthority - Requested authority.
    * @returns {Promise<{ownerState: import("./json.js").JsonValue, replacementId: string}>} Prepared transaction.
@@ -243,18 +261,53 @@ export default class GuardianClient {
     await this.request({command: "commit-retired-owner-replacement", key, replacementId})
   }
 
+  /**
+   * Yields a control-less incumbent's listeners while it still owns authority.
+   * @param {string} replacementId - Same-authority staged transaction.
+   * @param {string} key - Exact recovered guardian process proving candidate reconstruction.
+   */
+  async prepareRetiredOwnerListenerHandoff(replacementId, key) {
+    await this.request({command: "prepare-retired-owner-listener-handoff", key, replacementId})
+  }
+
+  /**
+   * Begins acquiring the authenticated legacy backend owner channel at the disruptive boundary.
+   * @param {string} replacementId - Exact prepared candidate transaction.
+   * @param {number} graceMs - Event-driven incumbent disconnect grace.
+   * @param {string} statePath - Durable public recovery state path.
+   * @param {import("./json.js").JsonValue} recoverySnapshot - Discoverable coordinator state.
+   */
+  async beginLegacyOwnerClaim(replacementId, graceMs, statePath, recoverySnapshot) {
+    await this.request({command: "begin-legacy-owner-claim", graceMs, recoverySnapshot, replacementId, statePath})
+  }
+
+  /**
+   * Waits until the upgraded guardian owns its authenticated legacy backend.
+   * @param {string} replacementId - Exact prepared candidate transaction.
+   */
+  async completeLegacyOwnerClaim(replacementId) {
+    await this.request({command: "complete-legacy-owner-claim", replacementId})
+  }
+
   /** @param {string} replacementId - Committed transaction awaiting incumbent retirement. */
   async finalizeOwnerReplacement(replacementId) {
     await this.request({command: "finalize-owner-replacement", replacementId})
   }
 
+  /** @param {string} replacementId - Committed transaction with complete listener state. */
+  async completeOwnerListenerRetirement(replacementId) {
+    await this.request({command: "complete-owner-listener-retirement", replacementId})
+  }
+
   /**
    * @param {string} replacementId - Committed control-less replacement transaction.
+   * @param {string} sourceId - Stable listener source identity.
    * @param {string} releaseId - Retained release identity.
    * @param {{http: number, websocket: number}} connections - Exact incumbent listener counts.
+   * @param {boolean} [localSource] - Whether the sender physically owns this source.
    */
-  async publishOwnerConnectionState(replacementId, releaseId, connections) {
-    await this.request({command: "publish-owner-connection-state", connections, releaseId, replacementId})
+  async publishOwnerConnectionState(replacementId, sourceId, releaseId, connections, localSource = false) {
+    await this.request({command: "publish-owner-connection-state", connections, localSource, releaseId, replacementId, sourceId})
   }
 
   /** @param {string} replacementId - Prepared transaction to validate for listener yield. */
@@ -278,9 +331,9 @@ export default class GuardianClient {
     await this.request({command: "end-owner-mutation", mutationId})
   }
 
-  /** @returns {Promise<{committedReplacementId: string | null, ownerClaimed: boolean}>} Transaction status. */
+  /** @returns {Promise<{committedReplacementId: string | null, ownerClaimed: boolean, retirementFailed?: boolean, retirementPending?: boolean, retirementReady?: boolean}>} Transaction status. */
   async replacementStatus() {
-    return /** @type {{committedReplacementId: string | null, ownerClaimed: boolean}} */ (await this.request({command: "replacement-status"}))
+    return /** @type {{committedReplacementId: string | null, ownerClaimed: boolean, retirementFailed?: boolean, retirementPending?: boolean, retirementReady?: boolean}} */ (await this.request({command: "replacement-status"}))
   }
 
   /** @returns {Promise<import("./json.js").JsonValue>} Current private transfer state. */
@@ -536,6 +589,28 @@ function serializableDefinition(definition) {
  */
 function asProcessStatus(value) {
   return JSON.parse(JSON.stringify(value))
+}
+
+/**
+ * @param {import("./json.js").JsonValue} value - Capability response.
+ * @returns {boolean} Whether the response explicitly guarantees retired-owner commit support.
+ */
+function isOwnerReplacementCapabilities(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const response = /** @type {Record<string, import("./json.js").JsonValue>} */ (value)
+
+  return response.protocol === "owner-replacement" && Number.isInteger(response.version) && Number(response.version) >= 1 &&
+    Array.isArray(response.commands) && response.commands.every((command) => typeof command === "string") &&
+    response.commands.includes("commit-retired-owner-replacement")
+}
+
+/**
+ * @param {string} diagnostic - Exact old generic-dispatch response.
+ * @returns {boolean} Whether this is the narrow old unknown-command dispatch signature.
+ */
+function isLegacyCapabilityDispatchDiagnostic(diagnostic) {
+  return diagnostic === "Guardian owner-replacement-capabilities requires a process key" ||
+    diagnostic === "Unknown guardian command: owner-replacement-capabilities"
 }
 
 /**

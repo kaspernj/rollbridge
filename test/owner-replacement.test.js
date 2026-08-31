@@ -20,6 +20,476 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const binPath = path.join(repoRoot, "bin", "rollbridge")
 const dummyAppPath = path.join(repoRoot, "test", "fixtures", "dummy-app.js")
 const legacyDaemonPath = path.join(repoRoot, "test", "fixtures", "pre-split3-daemon-runner.js")
+const partialGuardianPath = path.join(repoRoot, "test", "fixtures", "partial-owner-replacement-process-guardian.js")
+
+test("partial owner-replacement guardian crosses the authenticated legacy bridge before retired-owner commit", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-partial-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const daemonPidPath = path.join(root, "daemon.pid")
+  const releasePath = path.join(root, "v1")
+  const packagePath = path.join(root, "candidate-package")
+  const runtimePath = path.join(root, "runtime")
+  const partialSocketPath = path.join(root, "partial-guardian.sock")
+  let owner
+  let partialGuardian
+  let retainedConnection
+  let backendGuardianIdentity
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    assert.ok(owner.pid)
+    await fs.writeFile(daemonPidPath, `${owner.pid}\n`)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
+    const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const workerPid = releaseProcessPid(before, "v1", "worker")
+    const webPid = releaseProcessPid(before, "v1", "web")
+    const proxyPort = /** @type {{port?: number}} */ (before.proxy).port
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+
+    if (typeof proxyPort !== "number") throw new Error("Partial guardian fixture proxy is missing its bound port")
+
+    backendGuardianIdentity = {...state.recovery.guardian}
+    partialGuardian = await startPartialGuardian({
+      backendPath: state.recovery.guardian.socketPath,
+      mode: "partial",
+      socketPath: partialSocketPath,
+      token: state.recovery.guardian.token
+    })
+    state.recovery.guardian = {...state.recovery.guardian, pid: partialGuardian.pid, socketPath: partialSocketPath}
+    await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+    retainedConnection = await openWebSocket(proxyPort)
+    const retainedClosed = once(retainedConnection, "close")
+    await fs.rm(socketPath)
+    await prepareCandidatePackage(packagePath)
+    const ownerExit = once(owner, "exit")
+    const ensured = await runEnsureDaemon({configPath, daemonPidPath, logPath: path.join(root, "candidate.log"), packagePath, runtimePath})
+
+    assert.equal(ensured.code, 0, `${ensured.stderr}\n${await fs.readFile(path.join(root, "candidate.log"), "utf8")}`)
+    assert.deepEqual(await ownerExit, [null, "SIGKILL"], "the exact authenticated incumbent boundary is crossed once")
+    await retainedClosed
+    const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(status.activeReleaseId, "v1")
+    assert.equal(releaseProcessPid(status, "v1", "worker"), workerPid)
+    assert.equal(releaseProcessPid(status, "v1", "web"), webPid)
+    assert.deepEqual(status.ownerTransition, {
+      disruptive: true,
+      mode: "legacy-first-upgrade",
+      reason: "retained guardian and daemon lacked atomic replacement protocol"
+    })
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
+
+    await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    retainedConnection?.destroy()
+    if (owner && owner.exitCode === null && owner.signalCode === null) {
+      const exited = once(owner, "exit")
+
+      owner.kill("SIGKILL")
+      await exited
+    }
+    partialGuardian?.kill("SIGTERM")
+    if (partialGuardian && partialGuardian.exitCode === null && partialGuardian.signalCode === null) await once(partialGuardian, "exit")
+    if (backendGuardianIdentity) {
+      const state = JSON.parse(await fs.readFile(statePath, "utf8").catch(() => "null"))
+
+      if (state?.recovery?.guardian?.socketPath === partialSocketPath) {
+        state.recovery.guardian = backendGuardianIdentity
+        await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+      }
+    }
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("partial guardian replacement remains fenced through coordinator reconstruction", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-partial-fence-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const releasePath = path.join(root, "v1")
+  const partialSocketPath = path.join(root, "partial-guardian.sock")
+  const restoreStarted = deferred()
+  const continueRestore = deferred()
+  let owner
+  let partialGuardian
+  let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let contender = /** @type {GuardianClient | undefined} */ (undefined)
+  let backendGuardianIdentity
+  let replacementPromise = /** @type {Promise<void> | undefined} */ (undefined)
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    assert.ok(owner.pid)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+
+    backendGuardianIdentity = {...state.recovery.guardian}
+    partialGuardian = await startPartialGuardian({
+      backendPath: backendGuardianIdentity.socketPath,
+      mode: "partial",
+      socketPath: partialSocketPath,
+      token: backendGuardianIdentity.token
+    })
+    state.recovery.guardian = {...backendGuardianIdentity, pid: partialGuardian.pid, socketPath: partialSocketPath}
+    await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+    const replacement = new RollbridgeDaemon({
+      config: normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath})),
+      configPath,
+      legacyIncumbentPid: owner.pid,
+      logger: () => {}
+    })
+    candidate = replacement
+    replacement.restoreOwnerState = async () => {
+      restoreStarted.resolve(undefined)
+      await continueRestore.promise
+      throw new Error("injected reconstruction stop after fence audit")
+    }
+    replacementPromise = replacement.replaceIncompatibleOwner()
+    void replacementPromise.catch(() => {})
+    await restoreStarted.promise
+    assert.equal(JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath, partialSocketPath)
+
+    let mutationError
+
+    try {
+      await sendControlCommand({command: {command: "restart", processId: "missing"}, path: socketPath})
+    } catch (error) {
+      mutationError = error
+    }
+    contender = new GuardianClient({pid: partialGuardian.pid, socketPath: partialSocketPath, token: backendGuardianIdentity.token})
+    await contender.connect()
+    let contenderError
+    let contenderPrepared
+
+    try {
+      contenderPrepared = await contender.prepareOwnerReplacement(
+        {configDigest: state.recovery.configDigest, runtime: state.daemonRuntime ?? null},
+        {configDigest: "contender", runtime: null}
+      )
+    } catch (error) {
+      contenderError = error
+    }
+    if (contenderPrepared) await contender.abortOwnerReplacement(contenderPrepared.replacementId)
+    contender.disconnect()
+    contender = undefined
+    continueRestore.resolve(undefined)
+    await assert.rejects(replacementPromise, /injected reconstruction stop after fence audit/)
+    replacementPromise = undefined
+    assert.match(mutationError instanceof Error ? mutationError.message : "", /fenced while an owner replacement is prepared/)
+    assert.match(contenderError instanceof Error ? contenderError.message : "", /another owner replacement candidate is already prepared/i)
+    assert.notEqual(JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath, `${statePath}.split3-guardian.sock`)
+    assert.equal((await sendControlCommand({command: {command: "status"}, path: socketPath})).daemonPid, owner.pid)
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
+
+    await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    continueRestore.resolve(undefined)
+    contender?.disconnect()
+    await replacementPromise?.catch(() => undefined)
+    candidate?.guardian?.disconnect()
+    if (owner && owner.exitCode === null && owner.signalCode === null) {
+      const exited = once(owner, "exit")
+
+      owner.kill("SIGKILL")
+      await exited
+    }
+    partialGuardian?.kill("SIGTERM")
+    if (partialGuardian && partialGuardian.exitCode === null && partialGuardian.signalCode === null) await once(partialGuardian, "exit")
+    if (backendGuardianIdentity) {
+      const state = JSON.parse(await fs.readFile(statePath, "utf8").catch(() => "null"))
+
+      if (state?.recovery?.guardian?.socketPath === partialSocketPath) {
+        state.recovery.guardian = backendGuardianIdentity
+        await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+      }
+    }
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("partial guardian replacement persists the coordinator only after ownership confirmation", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-partial-persist-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const releasePath = path.join(root, "v1")
+  const partialSocketPath = path.join(root, "partial-guardian.sock")
+  const ownershipConfirmationStarted = deferred()
+  const continueOwnershipConfirmation = deferred()
+  let owner
+  let partialGuardian
+  let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let backendGuardianIdentity
+  let replacementPromise = /** @type {Promise<void> | undefined} */ (undefined)
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    assert.ok(owner.pid)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+
+    backendGuardianIdentity = {...state.recovery.guardian}
+    partialGuardian = await startPartialGuardian({
+      backendPath: backendGuardianIdentity.socketPath,
+      mode: "partial",
+      socketPath: partialSocketPath,
+      token: backendGuardianIdentity.token
+    })
+    state.recovery.guardian = {...backendGuardianIdentity, pid: partialGuardian.pid, socketPath: partialSocketPath}
+    await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+    const replacement = new RollbridgeDaemon({
+      config: normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath})),
+      configPath,
+      legacyIncumbentPid: owner.pid,
+      logger: () => {}
+    })
+    const restoreOwnerState = replacement.restoreOwnerState.bind(replacement)
+
+    candidate = replacement
+    replacement.restoreOwnerState = async (...args) => {
+      await restoreOwnerState(...args)
+      const coordinator = replacement.guardian
+
+      if (!coordinator) throw new Error("Partial guardian persistence fixture is missing its coordinator")
+      const completeLegacyOwnerClaim = coordinator.completeLegacyOwnerClaim.bind(coordinator)
+
+      coordinator.completeLegacyOwnerClaim = async (replacementId) => {
+        ownershipConfirmationStarted.resolve(undefined)
+        await continueOwnershipConfirmation.promise
+        await completeLegacyOwnerClaim(replacementId)
+      }
+    }
+    replacementPromise = replacement.replaceIncompatibleOwner()
+    void replacementPromise.catch(() => {})
+    await ownershipConfirmationStarted.promise
+    assert.notEqual(
+      JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath,
+      `${statePath}.split3-guardian.sock`,
+      "durable state must not name the coordinator before its legacy ownership claim is confirmed"
+    )
+    continueOwnershipConfirmation.resolve(undefined)
+    await replacementPromise
+    replacementPromise = undefined
+    const shutdown = replacement.shutdown()
+
+    await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
+    await shutdown
+    candidate = undefined
+  } finally {
+    continueOwnershipConfirmation.resolve(undefined)
+    await replacementPromise?.catch(() => undefined)
+    if (candidate?.controlServer || candidate?.proxyServer) {
+      const shutdown = candidate.shutdown().catch(() => undefined)
+
+      await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown
+    }
+    candidate?.guardian?.disconnect()
+    if (owner && owner.exitCode === null && owner.signalCode === null) {
+      const exited = once(owner, "exit")
+
+      owner.kill("SIGKILL")
+      await exited
+    }
+    partialGuardian?.kill("SIGTERM")
+    if (partialGuardian && partialGuardian.exitCode === null && partialGuardian.signalCode === null) await once(partialGuardian, "exit")
+    if (backendGuardianIdentity) {
+      const state = JSON.parse(await fs.readFile(statePath, "utf8").catch(() => "null"))
+
+      if (state?.recovery?.guardian?.socketPath === partialSocketPath) {
+        state.recovery.guardian = backendGuardianIdentity
+        await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+      }
+    }
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("failed partial upgrade resumes an incumbent retired release drain", {timeout: 5000}, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-partial-drain-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
+  const partialSocketPath = path.join(root, "partial-guardian.sock")
+  let owner
+  let partialGuardian
+  let retainedConnection
+  let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let backendGuardianIdentity
+
+  try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path)])
+    await Promise.all([makeFifo(path.join(v1Path, "worker.fifo")), makeFifo(path.join(v2Path, "worker.fifo"))])
+    await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    assert.ok(owner.pid)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: socketPath})
+    const v1Status = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const proxyPort = /** @type {{port?: number}} */ (v1Status.proxy).port
+
+    if (typeof proxyPort !== "number") throw new Error("Partial guardian drain fixture proxy is missing its bound port")
+    retainedConnection = await openWebSocket(proxyPort)
+    await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath})
+    const draining = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(releaseState(draining, "v1"), "draining")
+    const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+
+    backendGuardianIdentity = {...state.recovery.guardian}
+    partialGuardian = await startPartialGuardian({
+      backendPath: backendGuardianIdentity.socketPath,
+      mode: "wrong-provenance",
+      socketPath: partialSocketPath,
+      token: backendGuardianIdentity.token
+    })
+    state.recovery.guardian = {...backendGuardianIdentity, pid: partialGuardian.pid, socketPath: partialSocketPath}
+    await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+    const replacement = new RollbridgeDaemon({
+      config: normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath})),
+      configPath,
+      legacyIncumbentPid: owner.pid,
+      logger: () => {}
+    })
+
+    candidate = replacement
+    await assert.rejects(() => replacement.replaceIncompatibleOwner(), /provenance mismatch/)
+    assert.equal(owner.exitCode, null)
+    assert.equal(owner.signalCode, null)
+    const releaseDrained = waitForLog(owner, "release drained")
+
+    retainedConnection.destroy()
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await releaseDrained
+    assert.equal(releaseState(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1"), "stopped")
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
+
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
+    await shutdown
+  } finally {
+    retainedConnection?.destroy()
+    candidate?.guardian?.disconnect()
+    if (owner && owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    partialGuardian?.kill("SIGTERM")
+    if (partialGuardian && partialGuardian.exitCode === null && partialGuardian.signalCode === null) await once(partialGuardian, "exit")
+    if (backendGuardianIdentity) {
+      const state = JSON.parse(await fs.readFile(statePath, "utf8").catch(() => "null"))
+
+      if (state?.recovery?.guardian?.socketPath === partialSocketPath) {
+        state.recovery.guardian = backendGuardianIdentity
+        await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+      }
+    }
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("partial guardian classification failures preserve the incumbent, children, and retained stream", async (t) => {
+  for (const fault of ["malformed-capability", "wrong-pid", "wrong-provenance"]) {
+    await t.test(fault, async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), `rollbridge-owner-replacement-partial-${fault}-`))
+      const socketPath = path.join(root, "rollbridge.sock")
+      const statePath = path.join(root, "state.json")
+      const configPath = path.join(root, "rollbridge.cjs")
+      const releasePath = path.join(root, "v1")
+      const partialSocketPath = path.join(root, "partial-guardian.sock")
+      let owner
+      let partialGuardian
+      let retainedConnection
+      let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+
+      try {
+        await fs.mkdir(releasePath)
+        await makeFifo(path.join(releasePath, "worker.fifo"))
+        await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
+        owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+        await waitForLog(owner, "control socket listening")
+        assert.ok(owner.pid)
+        await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
+        const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
+        const processPids = [releaseProcessPid(before, "v1", "worker"), releaseProcessPid(before, "v1", "web")]
+        const proxyPort = /** @type {{port?: number}} */ (before.proxy).port
+        const state = JSON.parse(await fs.readFile(statePath, "utf8"))
+        const backendIdentity = {...state.recovery.guardian}
+
+        if (typeof proxyPort !== "number") throw new Error("Partial guardian failure fixture proxy is missing its bound port")
+        partialGuardian = await startPartialGuardian({
+          backendPath: backendIdentity.socketPath,
+          mode: fault === "wrong-provenance" ? fault : fault === "malformed-capability" ? fault : "partial",
+          socketPath: partialSocketPath,
+          token: backendIdentity.token
+        })
+        state.recovery.guardian = {
+          ...backendIdentity,
+          pid: fault === "wrong-pid" ? backendIdentity.pid : partialGuardian.pid,
+          socketPath: partialSocketPath
+        }
+        await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
+        retainedConnection = await openWebSocket(proxyPort)
+        let retainedClosed = false
+
+        retainedConnection.once("close", () => { retainedClosed = true })
+        const replacement = new RollbridgeDaemon({
+          config: normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath})),
+          configPath,
+          legacyIncumbentPid: owner.pid,
+          logger: () => {}
+        })
+        candidate = replacement
+        const expected = fault === "malformed-capability"
+          ? /invalid owner-replacement capability response/
+          : fault === "wrong-pid"
+            ? /does not own socket|does not match the retained guardian command and socket/
+            : /provenance mismatch/
+
+        await assert.rejects(() => replacement.replaceIncompatibleOwner(), expected)
+        assert.equal(owner.exitCode, null)
+        assert.equal(owner.signalCode, null)
+        assert.equal(retainedClosed, false)
+        assert.equal(retainedConnection.destroyed, false)
+        for (const pid of processPids) assert.doesNotThrow(() => process.kill(pid, 0))
+        assert.equal(releaseProcessPid(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1", "worker"), processPids[0])
+        await assert.rejects(fs.access(`${statePath}.split3-guardian.sock`), {code: "ENOENT"})
+
+        const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
+
+        await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
+        await shutdown
+      } finally {
+        retainedConnection?.destroy()
+        candidate?.guardian?.disconnect()
+        if (owner && owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+        partialGuardian?.kill("SIGTERM")
+        if (partialGuardian && partialGuardian.exitCode === null && partialGuardian.signalCode === null) await once(partialGuardian, "exit")
+        await stopGuardian(statePath)
+        await fs.rm(root, {force: true, recursive: true})
+      }
+    })
+  }
+})
 
 test("first pre-split package upgrade is explicitly disruptive and later replacements are atomic", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-legacy-"))
@@ -82,7 +552,7 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
     assert.deepEqual(JSON.parse(firstUpgrade.stdout).ownerTransition, {
       disruptive: true,
       mode: "legacy-first-upgrade",
-      reason: "pre-split guardian and daemon lacked atomic replacement protocol"
+      reason: "retained guardian and daemon lacked atomic replacement protocol"
     })
     await interrupted
     const bridged = await sendControlCommand({command: {command: "status"}, path: socketPath})
@@ -90,7 +560,7 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
     assert.deepEqual(bridged.ownerTransition, {
       disruptive: true,
       mode: "legacy-first-upgrade",
-      reason: "pre-split guardian and daemon lacked atomic replacement protocol"
+      reason: "retained guardian and daemon lacked atomic replacement protocol"
     })
     assert.equal(releaseProcessPid(bridged, "v1", "worker"), legacyWorkerPid)
     assert.equal(bridged.activeReleaseId, "v1")
@@ -384,7 +854,7 @@ test("cross-version replacement fails closed without dropping a retained WebSock
           const request = JSON.parse(line)
 
           buffer = buffer.slice(newline + 1)
-          if (request.command === "commit-retired-owner-replacement") {
+          if (["commit-retired-owner-replacement", "prepare-retired-owner-listener-handoff"].includes(request.command)) {
             if (request.key !== expectedProcessKey) {
               candidateSocket.write(`${JSON.stringify({error: `Guardian ${request.command} requires a process key`, id: request.id})}\n`)
             } else {
@@ -468,7 +938,8 @@ test("cross-version replacement preserves committed-owner proof until commit the
   const compatibilitySocketPath = path.join(root, "retained-guardian.sock")
   const releasePath = path.join(root, "v1")
   const nextReleasePath = path.join(root, "v2")
-  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath}))
+  const proxyPort = await findAvailablePort({host: "127.0.0.1", range: {from: 26000, to: 26999}, usedPorts: new Set()})
+  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, proxyPort, statePath}))
   const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
   const compatibilitySockets = new Set()
   const candidateProcessKey = "release:candidate:worker"
@@ -479,7 +950,10 @@ test("cross-version replacement preserves committed-owner proof until commit the
   let recoveredKeysAtCommit = /** @type {Set<string> | undefined} */ (undefined)
   let retainedConnection
   let retainedConnectionClosed = false
+  let secondRetainedConnection
   let retainedGuardianSocketPath = /** @type {string | undefined} */ (undefined)
+  /** @type {RollbridgeDaemon | undefined} */
+  let intermediate
   /** @type {RollbridgeDaemon | undefined} */
   let replacement
 
@@ -501,11 +975,11 @@ test("cross-version replacement preserves committed-owner proof until commit the
     const running = owner.status()
     const processState = running.releases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
     const expectedProcessKeys = new Set(running.releases[0]?.processes.map(({id}) => `release:v1:${id}`))
-    const proxyPort = /** @type {{port?: number}} */ (running.proxy).port
+    const runningProxyPort = /** @type {{port?: number}} */ (running.proxy).port
 
     assert.deepEqual(processState?.map(({state}) => state), ["running", "running"])
-    if (typeof proxyPort !== "number") throw new Error("Retained owner proxy is missing its port")
-    retainedConnection = await openWebSocket(proxyPort)
+    if (typeof runningProxyPort !== "number") throw new Error("Retained owner proxy is missing its port")
+    retainedConnection = await openWebSocket(runningProxyPort)
     retainedConnection.once("close", () => { retainedConnectionClosed = true })
     await owner.closeServer(owner.controlServer)
     await fs.rm(socketPath, {force: true})
@@ -601,16 +1075,44 @@ test("cross-version replacement preserves committed-owner proof until commit the
       if (typeof pid !== "number") throw new Error("Retained process is missing its PID")
       assert.doesNotThrow(() => process.kill(pid, 0))
     }
+    secondRetainedConnection = await openWebSocket(runningProxyPort)
+    intermediate = replacement
+    const directGuardianState = JSON.parse(await fs.readFile(statePath, "utf8"))
+
+    directGuardianState.recovery.guardian.socketPath = guardianSocketPath
+    await fs.writeFile(statePath, `${JSON.stringify(directGuardianState)}\n`)
+    await intermediate.closeServer(intermediate.controlServer)
+    await fs.rm(socketPath, {force: true})
+    replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    await replacement.replaceIncompatibleOwner()
+    const repeatedHandoff = /** @type {{connections: {http: number, websocket: number}, releaseId: string}[]} */ ((await sendControlCommand({command: {command: "status"}, path: socketPath})).releases)
+
+    assert.deepEqual(repeatedHandoff[0]?.connections, {http: 0, websocket: 2}, "successive control-less owners must aggregate each physical listener source")
     await replacement.deploy({releaseId: "v2", releasePath: nextReleasePath, revision: "v2"})
     const draining = /** @type {{connectionCount: number, releaseId: string, state: string}[]} */ ((await sendControlCommand({command: {command: "status"}, path: socketPath})).releases)
     const retainedRelease = draining.find(({releaseId}) => releaseId === "v1")
 
     assert.equal(retainedRelease?.state, "draining")
-    assert.equal(retainedRelease?.connectionCount, 1, "candidate must not stop the retained upstream while its incumbent WebSocket is live")
+    assert.equal(retainedRelease?.connectionCount, 2, "candidate must not stop the retained upstream while retired WebSockets are live")
     // Send a masked empty WebSocket close frame so both retained proxy legs drain.
     retainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
     if (owner.proxyClosePromise) await owner.proxyClosePromise
+    if (!retainedConnectionClosed) await once(retainedConnection, "close")
     assert.equal(retainedConnectionClosed, true, "retired incumbent must finish after its retained connections drain")
+    const oneSourceDeadline = Date.now() + 3000
+    let oneRetained
+
+    while (Date.now() < oneSourceDeadline) {
+      oneRetained = /** @type {{connectionCount: number, processes: {id: string, state: string}[], releaseId: string}[]} */ ((await sendControlCommand({command: {command: "status"}, path: socketPath})).releases)
+        .find(({releaseId}) => releaseId === "v1")
+      if (oneRetained?.connectionCount === 1) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+
+    assert.equal(oneRetained?.connectionCount, 1, "one retired listener source must not clear another source's live connection")
+    assert.equal(oneRetained?.processes.find(({id}) => id === "web")?.state, "running")
+    secondRetainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
+    if (intermediate.proxyClosePromise) await intermediate.proxyClosePromise
     const stopDeadline = Date.now() + 3000
     let retainedWebStopped = false
 
@@ -632,13 +1134,16 @@ test("cross-version replacement preserves committed-owner proof until commit the
     const shutdown = replacement?.controlCommandsReady ? replacement.shutdown().catch(() => {}) : owner.shutdown().catch(() => {})
 
     if (retainedConnection && !retainedConnection.destroyed) retainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
+    if (secondRetainedConnection && !secondRetainedConnection.destroyed) secondRetainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
     await owner.closeServer(owner.proxyServer)
+    await intermediate?.closeServer(intermediate.proxyServer)
     await Promise.all([
       fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => {}),
       fs.writeFile(path.join(nextReleasePath, "worker.fifo"), "drained\n").catch(() => {}),
       shutdown
     ])
     owner.guardian?.disconnect()
+    intermediate?.guardian?.disconnect()
     replacement?.guardian?.disconnect()
     for (const socket of compatibilitySockets) socket.destroy()
     if (compatibilityGuardian?.listening) await closeServer(compatibilityGuardian)
@@ -772,6 +1277,250 @@ test("replacement transfers an unchanged fixed proxy listener without reusePort"
   } finally {
     for (const child of [owner, candidate]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
     await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("direct retired-listener drain updates reach a recovered committed owner", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-direct-listener-recovery-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const releasePath = path.join(root, "v1")
+  const proxyPort = await findAvailablePort({host: "127.0.0.1", range: {from: 24000, to: 24999}, usedPorts: new Set()})
+  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, proxyPort, statePath}))
+  const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let recovered = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let retainedConnection
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    retainedConnection = await openWebSocket(proxyPort)
+    candidate = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    await candidate.replaceIncompatibleOwner()
+    assert.equal(candidate.status().releases[0]?.connectionCount, 1)
+
+    candidate.incumbentListenerControl?.close()
+    await candidate.closeServer(candidate.controlServer)
+    await candidate.closeServer(candidate.proxyServer)
+    candidate.guardian?.disconnect()
+    recovered = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    await recovered.start({exposeControl: false})
+    assert.equal(recovered.status().releases[0]?.connectionCount, 1)
+
+    retainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
+    if (owner.proxyClosePromise) await owner.proxyClosePromise
+    const deadline = Date.now() + 3000
+
+    while (Date.now() < deadline && recovered.status().releases[0]?.connectionCount !== 0) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal(recovered.status().releases[0]?.connectionCount, 0)
+  } finally {
+    retainedConnection?.destroy()
+    await candidate?.closeServer(candidate.controlServer)
+    await candidate?.closeServer(candidate.proxyServer)
+    if (recovered?.guardian) {
+      const shutdown = recovered.shutdown()
+
+      await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => undefined)
+    }
+    candidate?.guardian?.disconnect()
+    owner.guardian?.disconnect()
+    await owner.closeServer(owner.proxyServer)
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("direct listener publication failure rejects the committed replacement", {timeout: 5000}, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-direct-listener-failure-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const releasePath = path.join(root, "v1")
+  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath}))
+  const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    owner.publishRetiredConnectionState = async () => { throw new Error("injected retired listener publication failure") }
+    const replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+
+    candidate = replacement
+    await assert.rejects(
+      () => replacement.replaceIncompatibleOwner(),
+      /Retired listener disconnected before publishing complete connection state/
+    )
+  } finally {
+    await candidate?.closeServer(candidate.controlServer)
+    await candidate?.closeServer(candidate.proxyServer)
+    candidate?.guardian?.disconnect()
+    owner.guardian?.disconnect()
+    await owner.closeServer(owner.controlServer)
+    await owner.closeServer(owner.proxyServer)
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("control-less fixed-proxy bind failure preserves incumbent authority", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-fixed-proxy-rollback-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const releasePath = path.join(root, "v1")
+  const proxyPort = await findAvailablePort({host: "127.0.0.1", range: {from: 24000, to: 24999}, usedPorts: new Set()})
+  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, proxyPort, statePath}))
+  const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let resumedConnection
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    await owner.closeServer(owner.controlServer)
+    await fs.rm(socketPath, {force: true})
+    const replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+
+    candidate = replacement
+    replacement.startProxy = async () => { throw new Error("injected fixed proxy bind failure") }
+    await assert.rejects(() => replacement.replaceIncompatibleOwner(), /injected fixed proxy bind failure/)
+    const deadline = Date.now() + 3000
+
+    while (Date.now() < deadline) {
+      try {
+        resumedConnection = net.createConnection({host: "127.0.0.1", port: proxyPort})
+        await once(resumedConnection, "connect")
+        break
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+    }
+
+    assert.ok(resumedConnection, "incumbent proxy must resume after candidate bind failure")
+    assert.equal(owner.ownerRetired, false)
+    assert.deepEqual(await owner.guardian?.replacementStatus(), {
+      committedReplacementId: null,
+      ownerClaimed: true,
+      retirementFailed: false,
+      retirementPending: false,
+      retirementReady: false
+    })
+  } finally {
+    resumedConnection?.destroy()
+    candidate?.guardian?.disconnect()
+    await owner.closeServer(owner.controlServer)
+    await owner.closeServer(owner.proxyServer)
+    await stopGuardian(statePath)
+    owner.guardian?.disconnect()
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("owner recovery finalizes a completed control-less listener handoff after candidate exit", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-listener-recovery-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const releasePath = path.join(root, "v1")
+  const proxyPort = await findAvailablePort({host: "127.0.0.1", range: {from: 24000, to: 24999}, usedPorts: new Set()})
+  const daemonConfig = normalizeConfig(config({controlPath: socketPath, extraCompanion: false, proxyPort, statePath}))
+  const owner = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+  let candidate = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+  let recovered = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+
+  try {
+    await fs.mkdir(releasePath)
+    await makeFifo(path.join(releasePath, "worker.fifo"))
+    await owner.start()
+    await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
+    await owner.closeServer(owner.controlServer)
+    await fs.rm(socketPath, {force: true})
+    const replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    const startProxy = replacement.startProxy.bind(replacement)
+
+    candidate = replacement
+    replacement.startProxy = async () => {
+      await startProxy()
+      const guardian = replacement.guardian
+
+      if (!guardian) throw new Error("Recovery fixture candidate is missing its guardian")
+      guardian.finalizeOwnerReplacement = async () => {
+        guardian.disconnect()
+        throw new Error("injected candidate exit before listener finalization")
+      }
+    }
+    await assert.rejects(() => replacement.replaceIncompatibleOwner(), /injected candidate exit before listener finalization/)
+    await replacement.closeServer(replacement.controlServer)
+    await replacement.closeServer(replacement.proxyServer)
+
+    recovered = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
+    await recovered.start({exposeControl: false})
+
+    assert.equal(recovered.getProxyPort(), proxyPort)
+    assert.equal((await recovered.guardian?.replacementStatus())?.retirementPending, false)
+  } finally {
+    await candidate?.closeServer(candidate.controlServer)
+    await candidate?.closeServer(candidate.proxyServer)
+    if (recovered?.guardian) {
+      const shutdown = recovered.shutdown()
+
+      await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n").catch(() => undefined)
+      await shutdown.catch(() => undefined)
+    }
+    candidate?.guardian?.disconnect()
+    owner.guardian?.disconnect()
+    await owner.closeServer(owner.proxyServer)
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("control-less retirement clears an active source but omits a stopped release without local connections", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-stopped-source-"))
+  const statePath = path.join(root, "state.json")
+  const daemon = new RollbridgeDaemon({
+    config: normalizeConfig(config({controlPath: path.join(root, "rollbridge.sock"), extraCompanion: false, statePath})),
+    logger: () => {}
+  })
+  const published = /** @type {{releaseId: string, sourceId: string}[]} */ ([])
+  let disconnected = false
+  const guardian = new GuardianClient({socketPath: path.join(root, "guardian.sock"), token: "test-token"})
+
+  guardian.completeOwnerListenerRetirement = async () => {}
+  guardian.disconnect = () => { disconnected = true }
+  guardian.publishOwnerConnectionState = async (_replacementId, sourceId, releaseId) => { published.push({releaseId, sourceId}) }
+  guardian.waitForEvent = async () => ({event: "replacement-retired"})
+  daemon.guardian = guardian
+  daemon.releases.set("stopped", /** @type {import("../src/release-group.js").default} */ ({
+    localConnections: () => ({http: 0, websocket: 0}),
+    releaseId: "stopped",
+    state: "stopped",
+    status: () => ({connectionCount: 0})
+  }))
+  daemon.releases.set("active", /** @type {import("../src/release-group.js").default} */ ({
+    localConnections: () => ({http: 0, websocket: 0}),
+    releaseId: "active",
+    state: "active",
+    status: () => ({connectionCount: 0})
+  }))
+  daemon.retireCommittedOwner = async () => { daemon.ownerRetired = true }
+
+  try {
+    await daemon.yieldControlLessOwnerListeners("replacement")
+    await daemon.completeControlLessOwnerRetirement("replacement")
+
+    assert.deepEqual(published, [{releaseId: "active", sourceId: daemon.listenerSourceId}])
+    assert.equal(disconnected, true)
+  } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
 })
@@ -1108,7 +1857,7 @@ async function removeDaemonRecoveryCapability(packagePath, {abortedPath, prepare
 
   assert.ok(source.includes(capability))
   assert.ok(source.includes(incumbentAbortNotification))
-  await fs.writeFile(guardianPath, source.replace(capability, legacyCapability).replace(incumbentAbortNotification, ""))
+  await fs.writeFile(guardianPath, source.replace(capability, legacyCapability))
   const daemonSource = await fs.readFile(daemonPath, "utf8")
   const preparedHandler = "    this.guardian.onEvent(\"replacement-prepared\", () => {\n      for (const release of this.releases.values()) release.pauseDrainForOwnerHandoff()\n"
   const abortedHandler = "    this.guardian.onEvent(\"replacement-aborted\", () => {\n"
@@ -1157,6 +1906,32 @@ async function runEnsureDaemon({configPath, daemonPidPath, logPath, packagePath,
     "--daemon-runtime-path", runtimePath, "--daemon-log-path", logPath,
     "--daemon-pid-path", daemonPidPath, "--daemon-start-timeout-ms", "3000"
   ])
+}
+
+/**
+ * Starts an authenticated protocol proxy that exposes the exact partial guardian surface.
+ * @param {{backendPath: string, mode: string, socketPath: string, token: string}} options - Fixture identity.
+ * @returns {Promise<import("node:child_process").ChildProcess>} Ready guardian proxy.
+ */
+async function startPartialGuardian({backendPath, mode, socketPath, token}) {
+  const child = spawn(process.execPath, [partialGuardianPath, socketPath, backendPath, mode], {
+    stdio: ["ignore", "ignore", "ignore", "ipc"]
+  })
+
+  await new Promise((resolve, reject) => {
+    child.once("error", reject)
+    child.once("exit", (code) => reject(new Error(`Partial guardian exited before readiness with status ${code}`)))
+    child.once("message", (message) => {
+      if (message && typeof message === "object" && "error" in message) reject(new Error(String(message.error)))
+      else resolve(undefined)
+    })
+    child.send({token}, (error) => {
+      if (error) reject(error)
+    })
+  })
+  if (child.connected) await once(child, "disconnect")
+  assert.ok(child.pid)
+  return child
 }
 
 /**
@@ -1235,6 +2010,27 @@ async function waitForFile(filePath) {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error(`Timed out waiting for ${filePath}`)
+}
+
+/**
+ * @param {Record<string, import("../src/json.js").JsonValue>} status - Daemon status.
+ * @param {string} releaseId - Release identity.
+ * @returns {string} Release lifecycle state.
+ */
+function releaseState(status, releaseId) {
+  const releases = /** @type {{releaseId: string, state: string}[]} */ (status.releases)
+  const state = releases.find((release) => release.releaseId === releaseId)?.state
+
+  if (!state) throw new Error(`Missing release state for ${releaseId}`)
+  return state
+}
+
+/** @returns {{promise: Promise<void>, resolve: (value: void) => void}} Controllable event barrier. */
+function deferred() {
+  let resolve = /** @type {(value: void) => void} */ (() => {})
+  const promise = new Promise((promiseResolve) => { resolve = promiseResolve })
+
+  return {promise, resolve}
 }
 
 /**

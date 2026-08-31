@@ -512,6 +512,14 @@ export default class ReleaseGroup extends EventEmitter {
     return this.transferredConnections.http + this.transferredConnections.websocket > 0
   }
 
+  /** @returns {ReleaseConnections} Connections physically owned by this daemon listener. */
+  localConnections() {
+    return {
+      http: this.connections.http - this.transferredConnections.http,
+      websocket: this.connections.websocket - this.transferredConnections.websocket
+    }
+  }
+
   /** Pauses only daemon-local connection-dependent retirement at owner handoff. */
   pauseDrainForOwnerHandoff() {
     if (this.state !== "draining") return

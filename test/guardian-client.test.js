@@ -153,6 +153,46 @@ test("guardian delivers the final process status after dropping logs for a backp
   }
 })
 
+test("guardian resynchronizes retained logs after dropping output for a backpressured client", async () => {
+  const fixture = await createGuardian()
+  const gatePath = path.join(fixture.root, "write-retained-output")
+  const completedPath = path.join(fixture.root, "retained-output-complete")
+  const payload = "x".repeat(1024)
+  const finalLine = `8191:${payload}`
+  const script = `const fs = require("node:fs"); const {once} = require("node:events"); (async () => { while (!fs.existsSync(${JSON.stringify(gatePath)})) await new Promise((resolve) => setTimeout(resolve, 5)); for (let index = 0; index < 8192; index += 1) if (!process.stdout.write(index + ":" + ${JSON.stringify(payload)} + "\\n")) await once(process.stdout, "drain"); fs.writeFileSync(${JSON.stringify(completedPath)}, "complete\\n"); setInterval(() => {}, 1000); })()`
+  const processInstance = fixture.client.process("backpressured-retained-output", {
+    ...definition("backpressured-retained-output"),
+    command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`
+  })
+  const socket = fixture.client.socket
+
+  assert.ok(socket)
+  try {
+    await processInstance.start()
+    socket.pause()
+    await fs.writeFile(gatePath, "write\n")
+    await waitForFileText(completedPath)
+    const resynchronized = fixture.client.waitForEvent("status")
+
+    socket.resume()
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timeout
+
+    try {
+      await Promise.race([
+        resynchronized,
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("Guardian did not resynchronize retained output after backpressure")), 3000) })
+      ])
+    } finally {
+      clearTimeout(timeout)
+    }
+    assert.equal(processInstance.status().logs.at(-1)?.line, finalLine)
+  } finally {
+    socket.resume()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("guardian shutdown reports an exact owned process stop failure", async () => {
   const fixture = await createGuardian()
   const processInstance = fixture.client.process("broken-stop", {...definition("broken-stop"), stopSignal: "NOT_A_SIGNAL"})
@@ -632,9 +672,47 @@ test("replacement commit notification waits for incumbent listener retirement", 
     await fixture.client.commitOwnerReplacement(prepared.replacementId)
     await new Promise((resolve) => setImmediate(resolve))
     assert.equal(committed, false, "candidate publication must remain fenced while incumbent listener retirement is delayed")
+    const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
+
+    await fixture.client.completeOwnerListenerRetirement(prepared.replacementId)
+    await listenersRetired
     await fixture.client.request({command: "finalize-owner-replacement", replacementId: prepared.replacementId})
     await notification
     assert.equal(committed, true)
+    await candidate.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("completed direct listener retirement finalizes when the incumbent disconnects", {timeout: 3000}, async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const authority = {configDigest: "incumbent", runtime: null}
+  const nextAuthority = {configDigest: "candidate", runtime: null}
+
+  try {
+    await fixture.client.publishOwnerState({authority, snapshot: {activeReleaseId: "v1"}})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, nextAuthority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: {activeReleaseId: "v1"}})
+    const committed = candidate.waitForEvent("replacement-committed")
+
+    await fixture.client.commitOwnerReplacement(prepared.replacementId)
+    await fixture.client.completeOwnerListenerRetirement(prepared.replacementId)
+    fixture.client.disconnect()
+    await committed
+    await candidate.finalizeOwnerReplacement(prepared.replacementId)
+    assert.deepEqual(await candidate.replacementStatus(), {
+      committedReplacementId: prepared.replacementId,
+      ownerClaimed: true,
+      retirementFailed: false,
+      retirementPending: false,
+      retirementReady: false
+    })
     await candidate.shutdown()
     await fixture.client.guardianExit()
   } finally {
@@ -672,6 +750,77 @@ test("replacement staging rejects owner state published after prepare", async ()
   }
 })
 
+test("staged replacement receives cleared local sources when the incumbent disconnects", {timeout: 3000}, async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const authority = {configDigest: "incumbent", runtime: null}
+  const nextAuthority = {configDigest: "candidate", runtime: null}
+  const snapshot = {activeReleaseId: "v1"}
+
+  try {
+    await fixture.client.publishOwnerState({
+      authority,
+      listenerConnectionSources: {"incumbent-local": {v1: {http: 0, websocket: 1}}},
+      listenerSourceId: "incumbent-local",
+      snapshot
+    })
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, nextAuthority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {
+      authority: nextAuthority,
+      listenerConnectionSources: {"incumbent-local": {v1: {http: 0, websocket: 1}}},
+      listenerSourceId: "candidate-local",
+      snapshot
+    })
+    const cleared = candidate.waitForEvent("owner-connection-state")
+    const committed = candidate.waitForEvent("replacement-committed")
+
+    fixture.client.disconnect()
+    assert.deepEqual(await cleared, {
+      connections: {http: 0, websocket: 0},
+      event: "owner-connection-state",
+      releaseId: "v1",
+      sourceId: "incumbent-local"
+    })
+    await committed
+    const state = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await candidate.ownerState())
+
+    assert.deepEqual(state.listenerConnectionSources, {})
+    await candidate.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("replacement abort notifies both the candidate and committed owner", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const authority = {configDigest: "incumbent", runtime: null}
+  const nextAuthority = {configDigest: "candidate", runtime: null}
+
+  try {
+    await fixture.client.publishOwnerState({authority, snapshot: {activeReleaseId: "v1"}})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, nextAuthority)
+    const incumbentAborted = fixture.client.waitForEvent("replacement-aborted")
+    const candidateAborted = candidate.waitForEvent("replacement-aborted")
+
+    await candidate.abortOwnerReplacement(prepared.replacementId)
+    assert.deepEqual(await Promise.all([incumbentAborted, candidateAborted]), [
+      {event: "replacement-aborted", reason: "Replacement candidate aborted the prepared transaction"},
+      {event: "replacement-aborted", reason: "Replacement candidate aborted the prepared transaction"}
+    ])
+    await fixture.client.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("retired owner replacement commit carries its exact recovered process key", async () => {
   const client = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
   const replacementId = "prepared-replacement"
@@ -684,6 +833,54 @@ test("retired owner replacement commit carries its exact recovered process key",
   }
 
   await client.commitRetiredOwnerReplacement(replacementId, processKey)
+})
+
+test("guardian owner-replacement capability classification is explicit and fail closed", async () => {
+  const current = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+
+  current.request = async (request) => {
+    assert.deepEqual(request, {command: "owner-replacement-capabilities"})
+    return {
+      commands: ["commit-retired-owner-replacement", "future-command"],
+      futureField: {supported: true},
+      protocol: "owner-replacement",
+      version: 2
+    }
+  }
+  assert.equal(await current.ownerReplacementProtocol(), "atomic")
+
+  for (const [commitDiagnostic, expected] of [
+    ["Owner replacement transaction is not the prepared candidate", "atomic"],
+    ["Guardian commit-retired-owner-replacement requires a process key", "legacy"],
+    ["Unknown guardian command: commit-retired-owner-replacement", "legacy"]
+  ]) {
+    const older = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+    const requests = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ ([])
+
+    older.request = async (request) => {
+      requests.push(request)
+      if (request.command === "owner-replacement-capabilities") throw new Error("Guardian owner-replacement-capabilities requires a process key")
+      throw new Error(commitDiagnostic)
+    }
+    assert.equal(await older.ownerReplacementProtocol(), expected)
+    assert.deepEqual(requests, [
+      {command: "owner-replacement-capabilities"},
+      {command: "commit-retired-owner-replacement", replacementId: "owner-replacement-capability-probe"}
+    ])
+  }
+
+  for (const fixture of [
+    async () => ({commands: [], protocol: "owner-replacement", version: 1}),
+    async (/** @type {Record<string, import("../src/json.js").JsonValue>} */ request) => {
+      if (request.command === "owner-replacement-capabilities") throw new Error("Guardian owner-replacement-capabilities requires a process key")
+      throw new Error("Guardian commit-retired-owner-replacement requires the committed owner")
+    }
+  ]) {
+    const ambiguous = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
+
+    ambiguous.request = fixture
+    await assert.rejects(() => ambiguous.ownerReplacementProtocol(), /invalid owner-replacement capability response|ambiguous retired-owner capability response/)
+  }
 })
 
 test("reserved process recovery rejects a reconstructed definition with different provenance", async () => {
@@ -795,17 +992,265 @@ test("retired owner replacement requires unchanged authority and the exact contr
       () => candidate.commitRetiredOwnerReplacement(ready.replacementId, "release:v1:wrong"),
       /process .* is not registered/
     )
+    const handoffRequested = fixture.client.waitForEvent("replacement-listener-handoff-requested")
+
+    void handoffRequested.catch(() => undefined)
+
+    await candidate.prepareRetiredOwnerListenerHandoff(ready.replacementId, processKey)
+    await handoffRequested
+    await assert.rejects(
+      () => contender.prepareOwnerReplacement(authority, authority),
+      /listener retirement is pending/
+    )
     const committed = candidate.waitForEvent("replacement-committed")
-    const retirementRequested = fixture.client.waitForEvent("replacement-retirement-requested")
+    const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
     const connectionState = candidate.waitForEvent("owner-connection-state")
+
+    await fixture.client.publishOwnerConnectionState(ready.replacementId, "listener-a", "v1", {http: 1, websocket: 2}, true)
+    assert.deepEqual(await connectionState, {connections: {http: 1, websocket: 2}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
+    await fixture.client.completeOwnerListenerRetirement(ready.replacementId)
+    await listenersRetired
+    const retirementRequested = fixture.client.waitForEvent("replacement-retirement-requested")
 
     await candidate.commitRetiredOwnerReplacement(ready.replacementId, processKey)
     await retirementRequested
-    await fixture.client.publishOwnerConnectionState(ready.replacementId, "v1", {http: 1, websocket: 2})
-    assert.deepEqual(await connectionState, {connections: {http: 1, websocket: 2}, event: "owner-connection-state", releaseId: "v1"})
-    await fixture.client.finalizeOwnerReplacement(ready.replacementId)
+    await candidate.finalizeOwnerReplacement(ready.replacementId)
     await committed
     await candidate.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    contender.disconnect()
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("completed listener retirement survives owner recovery and clears a crashed local source", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const recovered = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const controlPath = path.join(fixture.root, "rollbridge.sock")
+  const processKey = "release:v1:worker"
+  const authority = {configDigest: "owner", runtime: null}
+  const snapshot = {
+    activeReleaseId: "v1",
+    control: {path: controlPath},
+    releases: [{processes: [{id: "worker"}], releaseId: "v1"}],
+    services: [],
+    singletons: []
+  }
+
+  try {
+    await fixture.client.process(processKey, definition("worker")).recover()
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {
+      authority,
+      listenerConnectionSources: {"candidate-local": {v1: {http: 0, websocket: 1}}},
+      listenerSourceId: "candidate-local",
+      snapshot
+    })
+    const handoffRequested = fixture.client.waitForEvent("replacement-listener-handoff-requested")
+
+    void handoffRequested.catch(() => undefined)
+
+    await candidate.prepareRetiredOwnerListenerHandoff(prepared.replacementId, processKey)
+    await handoffRequested
+    const initial = candidate.waitForEvent("owner-connection-state")
+
+    await fixture.client.publishOwnerConnectionState(prepared.replacementId, "listener-a", "v1", {http: 0, websocket: 1}, true)
+    assert.deepEqual(await initial, {connections: {http: 0, websocket: 1}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
+    const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
+
+    await fixture.client.completeOwnerListenerRetirement(prepared.replacementId)
+    await listenersRetired
+    await candidate.commitRetiredOwnerReplacement(prepared.replacementId, processKey)
+    candidate.disconnect()
+    await recovered.connect()
+    await recovered.claimOwner(1000, authority)
+    const stateAfterCandidateCrash = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
+
+    assert.equal(stateAfterCandidateCrash.listenerConnectionSources?.["candidate-local"], undefined)
+    assert.deepEqual(stateAfterCandidateCrash.listenerConnectionSources?.["listener-a"], {v1: {http: 0, websocket: 1}})
+    assert.deepEqual(await recovered.replacementStatus(), {
+      committedReplacementId: prepared.replacementId,
+      ownerClaimed: true,
+      retirementFailed: false,
+      retirementPending: true,
+      retirementReady: true
+    })
+    await recovered.finalizeOwnerReplacement(prepared.replacementId)
+    const cleared = recovered.waitForEvent("owner-connection-state")
+
+    fixture.client.disconnect()
+    assert.deepEqual(await Promise.race([
+      cleared,
+      new Promise((_, reject) => {
+        const timer = setTimeout(() => reject(new Error("Recovered owner did not receive the retired source tombstone")), 500)
+
+        timer.unref()
+      })
+    ]), {connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
+    const recoveredOwnerState = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
+
+    assert.deepEqual(recoveredOwnerState.listenerConnectionSources, {})
+    await recovered.publishOwnerState({
+      authority,
+      listenerConnectionSources: {"listener-a": {v1: {http: 0, websocket: 1}}},
+      listenerSourceId: "recovered-local",
+      snapshot
+    })
+    const afterStalePublication = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
+
+    assert.deepEqual(afterStalePublication.listenerConnectionSources, {})
+    const recoveredProcess = recovered.process(processKey, definition("worker"))
+
+    await recoveredProcess.recover()
+    await recoveredProcess.updateDefinition({...definition("worker"), env: {REVISION: "stale"}}, {
+      authority,
+      listenerConnectionSources: {"listener-a": {v1: {http: 0, websocket: 1}}},
+      listenerSourceId: "recovered-local",
+      snapshot
+    })
+    const afterStaleProcessUpdate = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
+
+    assert.deepEqual(afterStaleProcessUpdate.listenerConnectionSources, {})
+    await recovered.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    recovered.disconnect()
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("direct retired-listener source relay survives committed owner recovery", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const recovered = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const authority = {configDigest: "owner", runtime: null}
+  const snapshot = {activeReleaseId: "v1", control: {path: path.join(fixture.root, "rollbridge.sock")}, releases: [], services: [], singletons: []}
+
+  try {
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {authority, listenerSourceId: "candidate-local", snapshot})
+    await fixture.client.commitOwnerReplacement(prepared.replacementId)
+    const initial = candidate.waitForEvent("owner-connection-state")
+
+    await fixture.client.publishOwnerConnectionState(prepared.replacementId, "direct-listener", "v1", {http: 0, websocket: 1}, true)
+    assert.deepEqual(await initial, {connections: {http: 0, websocket: 1}, event: "owner-connection-state", releaseId: "v1", sourceId: "direct-listener"})
+    const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
+
+    await fixture.client.completeOwnerListenerRetirement(prepared.replacementId)
+    await listenersRetired
+    await fixture.client.finalizeOwnerReplacement(prepared.replacementId)
+    candidate.disconnect()
+    await recovered.connect()
+    await recovered.claimOwner(1000, authority)
+    const cleared = recovered.waitForEvent("owner-connection-state")
+
+    await fixture.client.publishOwnerConnectionState(prepared.replacementId, "direct-listener", "v1", {http: 0, websocket: 0}, true)
+    assert.deepEqual(await cleared, {connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "direct-listener"})
+    await recovered.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    recovered.disconnect()
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("incumbent listener disconnect before state completion aborts without committing the candidate", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const recovered = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const controlPath = path.join(fixture.root, "rollbridge.sock")
+  const processKey = "release:v1:worker"
+  const authority = {configDigest: "owner", runtime: null}
+  const snapshot = {
+    activeReleaseId: "v1",
+    control: {path: controlPath},
+    releases: [{processes: [{id: "worker"}], releaseId: "v1"}],
+    services: [],
+    singletons: []
+  }
+
+  try {
+    await fixture.client.process(processKey, definition("worker")).recover()
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {authority, snapshot})
+    const handoffRequested = fixture.client.waitForEvent("replacement-listener-handoff-requested")
+    const failed = candidate.waitForEvent("replacement-retirement-failed")
+    const aborted = candidate.waitForEvent("replacement-aborted")
+
+    await candidate.prepareRetiredOwnerListenerHandoff(prepared.replacementId, processKey)
+    await handoffRequested
+    fixture.client.disconnect()
+    assert.deepEqual(await failed, {
+      event: "replacement-retirement-failed",
+      reason: "Incumbent listener disconnected during the prepared handoff",
+      replacementId: prepared.replacementId
+    })
+    assert.deepEqual(await aborted, {
+      event: "replacement-aborted",
+      reason: "Incumbent listener disconnected during the prepared handoff"
+    })
+    assert.deepEqual(await candidate.replacementStatus(), {
+      committedReplacementId: null,
+      ownerClaimed: false,
+      retirementFailed: false,
+      retirementPending: false,
+      retirementReady: false
+    })
+    await recovered.connect()
+    await recovered.claimOwner(1000, authority)
+    await recovered.shutdown()
+    await fixture.client.guardianExit()
+  } finally {
+    recovered.disconnect()
+    candidate.disconnect()
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("replacement abort during listener handoff validation leaves the incumbent available", async () => {
+  const fixture = await createGuardian()
+  const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const contender = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
+  const processKey = "release:v1:worker"
+  const authority = {configDigest: "owner", runtime: null}
+  const snapshot = {
+    activeReleaseId: "v1",
+    control: {path: path.join(fixture.root, "rollbridge.sock")},
+    releases: [{processes: [{id: "worker"}], releaseId: "v1"}],
+    services: [],
+    singletons: []
+  }
+
+  try {
+    await fixture.client.process(processKey, definition("worker")).recover()
+    await fixture.client.publishOwnerState({authority, snapshot})
+    await candidate.connect()
+    const prepared = await candidate.prepareOwnerReplacement(authority, authority)
+
+    await candidate.stageOwnerReplacement(prepared.replacementId, {authority, snapshot})
+    const abandonedHandoff = candidate.prepareRetiredOwnerListenerHandoff(prepared.replacementId, processKey)
+
+    await candidate.abortOwnerReplacement(prepared.replacementId)
+    await assert.rejects(() => abandonedHandoff, /prepared candidate/)
+    await contender.connect()
+    const fresh = await contender.prepareOwnerReplacement(authority, authority)
+
+    await contender.abortOwnerReplacement(fresh.replacementId)
+    await fixture.client.shutdown()
     await fixture.client.guardianExit()
   } finally {
     contender.disconnect()
@@ -965,7 +1410,12 @@ test("split guardian defers owner handoff until a nested legacy definition updat
   const socketPath = path.join(fixture.root, "guardian-v2.sock")
   const token = "candidate-guardian-capability"
   const gatePath = path.join(fixture.root, "legacy-update.allow")
-  const committedOwnerState = {authority: nextAuthority, snapshot: {...ownerState.snapshot, update: "committed"}}
+  const committedOwnerState = {
+    authority: nextAuthority,
+    listenerConnectionSources: {"updating-owner": {v1: {http: 0, websocket: 1}}},
+    listenerSourceId: "updating-owner",
+    snapshot: {...ownerState.snapshot, update: "committed"}
+  }
   const contender = new GuardianClient({socketPath, token})
   let upgraded
 
@@ -996,7 +1446,7 @@ test("split guardian defers owner handoff until a nested legacy definition updat
     const updateError = await updateResult
 
     assert.match(String(updateError), /connection closed while awaiting update/)
-    assert.deepEqual(await contender.ownerState(), committedOwnerState)
+    assert.deepEqual(await contender.ownerState(), {...committedOwnerState, listenerConnectionSources: {}})
   } finally {
     await fs.writeFile(gatePath, "allow\n").catch(() => {})
     await contender.shutdown().catch(() => {})
@@ -1053,11 +1503,9 @@ test("a legacy bridge remains discoverable when its candidate disconnects after 
     config: {statePath},
     snapshot: {activeReleaseId: null, control: {path: path.join(fixture.root, "control.sock")}, releases: [], services: [], singletons: []}
   }
-  const incumbent = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {detached: true, stdio: "ignore"})
   let upgraded
   let replacement
 
-  incumbent.unref()
   try {
     const identity = {socketPath: path.join(fixture.root, "guardian-v2.sock"), token: "candidate-guardian-capability"}
 
@@ -1068,16 +1516,10 @@ test("a legacy bridge remains discoverable when its candidate disconnects after 
       recovery: {configDigest: authority.configDigest, format: 1, guardian: {...identity, pid: upgraded.pid}, reconnectGraceMs: 3000}
     }
 
-    assert.ok(incumbent.pid)
     await fs.writeFile(statePath, `${JSON.stringify(ownerState.snapshot, null, 2)}\n`)
-    await upgraded.request({
-      command: "cross-legacy-upgrade-boundary",
-      incumbentPid: incumbent.pid,
-      recoverySnapshot,
-      replacementId: prepared.replacementId,
-      statePath
-    })
-    await waitForProcessExit(incumbent.pid)
+    await upgraded.beginLegacyOwnerClaim(prepared.replacementId, 1000, statePath, recoverySnapshot)
+    fixture.client.disconnect()
+    await upgraded.completeLegacyOwnerClaim(prepared.replacementId)
     assert.deepEqual(JSON.parse(await fs.readFile(statePath, "utf8")), recoverySnapshot)
     upgraded.disconnect()
 
@@ -1093,7 +1535,6 @@ test("a legacy bridge remains discoverable when its candidate disconnects after 
   } finally {
     upgraded?.disconnect()
     replacement?.disconnect()
-    if (incumbent.pid) killExactProcessGroup(incumbent.pid)
     await cleanupGuardian({client: fixture.client, root: fixture.root})
   }
 })

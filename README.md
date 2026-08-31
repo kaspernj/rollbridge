@@ -255,9 +255,11 @@ documented one-time disruptive compatibility bridge below.
 
 There is one explicit compatibility boundary: the first upgrade from a genuine
 pre-owner-replacement Rollbridge guardian and daemon cannot share its listeners
-on supported Node 20. After authenticating the guardian, exact daemon PID/socket,
-runtime authority, and durable owned-process state, `ensure-daemon` performs a
-one-time **disruptive** bridge. Existing proxy/control connections may close,
+on supported Node 20. The same boundary applies to a retained transition guardian
+that supports prepare/stage but predates the retired-owner commit command. After
+an explicit capability probe and authentication of the guardian, exact daemon
+PID/socket, runtime authority, and durable owned-process state, `ensure-daemon`
+performs a one-time **disruptive** bridge. Existing proxy/control connections may close,
 the retained processes keep their exact PIDs under guardian supervision, and
 `status.ownerTransition` reports `mode: "legacy-first-upgrade"` with
 `disruptive: true`. The bridge requires the existing config identity unchanged;

@@ -11,6 +11,9 @@ cannot authenticate and attest an allowed owner transition.
 
 **Fix.** With `ownerRecovery`, a genuine pre-owner-replacement Rollbridge daemon
 and guardian can cross the documented one-time disruptive bridge automatically.
+A retained guardian that implements replacement prepare/stage but lacks the
+retired-owner commit capability uses that same bridge only after the exact
+non-mutating capability signature and legacy process dispatch are confirmed.
 Its existing proxy/control connections may close; successful status reports
 `ownerTransition.mode: "legacy-first-upgrade"`. Keep the incumbent config
 identity unchanged for that first invocation, then apply config/socket changes
