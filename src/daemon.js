@@ -1942,7 +1942,9 @@ export default class RollbridgeDaemon {
     if (this.activeRelease !== previous) throw new Error(`Previous release ${previous.releaseId} is not the authoritative proxy target`)
     const activationConfig = previous.config.processes.find((processConfig) => processConfig.lifecycle.activateCommand !== undefined)
     const coordinator = activationConfig ? previous.getProcesses(activationConfig.id)[0]?.process : undefined
-    if (!coordinator || coordinator.status().lifecycleRole !== "retired") throw new Error(`Previous release ${previous.releaseId} does not retain a retired generation coordinator`)
+    const missingRetiredCoordinator = !coordinator && /^Process .+ is not retained for reactivation$/u.test(retirementFailure ?? "")
+
+    if ((!coordinator && !missingRetiredCoordinator) || (coordinator && coordinator.status().lifecycleRole !== "retired")) throw new Error(`Previous release ${previous.releaseId} does not retain a retired or terminally absent generation coordinator`)
     if (!releaseOwnsLiveProxyTraffic(previous)) throw new Error(`Previous release ${previous.releaseId} no longer owns live proxy/web traffic`)
     await candidate.drainAndStop(candidate.config.proxy.drainTimeoutMs, candidate.config)
     const candidateProcesses = candidate.status().processes
@@ -2968,6 +2970,7 @@ function terminalRetirementFailure(failure) {
   return typeof failure === "string" && (
     /^Cannot activate .+ generation from retired$/iu.test(failure) ||
     /^activate command exited non-zero with status \d+$/u.test(failure) ||
+    /^Process .+ is not retained for reactivation$/u.test(failure) ||
     /^Release .+ retirement quiescence failed: quiet command exited non-zero with status \d+$/u.test(failure)
   )
 }

@@ -836,6 +836,15 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
 
     assert.equal(legacyRecovery.recoveryStatus, "retired_incumbent_accepted")
     assert.equal(daemon.status().generationTransition?.phase, "degraded_active", "guarded recovery migrates a legacy terminal retirement fence")
+
+    transition.phase = "restoring_previous"
+    transition.compensationError = "Process background-jobs-main is not retained for reactivation"
+    daemon.releases.get("v1")?.processes.delete("beacon")
+    await daemon.checkpointGenerationTransition()
+    const absentCoordinatorRecovery = await exactRecovery()
+
+    assert.equal(absentCoordinatorRecovery.jobsStatus, "degraded")
+    assert.equal(daemon.status().generationTransition?.phase, "degraded_active", "terminally absent incumbent coordinator remains guarded jobs-degraded authority")
     await assert.rejects(() => daemon.deploy({releaseId: "bad-v3", releasePath: fixture.root, revision: "bad-v3"}), /health check failed/i)
     assert.equal(daemon.status().generationTransition?.phase, "degraded_active")
     assert.equal(statusRelease(daemon, "v1").processes.find(({id}) => id === "web")?.pid, incumbentWebPid)
