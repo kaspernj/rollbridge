@@ -830,6 +830,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     transition.phase = "retiring_previous"
     transition.error = "Release v1 retirement quiescence failed: quiet command exited non-zero with status 1"
     transition.compensationError = undefined
+    candidate.state = "starting"
     await daemon.checkpointGenerationTransition()
     const legacyRecovery = await exactRecovery()
 

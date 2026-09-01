@@ -1936,7 +1936,9 @@ export default class RollbridgeDaemon {
     if (candidate.releasePath !== transition.candidateReleasePath || candidate.revision !== transition.candidateRevision || ownerConfigDigest(candidate.config) !== transition.configDigest) {
       throw new Error(`Generation transition candidate ${candidate.releaseId} does not retain its exact path, revision, and config authority`)
     }
-    if (candidate.state !== "draining" && candidate.state !== "stopped") throw new Error(`Failed candidate ${candidate.releaseId} must be retired before accepting a retired incumbent`)
+    const recoverableCandidateStates = transition.phase === "retiring_previous" ? ["starting", "draining", "stopped"] : ["draining", "stopped"]
+
+    if (!recoverableCandidateStates.includes(candidate.state)) throw new Error(`Failed candidate ${candidate.releaseId} must be retiring or retired before accepting a retired incumbent`)
     if (this.activeRelease !== previous) throw new Error(`Previous release ${previous.releaseId} is not the authoritative proxy target`)
     const activationConfig = previous.config.processes.find((processConfig) => processConfig.lifecycle.activateCommand !== undefined)
     const coordinator = activationConfig ? previous.getProcesses(activationConfig.id)[0]?.process : undefined
