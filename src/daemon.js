@@ -186,6 +186,28 @@ export default class RollbridgeDaemon {
     return true
   }
 
+  /** Re-establishes durable guardian ownership from an exact committed external-owner bootstrap. */
+  async resetRetiredOwnerRecovery() {
+    if (!this.statePath || !this.config.ownerRecovery || !this.bootstrap) throw new Error("Retired owner reset requires ownerRecovery, statePath, and the exact bootstrap tuple")
+    const state = await readState(this.statePath)
+    const snapshot = state && typeof state === "object" && !Array.isArray(state) ? /** @type {OwnerRecoverySnapshot} */ (state) : undefined
+    const transition = snapshot?.generationTransition
+    const persistedBootstrap = snapshot?.bootstrap
+    const exactBootstrap = snapshot?.activeReleaseId === this.bootstrap.releaseId &&
+      persistedBootstrap?.releaseId === this.bootstrap.releaseId && persistedBootstrap?.releasePath === this.bootstrap.releasePath && persistedBootstrap?.revision === this.bootstrap.revision &&
+      transition?.phase === "committed" && transition.candidateReleaseId === this.bootstrap.releaseId && transition.candidateReleasePath === this.bootstrap.releasePath && transition.candidateRevision === this.bootstrap.revision
+    if (!snapshot || snapshot.recovery?.guardian || !exactBootstrap) throw new Error("Retired owner reset requires an exact committed bootstrap with missing guardian identity")
+    const control = await inspectControlSocket(this.config.control.path)
+    if (control.alive) throw new Error(`Retired owner reset refuses responsive control owner at ${this.config.control.path}`)
+    this.guardianIdentity = {socketPath: `${this.statePath}.guardian.sock`, token: crypto.randomBytes(32).toString("hex")}
+    this.guardian = new GuardianClient(this.guardianIdentity)
+    await this.guardian.launch()
+    this.guardianIdentity.pid = this.guardian.pid
+    this.watchOwnerReplacementEvents()
+    await this.guardian.claimOwner(this.config.ownerRecovery.reconnectGraceMs ?? 30000, this.ownerAuthority())
+    this.logger("retired owner guardian reset prepared", {guardianPid: this.guardianIdentity.pid ?? null, releaseId: this.bootstrap.releaseId})
+  }
+
   /** Connects to the durable process guardian and reconstructs a matching persisted owner snapshot. */
   async initializeOwnerRecovery() {
     if (!this.statePath) throw new Error("ownerRecovery requires statePath")
