@@ -834,7 +834,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     assert.equal(daemon.status().activeReleaseId, "v3")
     assert.equal(daemon.status().generationTransition?.phase, "committed")
     assert.equal(await fetchText(daemon, "/release"), "v3")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "retire:v1", "activate:v3"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
