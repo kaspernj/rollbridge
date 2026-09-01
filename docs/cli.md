@@ -207,6 +207,20 @@ instruction; see [Config reloads](config.md#config-reloads).
 - `--ensure-daemon` — start the daemon first if it isn't running (honors the
   same `--daemon-*` options as `ensure-daemon`).
 
+## `recover-generation-transition`
+
+`rollbridge recover-generation-transition --release-path <path> --release-id <id>
+--revision <sha> --previous-release-id <id> [--config <path>]
+[--accept-retired-incumbent]`
+
+By default, restores the incumbent before clearing an exact failed transition.
+`--accept-retired-incumbent` instead requires an exact `restoring_previous`
+journal, terminal restoration failure, retired candidate, retired incumbent
+coordinator, and live incumbent proxy processes. It safely stops the failed
+candidate and persists a `degraded_active` fence without reactivating either jobs
+generation, reporting `jobsStatus: "degraded"`. Incumbent web survives owner
+recovery, and a fresh normal deployment replaces the fence through normal cutover.
+
 ## `rollback`
 
 ```

@@ -215,17 +215,19 @@ export async function runCli(argv) {
 
   program
     .command("recover-generation-transition")
-    .description("Restore the exact incumbent and retire a failed pre-commit generation candidate.")
+    .description("Recover an exact failed pre-commit generation transition.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
     .requiredOption("--release-path <path>", "Failed candidate release path")
     .requiredOption("--release-id <id>", "Failed candidate release id")
     .requiredOption("--revision <sha>", "Failed candidate revision")
     .requiredOption("--previous-release-id <id>", "Expected authoritative incumbent release id")
+    .option("--accept-retired-incumbent", "Persist terminal restoration as degraded incumbent web authority")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const response = await sendControlCommand({
         command: {
+          acceptRetiredIncumbent: options.acceptRetiredIncumbent === true,
           command: "recover-generation-transition",
           previousReleaseId: options.previousReleaseId,
           releaseId: options.releaseId,

@@ -44,7 +44,7 @@ test("completion bash prints a sourceable script with commands and option flags"
   assert.match(output, /compgen -W "daemon deploy rollback recover-generation-transition ensure-daemon status stop restart shutdown validate doctor logs events predeploy-cleanup recover completion"/)
   // A command's own options are completed after the command.
   assert.match(output, /deploy\)\n\s+opts="[^"]*--release-path[^"]*"/)
-  assert.match(output, /recover-generation-transition\)\n\s+opts="--config --release-path --release-id --revision --previous-release-id"/)
+  assert.match(output, /recover-generation-transition\)\n\s+opts="--config --release-path --release-id --revision --previous-release-id --accept-retired-incumbent"/)
   assert.match(output, /ensure-daemon\)\n\s+opts="[^"]*--daemon-runtime-path[^"]*"/)
   assert.match(output, /restart\)\n\s+opts="[^"]*--policy[^"]*"/)
 })
@@ -55,7 +55,7 @@ test("completion zsh prints a #compdef script with per-command options", async (
   assert.match(output, /^#compdef rollbridge/)
   assert.match(output, /compdef _rollbridge rollbridge/)
   assert.match(output, /commands=\(daemon deploy rollback recover-generation-transition ensure-daemon status stop restart shutdown validate doctor logs events predeploy-cleanup recover completion\)/)
-  assert.match(output, /recover-generation-transition\) compadd -- --config --release-path --release-id --revision --previous-release-id/)
+  assert.match(output, /recover-generation-transition\) compadd -- --config --release-path --release-id --revision --previous-release-id --accept-retired-incumbent/)
   assert.match(output, /events\) compadd -- [^\n]*--limit/)
 })
 
