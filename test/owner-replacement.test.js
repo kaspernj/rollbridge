@@ -11,7 +11,7 @@ import test from "node:test"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {openControlSession, sendControlCommand} from "../src/control-client.js"
-import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic} from "../src/daemon.js"
+import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic, ownerConfigDigest, ownerReplacementTransitionAuthorityMatches} from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
 import {findAvailablePort} from "../src/port-allocator.js"
 import {waitForProcessExit} from "./support/process.js"
@@ -1746,6 +1746,38 @@ test("config-changing owner replacement proceeds after activation compensation c
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }
+})
+
+test("owner replacement admits only the unresolved transition's exact retained candidate config", () => {
+  const exactConfig = normalizeConfig(config({controlPath: "/tmp/exact.sock", extraCompanion: false, statePath: "/tmp/exact-state.json"}))
+  const unrelatedConfig = normalizeConfig(config({controlPath: "/tmp/unrelated.sock", extraCompanion: true, statePath: "/tmp/exact-state.json"}))
+  const replacementConfig = structuredClone(unrelatedConfig)
+
+  replacementConfig.releaseRetention.keep += 1
+  const transition = /** @type {Parameters<typeof ownerReplacementTransitionAuthorityMatches>[1]} */ (/** @type {import("../src/json.js").JsonValue} */ ({
+    candidateReleaseId: "v2",
+    candidateReleasePath: "/srv/releases/v2",
+    candidateRevision: "revision-v2",
+    configDigest: ownerConfigDigest(exactConfig)
+  }))
+  /**
+   * @param {import("../src/config.js").RollbridgeConfig | undefined} candidateConfig - Candidate authority.
+   * @param {string} [releasePath] - Retained candidate path.
+   * @returns {boolean} Whether replacement is admitted.
+   */
+  const admitted = (candidateConfig, releasePath = "/srv/releases/v2") => ownerReplacementTransitionAuthorityMatches(
+    /** @type {Parameters<typeof ownerReplacementTransitionAuthorityMatches>[0]} */ (/** @type {import("../src/json.js").JsonValue} */ ({
+      config: unrelatedConfig,
+      releaseConfigs: candidateConfig ? {v2: candidateConfig} : {},
+      snapshot: {releases: [{releaseId: "v2", releasePath, revision: "revision-v2"}]}
+    })),
+    transition,
+    ownerConfigDigest(replacementConfig)
+  )
+
+  assert.equal(admitted(exactConfig), true)
+  assert.equal(admitted(unrelatedConfig), false)
+  assert.equal(admitted(exactConfig, "/srv/releases/wrong"), false)
 })
 
 test("replacement publishes an unchanged control path only after incumbent retirement", async () => {
