@@ -799,7 +799,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     await assert.rejects(() => exactRecovery({previousReleaseId: "wrong-v1"}), /refusing stale recovery/i)
     await assert.rejects(() => exactRecovery({revision: "wrong-v2"}), /exact same release, path, revision, and config authority/i)
     transition.phase = "retiring_failed_candidate"
-    await assert.rejects(() => exactRecovery(), /exactly restoring_previous/i)
+    await assert.rejects(() => exactRecovery(), /requires retiring_previous or restoring_previous/i)
     transition.phase = "restoring_previous"
     const terminalFailure = transition.compensationError
 
@@ -826,6 +826,15 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
 
     assert.equal(/** @type {{phase?: string} | undefined} */ (persisted?.generationTransition)?.phase, "degraded_active")
+
+    transition.phase = "retiring_previous"
+    transition.error = "Release v1 retirement quiescence failed: quiet command exited non-zero with status 1"
+    transition.compensationError = undefined
+    await daemon.checkpointGenerationTransition()
+    const legacyRecovery = await exactRecovery()
+
+    assert.equal(legacyRecovery.recoveryStatus, "retired_incumbent_accepted")
+    assert.equal(daemon.status().generationTransition?.phase, "degraded_active", "guarded recovery migrates a legacy terminal retirement fence")
     await assert.rejects(() => daemon.deploy({releaseId: "bad-v3", releasePath: fixture.root, revision: "bad-v3"}), /health check failed/i)
     assert.equal(daemon.status().generationTransition?.phase, "degraded_active")
     assert.equal(statusRelease(daemon, "v1").processes.find(({id}) => id === "web")?.pid, incumbentWebPid)

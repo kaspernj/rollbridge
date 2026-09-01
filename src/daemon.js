@@ -1895,7 +1895,7 @@ export default class RollbridgeDaemon {
     if (transition.previousReleaseId !== identity.previousReleaseId) {
       throw new Error(`Generation transition previous release is ${transition.previousReleaseId}; refusing stale recovery for ${identity.previousReleaseId}`)
     }
-    if (transition.phase !== "activating_candidate" && transition.phase !== "restoring_previous" && transition.phase !== "retiring_failed_candidate" && transition.phase !== "degraded_active") {
+    if (transition.phase !== "activating_candidate" && transition.phase !== "retiring_previous" && transition.phase !== "restoring_previous" && transition.phase !== "retiring_failed_candidate" && transition.phase !== "degraded_active") {
       throw new Error(`Generation transition ${transition.candidateReleaseId} at ${transition.phase} is not a safe failed pre-commit transition`)
     }
     if (transition.phase === "degraded_active" && !identity.acceptRetiredIncumbent) {
@@ -1923,8 +1923,10 @@ export default class RollbridgeDaemon {
    * @returns {Promise<Record<string, JsonValue>>} Explicit degraded recovery result.
    */
   async acceptRetiredIncumbentTransition(transition) {
-    if (transition.phase !== "restoring_previous" && transition.phase !== "degraded_active") throw new Error(`Retired-incumbent recovery requires exactly restoring_previous; transition ${transition.candidateReleaseId} is at ${transition.phase}`)
-    if (!terminalRetirementFailure(transition.compensationError)) throw new Error("Retired-incumbent recovery requires a recorded restoration failure compatible with terminal retirement")
+    if (transition.phase !== "retiring_previous" && transition.phase !== "restoring_previous" && transition.phase !== "degraded_active") throw new Error(`Retired-incumbent recovery requires retiring_previous or restoring_previous; transition ${transition.candidateReleaseId} is at ${transition.phase}`)
+    const retirementFailure = transition.phase === "retiring_previous" ? transition.error : transition.compensationError
+
+    if (!terminalRetirementFailure(retirementFailure)) throw new Error("Retired-incumbent recovery requires a recorded restoration failure compatible with terminal retirement")
     if (!transition.previousReleaseId) throw new Error("Retired-incumbent recovery requires a retained previous release")
     const candidate = this.releases.get(transition.candidateReleaseId)
     const previous = this.releases.get(transition.previousReleaseId)
@@ -1958,6 +1960,7 @@ export default class RollbridgeDaemon {
 
     if (transition.phase === "degraded_active") return result
     const previousError = transition.error
+    const previousPhase = transition.phase
     const previousJournalRevision = transition.journalRevision
     const previousUpdatedAt = transition.updatedAt
 
@@ -1968,7 +1971,7 @@ export default class RollbridgeDaemon {
     try {
       await this.checkpointGenerationTransition()
     } catch (error) {
-      transition.phase = "restoring_previous"
+      transition.phase = previousPhase
       transition.error = previousError
       transition.journalRevision = previousJournalRevision
       transition.updatedAt = previousUpdatedAt
@@ -2962,7 +2965,8 @@ export function ownerReplacementTransitionAuthorityMatches(transfer, transition,
 function terminalRetirementFailure(failure) {
   return typeof failure === "string" && (
     /^Cannot activate .+ generation from retired$/iu.test(failure) ||
-    /^activate command exited non-zero with status \d+$/u.test(failure)
+    /^activate command exited non-zero with status \d+$/u.test(failure) ||
+    /^Release .+ retirement quiescence failed: quiet command exited non-zero with status \d+$/u.test(failure)
   )
 }
 
