@@ -1652,7 +1652,10 @@ export default class RollbridgeDaemon {
     let retirementFailure = activationLifecycle ? undefined : previousRelease?.retirementError
 
     if (transition.phase === "candidate_ready") {
-      if (previousRelease && !transition.degradedIncumbent) await this.updateGenerationTransition("retiring_previous")
+      // Generation activation is the authority switch: activate the healthy candidate
+      // before asking the incumbent to quiesce. The committed path below starts the
+      // incumbent drain asynchronously so deploy success never waits for old work.
+      if (previousRelease && !transition.degradedIncumbent && !activationLifecycle) await this.updateGenerationTransition("retiring_previous")
       else await this.updateGenerationTransition("previous_retired")
     }
 
@@ -1946,12 +1949,6 @@ export default class RollbridgeDaemon {
 
     if ((!coordinator && !missingRetiredCoordinator) || (coordinator && coordinator.status().lifecycleRole !== "retired")) throw new Error(`Previous release ${previous.releaseId} does not retain a retired or terminally absent generation coordinator`)
     if (!releaseOwnsLiveProxyTraffic(previous)) throw new Error(`Previous release ${previous.releaseId} no longer owns live proxy/web traffic`)
-    await candidate.drainAndStop(candidate.config.proxy.drainTimeoutMs, candidate.config)
-    const candidateProcesses = candidate.status().processes
-
-    if (candidate.state !== "stopped" || candidateProcesses.some(({pid, state}) => pid !== undefined || (state !== "stopped" && state !== "failed"))) {
-      throw new Error(`Failed candidate ${candidate.releaseId} did not fully stop during retired-incumbent recovery`)
-    }
     if (this.activeRelease !== previous || !releaseOwnsLiveProxyTraffic(previous)) throw new Error(`Previous release ${previous.releaseId} lost live proxy/web authority during retired-incumbent recovery`)
     const result = /** @type {Record<string, JsonValue>} */ ({
       activeReleaseId: previous.releaseId,
@@ -1962,7 +1959,10 @@ export default class RollbridgeDaemon {
       recoveryStatus: "retired_incumbent_accepted"
     })
 
-    if (transition.phase === "degraded_active") return result
+    if (transition.phase === "degraded_active") {
+      if (candidate.state !== "stopped") void this.drainAndPrune(candidate, candidate.config)
+      return result
+    }
     const previousError = transition.error
     const previousPhase = transition.phase
     const previousJournalRevision = transition.journalRevision
@@ -1986,6 +1986,7 @@ export default class RollbridgeDaemon {
       }
       throw new Error(`retired-incumbent recovery checkpoint failed: ${error instanceof Error ? error.message : String(error)}`, {cause: error})
     }
+    if (candidate.state !== "stopped") void this.drainAndPrune(candidate, candidate.config)
     this.logger("retired incumbent accepted as jobs-degraded", result)
     return result
   }

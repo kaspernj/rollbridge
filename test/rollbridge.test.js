@@ -806,6 +806,8 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     transition.compensationError = "incumbent activation was temporarily unavailable"
     await assert.rejects(() => exactRecovery(), /terminal retirement/i)
     transition.compensationError = terminalFailure
+    await incumbentCoordinator.setLifecycleRole("retired")
+    assert.equal(incumbentCoordinator.status().lifecycleRole, "retired")
     const checkpoint = daemon.checkpointGenerationTransition.bind(daemon)
 
     daemon.checkpointGenerationTransition = async () => { throw new Error("injected checkpoint failure") }
@@ -821,7 +823,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     assert.equal(daemon.status().generationTransition?.phase, "degraded_active")
     assert.equal(statusRelease(daemon, "v1").processes.find(({id}) => id === "web")?.pid, incumbentWebPid)
     assert.equal(await fetchText(daemon, "/release"), "v1")
-    assert.equal(candidate.state, "stopped")
+    assert.ok(["draining", "stopped"].includes(candidate.state), "guarded recovery returns before failed-candidate drain completion")
     assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), eventsBeforeRecovery, "recovery must not activate either retained generation")
     const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
 
@@ -853,7 +855,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     assert.equal(daemon.status().activeReleaseId, "v3")
     assert.equal(daemon.status().generationTransition?.phase, "committed")
     assert.equal(await fetchText(daemon, "/release"), "v3")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
