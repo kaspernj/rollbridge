@@ -1780,6 +1780,76 @@ test("owner replacement admits only the unresolved transition's exact retained c
   assert.equal(admitted(exactConfig, "/srv/releases/wrong"), false)
 })
 
+test("owner replacement preserves accepted degraded incumbent web authority", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-degraded-active-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const lifecycleLogPath = path.join(root, "generation.lifecycle")
+  const retiredMarkerPath = path.join(root, "incumbent.retired")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
+  const proxyPort = await findAvailablePort({host: "127.0.0.1", range: {from: 24000, to: 24999}, usedPorts: new Set()})
+  let owner
+  let replacement
+  const failedConfig = () => {
+    const raw = config({activationLogPath: lifecycleLogPath, controlPath: socketPath, extraCompanion: false, proxyPort, statePath})
+    const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (raw.processes)
+    const worker = processes.find((processConfig) => processConfig.id === "worker")
+    const workerLifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (worker?.lifecycle)
+    const generation = processes.find((processConfig) => processConfig.id === "generation-main")
+    const lifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (generation?.lifecycle)
+
+    delete workerLifecycle.drainCommand
+    workerLifecycle.drainTimeoutMs = 0
+    lifecycle.activateCommand = `[ "$ROLLBRIDGE_RELEASE_ID" != v2 ] || exit 24; [ "$ROLLBRIDGE_RELEASE_ID" != v1 ] || [ ! -f ${JSON.stringify(retiredMarkerPath)} ] || exit 26; printf 'activate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+    lifecycle.quietCommand = `touch ${JSON.stringify(retiredMarkerPath)}; printf 'retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+    return raw
+  }
+
+  try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path)])
+    await writeConfig(configPath, failedConfig())
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: socketPath})
+    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath}), /pre-commit compensation failed.*status 26/i)
+    const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const webPid = releaseProcessPid(before, "v1", "web")
+
+    assert.equal(/** @type {{releaseId: string, state: string}[]} */ (before.releases).find(({releaseId}) => releaseId === "v2")?.state, "draining")
+    const recovery = await sendControlCommand({command: {
+      acceptRetiredIncumbent: true,
+      command: "recover-generation-transition",
+      previousReleaseId: "v1",
+      releaseId: "v2",
+      releasePath: v2Path,
+      revision: "v2"
+    }, path: socketPath})
+    const accepted = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(recovery.jobsStatus, "degraded")
+    assert.equal(/** @type {{releaseId: string, state: string}[]} */ (accepted.releases).find(({releaseId}) => releaseId === "v2")?.state, "stopped")
+    assert.equal(/** @type {{phase?: string}} */ (accepted.generationTransition).phase, "degraded_active")
+    replacement = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(replacement, "owner replacement committed")
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/release`)
+
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(/** @type {{phase?: string}} */ (recovered.generationTransition).phase, "degraded_active")
+    assert.equal(releaseProcessPid(recovered, "v1", "web"), webPid)
+    assert.equal(response.status, 200)
+    assert.equal((await response.text()).trim(), "v1")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\n")
+  } finally {
+    for (const child of [owner, replacement]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
 test("replacement publishes an unchanged control path only after incumbent retirement", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-same-control-"))
   const socketPath = path.join(root, "rollbridge.sock")

@@ -215,10 +215,11 @@ instruction; see [Config reloads](config.md#config-reloads).
 
 By default, restores the incumbent before clearing an exact failed transition.
 `--accept-retired-incumbent` instead requires an exact `restoring_previous`
-journal, terminal restoration failure, fully stopped candidate, retired incumbent
-coordinator, and live incumbent proxy processes. It clears only that journal,
-does not reactivate or restart either jobs generation, preserves incumbent web,
-and reports `jobsStatus: "degraded"`. Run a fresh normal deployment immediately.
+journal, terminal restoration failure, retired candidate, retired incumbent
+coordinator, and live incumbent proxy processes. It safely stops the failed
+candidate and persists a `degraded_active` fence without reactivating either jobs
+generation, reporting `jobsStatus: "degraded"`. Incumbent web survives owner
+recovery, and a fresh normal deployment replaces the fence through normal cutover.
 
 ## `rollback`
 
