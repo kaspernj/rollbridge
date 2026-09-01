@@ -1,5 +1,6 @@
 // @ts-check
 
+import {spawn} from "node:child_process"
 import {EventEmitter} from "node:events"
 import ManagedProcess from "./managed-process.js"
 import {findAvailablePort} from "./port-allocator.js"
@@ -13,6 +14,40 @@ import {waitForHealth} from "./health.js"
  * @typedef {{activatedAt: string | undefined, connectionCount: number, connections: ReleaseConnections, drainStartedAt: string | undefined, ports: Record<string, number>, processes: import("./managed-process.js").ManagedProcessStatus[], releaseId: string, releasePath: string, retirementError: string | undefined, revision: string, state: ReleaseState, stoppedAt: string | undefined}} ReleaseStatus
  * @typedef {{count?: number, guardianKey?: string, index?: number, instanceId?: string, shouldRestart?: () => boolean}} BuildProcessOptions
  */
+
+
+/**
+ * Runs a lifecycle authority command in the current daemon so nested legacy guardians
+ * cannot silently downgrade lifecycle timeout semantics for newly deployed processes.
+ * @param {{command: string, cwd: string, env: Record<string, string>, label: string, timeoutMs: number}} options - Command contract.
+ * @returns {Promise<void>} Completion after an acknowledged command.
+ */
+async function runLifecycleCommand({command, cwd, env, label, timeoutMs}) {
+  await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
+    const child = spawn(command, {cwd, detached: true, env: {...process.env, ...env}, shell: true, stdio: "ignore"})
+    let settled = false
+    /** @param {Error | undefined} error - Completion failure. */
+    /** @param {Error | undefined} error - Completion failure. */
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve()
+    }
+    const timer = setTimeout(() => {
+      if (child.pid) {
+        try { process.kill(-child.pid, "SIGKILL") } catch { /* The command already exited. */ }
+      }
+      finish(new Error(`${label} timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+    child.once("error", finish)
+    child.once("exit", (code, signal) => {
+      if (code === 0) finish(undefined)
+      else finish(new Error(`${label} exited non-zero with ${signal ? `signal ${signal}` : `status ${code ?? "unknown"}`}`))
+    })
+  }))
+}
 
 /**
  * @param {string} id - Process id.
@@ -276,7 +311,19 @@ export default class ReleaseGroup extends EventEmitter {
     const [instance] = this.getProcesses(processConfig.id)
 
     if (!instance) throw new Error(`Generation activation process ${processConfig.id} is not running for release ${this.releaseId}`)
-    await instance.process.activateStrict()
+    if (instance.process.constructor.name === ManagedProcess.name) {
+      await instance.process.activateStrict()
+    } else {
+      const definition = this.processDefinition(processConfig)
+      await runLifecycleCommand({
+        command: /** @type {string} */ (processConfig.lifecycle.activateCommand),
+        cwd: /** @type {string} */ (definition.cwd),
+        env: /** @type {Record<string, string>} */ (definition.env),
+        label: "activate command",
+        timeoutMs: processConfig.lifecycle.activateTimeoutMs ?? 30000
+      })
+      await instance.process.setLifecycleRole("active")
+    }
   }
 
   /** Restores the retained generation coordinator to its active role in place. */
