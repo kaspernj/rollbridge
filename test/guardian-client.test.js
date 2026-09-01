@@ -70,6 +70,21 @@ test("guardian runs a strict activation lifecycle command for the exact register
   }
 })
 
+test("guardian preserves a custom activation timeout in the registered process definition", async () => {
+  const fixture = await createGuardian()
+  const processInstance = fixture.client.process("candidate-activation-timeout", {
+    ...definition("candidate-activation-timeout"),
+    lifecycle: {activateCommand: "sleep 0.05", activateTimeoutMs: 10, drainTimeoutMs: 0}
+  })
+
+  try {
+    await processInstance.start()
+    await assert.rejects(() => processInstance.activateStrict(), /activate command timed out after 10ms/i)
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
 test("client reactivates a retained process through a guardian without the reactivation command", async () => {
   const fixture = await createGuardian()
   const lifecyclePath = path.join(fixture.root, "lifecycle.log")
@@ -1500,6 +1515,14 @@ test("first upgrade migrates a real pre-split guardian without replacing its own
     assert.deepEqual(prepared.ownerState, ownerState)
     assert.deepEqual(await upgraded.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: ownerState.snapshot}), {committed: true})
     await committed
+    assert.equal(restored.status().pid, legacyPid)
+
+    const currentProcess = upgraded.process("release:v2:current-worker", {
+      ...definition("current-worker"),
+      lifecycle: {activateCommand: "sleep 0.05", activateTimeoutMs: 10, drainTimeoutMs: 0}
+    })
+    await currentProcess.start()
+    await assert.rejects(() => currentProcess.activateStrict(), /activate command timed out after 10ms/i)
     assert.equal(restored.status().pid, legacyPid)
     await upgraded.shutdown()
     await upgraded.guardianExit()

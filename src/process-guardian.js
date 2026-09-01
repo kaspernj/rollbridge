@@ -631,7 +631,11 @@ async function execute(request, socket) {
       },
       shouldRestart: () => record.desired
     }
-    const managedProcess = legacyGuardian
+    // Only process keys inventoried from the legacy guardian remain delegated to it.
+    // New release processes must be owned by the current guardian so current lifecycle
+    // fields (including activation timeouts) are enforced instead of downgraded by an
+    // older guardian protocol implementation.
+    const managedProcess = recoversLegacyProcess && legacyGuardian
       ? legacyGuardian.process(request.key, managedDefinition)
       : new ManagedProcess(managedDefinition)
 
