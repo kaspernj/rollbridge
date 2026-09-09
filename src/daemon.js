@@ -27,6 +27,10 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "restoring_previous" | "retiring_failed_candidate" | "degraded_active" | "committed_pending" | "committed" | "restoring_committed"} GenerationTransitionPhase
  * @typedef {{activationError?: string, activationLifecycle?: boolean, candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, compensationError?: string, configDigest: string, degradedIncumbent?: boolean, error?: string, journalRevision?: number, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
  * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, generationTransition?: GenerationTransition, ownerRecovery: {configDigest: string, ready: boolean} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {Omit<import("./managed-process.js").ManagedProcessStatus, "logs">} ManagedProcessStatusWithoutLogs
+ * @typedef {Omit<import("./release-group.js").ReleaseStatus, "processes"> & {processes: ManagedProcessStatusWithoutLogs[]}} ReleaseStatusWithoutLogs
+ * @typedef {Omit<ProcessStatus, "process"> & {process: ManagedProcessStatusWithoutLogs}} ProcessStatusWithoutLogs
+ * @typedef {Omit<DaemonStatus, "releases" | "services" | "singletons"> & {releases: ReleaseStatusWithoutLogs[], services: ProcessStatusWithoutLogs[], singletons: ProcessStatusWithoutLogs[]}} DaemonStatusWithoutLogs
  * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
  * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>}} OwnerRecoverySnapshot
  * @typedef {{authority: JsonValue, config: import("./config.js").RollbridgeConfig, listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>, listenerSourceId?: string, recovery?: {command: JsonValue, reconnectGraceMs: number, startupTimeoutMs: number}, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, retiredListenerHandoff?: number, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>, snapshot: OwnerRecoverySnapshot}} PrivateOwnerState
@@ -1371,7 +1375,7 @@ export default class RollbridgeDaemon {
     }
 
     if (commandName === "status") {
-      return this.status()
+      return this.status({includeLogs: statusIncludeLogs(data.includeLogs)})
     }
 
     if (commandName === "events") {
@@ -2913,8 +2917,10 @@ export default class RollbridgeDaemon {
     return this.proxyPort
   }
 
-  /** @returns {DaemonStatus} Status payload. */
-  status() {
+  /** @overload @returns {DaemonStatus} Full status payload. */
+  /** @overload @param {{includeLogs: false}} options - Log-free status response options. @returns {DaemonStatusWithoutLogs} Log-free status payload. */
+  /** @param {{includeLogs?: boolean}} [options] - Status response options. @returns {DaemonStatus | DaemonStatusWithoutLogs} Status payload. */
+  status({includeLogs = true} = {}) {
     // Re-check liveness and prune the dead permanently, so the list self-clears as the operator
     // stops the leftovers (e.g. via `rollbridge recover`). Pruning (not just filtering) matters:
     // a cleared orphan must not reappear if the OS later recycles its pid for an unrelated process.
@@ -2924,7 +2930,7 @@ export default class RollbridgeDaemon {
     const singletonOwnerReleaseIds = new Set(this.singletonReleaseIds.values())
     const transitionReleaseIds = this.generationTransitionReleaseIds()
 
-    return {
+    const status = {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,
       application: this.config.application,
       bootstrap: this.bootstrap ? {...this.bootstrap} : undefined,
@@ -2955,6 +2961,8 @@ export default class RollbridgeDaemon {
         process: processInstance.status()
       }))
     }
+
+    return includeLogs ? status : withoutStatusProcessLogs(status)
   }
 }
 
@@ -2964,6 +2972,50 @@ export default class RollbridgeDaemon {
  */
 export function ownerConfigDigest(config) {
   return crypto.createHash("sha256").update(JSON.stringify(config)).digest("hex")
+}
+
+/**
+ * Removes captured output from a live status response without changing any other status field.
+ * @param {DaemonStatus} status - Full status payload.
+ * @returns {DaemonStatusWithoutLogs} Log-free status payload.
+ */
+function withoutStatusProcessLogs(status) {
+  return {
+    ...status,
+    releases: status.releases.map((release) => ({
+      ...release,
+      processes: release.processes.map(withoutProcessLogs)
+    })),
+    services: status.services.map(({process, ...service}) => ({
+      ...service,
+      process: withoutProcessLogs(process)
+    })),
+    singletons: status.singletons.map(({process, ...singleton}) => ({
+      ...singleton,
+      process: withoutProcessLogs(process)
+    }))
+  }
+}
+
+/**
+ * @param {import("./managed-process.js").ManagedProcessStatus} processStatus - Full managed-process status.
+ * @returns {ManagedProcessStatusWithoutLogs} Status without captured process output.
+ */
+function withoutProcessLogs(processStatus) {
+  const {logs: _logs, ...withoutLogs} = processStatus
+
+  return withoutLogs
+}
+
+/**
+ * @param {JsonValue} value - Optional status request field.
+ * @returns {boolean} Whether captured process output is included.
+ */
+function statusIncludeLogs(value) {
+  if (value === undefined) return true
+  if (typeof value !== "boolean") throw new Error("includeLogs must be a boolean")
+
+  return value
 }
 
 /**

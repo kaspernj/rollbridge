@@ -253,7 +253,7 @@ stays safe.
 ## `status`
 
 ```
-rollbridge status [--config <path>]
+rollbridge status [--config <path>] [--no-logs]
 ```
 
 Prints the daemon status JSON: the active release id, the proxy address, and —
@@ -263,6 +263,12 @@ per release, service, and singleton process — its `state`, `pid`, automatic
 Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
 `lastMemoryRestartAt`, and `children` (the process tree: each group member's
 `pid`, `command`, and `rssBytes`).
+
+`--no-logs` omits only the captured `logs` array from release, service, and
+singleton process statuses. Use it for bounded machine-readable lifecycle
+attestations that do not need process output. The equivalent control request is
+`{"command":"status","includeLogs":false}`; omitted `includeLogs` continues to
+return the complete status payload.
 
 `daemonRuntime` identifies the immutable Rollbridge runtime serving the proxy:
 its runtime `format`, package `version`, content `digest`, and absolute `path`.

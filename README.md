@@ -576,6 +576,7 @@ Inspect state:
 
 ```bash
 rollbridge status --config rollbridge.js
+rollbridge status --no-logs --config rollbridge.js
 ```
 
 `status` reports each managed process's `state`, `pid`, recent `logs`, last
@@ -586,6 +587,10 @@ and why it last started (`lastStartReason`: `deploy`, `crash`, `manual`, or
 `rollbridge events`. For memory-supervised processes it also reports current
 `rssBytes`, `memoryRestarts`, `lastMemoryRestartAt`, and `children` (the sampled
 process tree — each group member's `pid`, `command`, and `rssBytes`).
+
+For machine lifecycle attestations that do not need captured process output,
+pass `--no-logs`. It returns the same status projection while omitting only each
+release, service, and singleton process's `logs` array.
 
 Print the recent captured stdout/stderr per process (a one-shot snapshot of the
 retained `outputLines`, not a live stream):
