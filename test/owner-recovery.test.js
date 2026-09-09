@@ -720,7 +720,7 @@ test("guardian recovery becomes ready before replaying a gated generation hook",
 
     assert.equal(recovering.daemonPid, recoveredDaemonPid)
     assert.equal(recovering.ownerRecovery?.ready, true)
-    assert.equal(recovering.generationTransition?.phase, "retiring_previous")
+    assert.equal(recovering.generationTransition?.phase, "committed_pending")
     assert.equal(typeof guardianPid, "number")
     await assert.rejects(
       sendControlCommand({command: {command: "stop", releaseId: "v1"}, path: fixture.socketPath}),
@@ -739,7 +739,7 @@ test("guardian recovery becomes ready before replaying a gated generation hook",
     await fs.writeFile(retirementGatePath, "release retirement\n")
     await waitForProcessExit(recoveredDaemonPid, 5000)
     await waitForProcessExit(guardianPid, 5000)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v1", "activate:v2", "retire:v2"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "activate:v2", "retire:v1", "retire:v2"])
   } finally {
     await fs.writeFile(retirementGatePath, "release retirement\n").catch(() => undefined)
     await sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath}).catch(() => undefined)
