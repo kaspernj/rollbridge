@@ -273,11 +273,12 @@ export async function runCli(argv) {
   program
     .command("status")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--no-logs", "Omit captured stdout/stderr from process statuses")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const response = await sendControlCommand({
-        command: {command: "status"},
+        command: {command: "status", ...(options.logs ? {} : {includeLogs: false})},
         path: config.control.path
       })
 
