@@ -1,0 +1,1 @@
+- Migrated all Rollbridge tests to `@velocious/testing` declarations, lifecycle APIs, and native `expect` matchers. Lint now rejects Node test and assertion imports in tests.

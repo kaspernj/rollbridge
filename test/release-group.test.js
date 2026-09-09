@@ -1,9 +1,10 @@
 // @ts-check
 
-import assert from "node:assert/strict"
-import test from "node:test"
+import {describe, expect, test} from "@velocious/testing"
 import ReleaseGroup from "../src/release-group.js"
 import {normalizeConfig} from "../src/config.js"
+
+describe("release-group", () => {
 
 /**
  * @param {import("../src/json.js").JsonValue} webProcess - The single proxied process definition.
@@ -35,8 +36,8 @@ test("templates interpolate values from the daemon environment", () => {
   try {
     const managed = release.buildProcess(release.config.processes[0])
 
-    assert.equal(managed.command, "run --token from-daemon")
-    assert.equal(managed.env.DOWNSTREAM_TOKEN, "from-daemon")
+    expect(managed.command).toBe("run --token from-daemon")
+    expect(managed.env.DOWNSTREAM_TOKEN).toBe("from-daemon")
   } finally {
     delete process.env.ROLLBRIDGE_ENV_TEST
   }
@@ -56,15 +57,15 @@ test("replica processes get a replica index, count, and template context", () =>
   const workerConfig = release.config.processes[1]
   const replica = release.buildProcess(workerConfig, {count: 3, index: 1, instanceId: "worker#1"})
 
-  assert.equal(replica.id, "worker#1")
-  assert.equal(replica.command, "worker 1/3")
-  assert.equal(replica.env.ROLLBRIDGE_REPLICA_INDEX, "1")
-  assert.equal(replica.env.ROLLBRIDGE_REPLICA_COUNT, "3")
-  assert.equal(replica.env.ROLLBRIDGE_PROCESS_ID, "worker")
-  assert.equal(replica.env.SLOT, "1")
+  expect(replica.id).toBe("worker#1")
+  expect(replica.command).toBe("worker 1/3")
+  expect(replica.env.ROLLBRIDGE_REPLICA_INDEX).toBe("1")
+  expect(replica.env.ROLLBRIDGE_REPLICA_COUNT).toBe("3")
+  expect(replica.env.ROLLBRIDGE_PROCESS_ID).toBe("worker")
+  expect(replica.env.SLOT).toBe("1")
 })
 
-test("a referenced daemon environment variable that is unset fails fast", () => {
+test("a referenced daemon environment variable that is unset fails fast", async () => {
   const release = buildRelease({
     command: "run {{env.ROLLBRIDGE_ENV_MISSING}}",
     id: "web",
@@ -74,10 +75,7 @@ test("a referenced daemon environment variable that is unset fails fast", () => 
 
   delete process.env.ROLLBRIDGE_ENV_MISSING
 
-  assert.throws(
-    () => release.buildProcess(release.config.processes[0]),
-    /Missing template value for \{\{env.ROLLBRIDGE_ENV_MISSING\}\}/
-  )
+  await expect(() => release.buildProcess(release.config.processes[0])).toThrow(/Missing template value for \{\{env.ROLLBRIDGE_ENV_MISSING\}\}/)
 })
 
 test("committed generation restoration does not start after shutdown begins", async () => {
@@ -92,6 +90,7 @@ test("committed generation restoration does not start after shutdown begins", as
   }
   release.processes.set("web", process)
 
-  await assert.rejects(() => release.restartCommittedGeneration(), /shutting down/)
-  assert.equal(starts, 0)
+  await expect(release.restartCommittedGeneration()).rejects.toThrow(/shutting down/)
+  expect(starts).toBe(0)
+})
 })

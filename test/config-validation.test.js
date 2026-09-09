@@ -1,12 +1,13 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, expect, test} from "@velocious/testing"
 import {normalizeConfig, validateConfig} from "../src/config.js"
 import {runCli} from "../src/cli.js"
+
+describe("config-validation", () => {
 
 test("validateConfig collects duplicate ids, proxied ports, and policy combinations", () => {
   const {issues} = validateConfig({
@@ -20,9 +21,9 @@ test("validateConfig collects duplicate ids, proxied ports, and policy combinati
   })
   const messages = issues.map((issue) => issue.message)
 
-  assert.ok(messages.includes("Duplicate process id: web"), `expected duplicate id issue in ${JSON.stringify(messages)}`)
-  assert.ok(messages.includes("Proxied process web must define a port range"), `expected missing proxied port issue in ${JSON.stringify(messages)}`)
-  assert.ok(issues.every((issue) => typeof issue.fix === "string" && issue.fix.length > 0), "every issue should include an example fix")
+  expect({value: Boolean(messages.includes("Duplicate process id: web")), context: `expected duplicate id issue in ${JSON.stringify(messages)}`}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("Proxied process web must define a port range")), context: `expected missing proxied port issue in ${JSON.stringify(messages)}`}).toMatchObject({value: true})
+  expect(issues.every((issue) => typeof issue.fix === "string" && issue.fix.length > 0)).toBe(true)
 })
 
 test("validateConfig reports invalid ranges and missing proxied process without throwing", () => {
@@ -35,8 +36,8 @@ test("validateConfig reports invalid ranges and missing proxied process without 
   })
   const messages = issues.map((issue) => issue.message)
 
-  assert.ok(messages.includes("processes[0].port must be a positive port or valid {from, to} range"), `expected invalid range issue in ${JSON.stringify(messages)}`)
-  assert.ok(messages.includes("Config must define exactly one proxied process; found 0"), `expected missing proxied process issue in ${JSON.stringify(messages)}`)
+  expect({value: Boolean(messages.includes("processes[0].port must be a positive port or valid {from, to} range")), context: `expected invalid range issue in ${JSON.stringify(messages)}`}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("Config must define exactly one proxied process; found 0")), context: `expected missing proxied process issue in ${JSON.stringify(messages)}`}).toMatchObject({value: true})
 })
 
 test("validateConfig returns a normalized config and no issues for a valid config", () => {
@@ -49,10 +50,10 @@ test("validateConfig returns a normalized config and no issues for a valid confi
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.deepEqual(issues, [])
-  assert.equal(config.processes.length, 1)
-  assert.equal(config.processes[0].policy, "proxied")
-  assert.equal(config.proxy.port, 8182)
+  expect(issues).toEqual([])
+  expect(config.processes.length).toBe(1)
+  expect(config.processes[0].policy).toBe("proxied")
+  expect(config.proxy.port).toBe(8182)
 })
 
 test("validateConfig defaults wildcard proxy upstreams to loopback", () => {
@@ -65,9 +66,9 @@ test("validateConfig defaults wildcard proxy upstreams to loopback", () => {
     proxy: {host: "0.0.0.0", port: 8182}
   })
 
-  assert.deepEqual(issues, [])
-  assert.equal(config.proxy.host, "0.0.0.0")
-  assert.equal(config.proxy.upstreamHost, "127.0.0.1")
+  expect(issues).toEqual([])
+  expect(config.proxy.host).toBe("0.0.0.0")
+  expect(config.proxy.upstreamHost).toBe("127.0.0.1")
 })
 
 test("validateConfig accepts legacy takeover screens and process matchers", () => {
@@ -87,8 +88,8 @@ test("validateConfig accepts legacy takeover screens and process matchers", () =
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.deepEqual(issues, [])
-  assert.deepEqual(config.legacyTakeover, {
+  expect(issues).toEqual([])
+  expect(config.legacyTakeover).toEqual({
     forceStopTimeoutMs: 250,
     processes: [
       {includes: ["/srv/demo/", "velocious server", "--port 4500"], name: "legacy web"}
@@ -108,7 +109,7 @@ test("validateConfig rejects empty legacy takeover config", () => {
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.ok(issues.some((issue) => issue.message === "legacyTakeover must define at least one screen or process matcher"), JSON.stringify(issues))
+  expect({value: Boolean(issues.some((issue) => issue.message === "legacyTakeover must define at least one screen or process matcher")), context: JSON.stringify(issues)}).toMatchObject({value: true})
 })
 
 test("validateConfig defaults outputLines and accepts a positive override", () => {
@@ -122,9 +123,9 @@ test("validateConfig defaults outputLines and accepts a positive override", () =
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.deepEqual(issues, [])
-  assert.equal(config.processes[0].outputLines, 50)
-  assert.equal(config.processes[1].outputLines, 5)
+  expect(issues).toEqual([])
+  expect(config.processes[0].outputLines).toBe(50)
+  expect(config.processes[1].outputLines).toBe(5)
 })
 
 test("validateConfig defaults the restart policy, accepts overrides, and rejects bad values", () => {
@@ -141,30 +142,30 @@ test("validateConfig defaults the restart policy, accepts overrides, and rejects
 
   const defaulted = validateRestart(undefined)
 
-  assert.deepEqual(defaulted.issues, [])
-  assert.deepEqual(defaulted.config.processes[0].restart, {backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0})
+  expect(defaulted.issues).toEqual([])
+  expect(defaulted.config.processes[0].restart).toEqual({backoffFactor: 1, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0})
 
   const custom = validateRestart({backoffFactor: 2, maxDelayMs: 30000, maxRestarts: 5, windowMs: 60000})
 
-  assert.deepEqual(custom.issues, [])
-  assert.deepEqual(custom.config.processes[0].restart, {backoffFactor: 2, maxDelayMs: 30000, maxRestarts: 5, windowMs: 60000})
+  expect(custom.issues).toEqual([])
+  expect(custom.config.processes[0].restart).toEqual({backoffFactor: 2, maxDelayMs: 30000, maxRestarts: 5, windowMs: 60000})
 
   // maxRestarts: 0 disables automatic restarts.
   const disabled = validateRestart({maxRestarts: 0})
 
-  assert.deepEqual(disabled.issues, [])
-  assert.equal(disabled.config.processes[0].restart.maxRestarts, 0)
+  expect(disabled.issues).toEqual([])
+  expect(disabled.config.processes[0].restart.maxRestarts).toBe(0)
 
   const invalid = validateRestart({backoffFactor: 0.5, maxDelayMs: -1, maxRestarts: -2, windowMs: -3})
   const messages = invalid.issues.map((issue) => issue.message)
 
-  assert.ok(messages.includes("processes[0].restart.backoffFactor must be a number greater than or equal to 1"), JSON.stringify(messages))
-  assert.ok(messages.includes("processes[0].restart.maxRestarts must be a non-negative integer"), JSON.stringify(messages))
-  assert.ok(messages.includes("processes[0].restart.maxDelayMs must be a non-negative number"), JSON.stringify(messages))
-  assert.ok(messages.includes("processes[0].restart.windowMs must be a non-negative number"), JSON.stringify(messages))
+  expect({value: Boolean(messages.includes("processes[0].restart.backoffFactor must be a number greater than or equal to 1")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("processes[0].restart.maxRestarts must be a non-negative integer")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("processes[0].restart.maxDelayMs must be a non-negative number")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("processes[0].restart.windowMs must be a non-negative number")), context: JSON.stringify(messages)}).toMatchObject({value: true})
 
   // A fractional maxRestarts is rejected (it must be a whole number of restarts).
-  assert.ok(validateRestart({maxRestarts: 1.5}).issues.some((issue) => issue.message === "processes[0].restart.maxRestarts must be a non-negative integer"))
+  expect(validateRestart({maxRestarts: 1.5}).issues.some((issue) => issue.message === "processes[0].restart.maxRestarts must be a non-negative integer")).toBeTruthy()
 })
 
 test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values", () => {
@@ -180,30 +181,30 @@ test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values",
   })
 
   // Omitted → no commands, zero drain.
-  assert.deepEqual(validateLifecycle(undefined).config.processes[0].lifecycle, {activateTimeoutMs: 30000, drainTimeoutMs: 0})
+  expect(validateLifecycle(undefined).config.processes[0].lifecycle).toEqual({activateTimeoutMs: 30000, drainTimeoutMs: 0})
 
   const custom = validateLifecycle({activateTimeoutMs: 60000, drainTimeoutMs: 30000, quietCommand: "kill -TSTP $ROLLBRIDGE_PID", stopCommand: "kill -TERM $ROLLBRIDGE_PID"})
 
-  assert.deepEqual(custom.issues, [])
-  assert.equal(custom.config.processes[0].lifecycle.quietCommand, "kill -TSTP $ROLLBRIDGE_PID")
-  assert.equal(custom.config.processes[0].lifecycle.stopCommand, "kill -TERM $ROLLBRIDGE_PID")
-  assert.equal(custom.config.processes[0].lifecycle.activateTimeoutMs, 60000)
-  assert.equal(custom.config.processes[0].lifecycle.drainTimeoutMs, 30000)
+  expect(custom.issues).toEqual([])
+  expect(custom.config.processes[0].lifecycle.quietCommand).toBe("kill -TSTP $ROLLBRIDGE_PID")
+  expect(custom.config.processes[0].lifecycle.stopCommand).toBe("kill -TERM $ROLLBRIDGE_PID")
+  expect(custom.config.processes[0].lifecycle.activateTimeoutMs).toBe(60000)
+  expect(custom.config.processes[0].lifecycle.drainTimeoutMs).toBe(30000)
 
   const invalid = validateLifecycle({activateTimeoutMs: 0, drainTimeoutMs: -1, quietCommand: 5})
   const messages = invalid.issues.map((issue) => issue.message)
 
-  assert.ok(messages.includes("processes[0].lifecycle.activateTimeoutMs must be a positive number"), JSON.stringify(messages))
-  assert.ok(messages.includes("processes[0].lifecycle.drainTimeoutMs must be a non-negative number"), JSON.stringify(messages))
-  assert.ok(messages.includes("processes[0].lifecycle.quietCommand must be a string"), JSON.stringify(messages))
+  expect({value: Boolean(messages.includes("processes[0].lifecycle.activateTimeoutMs must be a positive number")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("processes[0].lifecycle.drainTimeoutMs must be a non-negative number")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("processes[0].lifecycle.quietCommand must be a string")), context: JSON.stringify(messages)}).toMatchObject({value: true})
 
   // drainCommand needs a positive drainTimeoutMs to bound it; otherwise the drain step is skipped.
-  assert.ok(validateLifecycle({drainCommand: "drain"}).issues
-    .some((issue) => issue.message === "processes[0].lifecycle.drainCommand requires a positive processes[0].lifecycle.drainTimeoutMs"))
-  assert.deepEqual(validateLifecycle({drainCommand: "drain", drainTimeoutMs: 1000}).issues, [])
+  expect(validateLifecycle({drainCommand: "drain"}).issues
+    .some((issue) => issue.message === "processes[0].lifecycle.drainCommand requires a positive processes[0].lifecycle.drainTimeoutMs")).toBeTruthy()
+  expect(validateLifecycle({drainCommand: "drain", drainTimeoutMs: 1000}).issues).toEqual([])
 
   // A stopCommand replaces stopSignal, so a stopCommand alongside the default SIGTERM is fine.
-  assert.deepEqual(validateLifecycle({stopCommand: "kill -TERM $ROLLBRIDGE_PID"}).issues, [])
+  expect(validateLifecycle({stopCommand: "kill -TERM $ROLLBRIDGE_PID"}).issues).toEqual([])
 })
 
 test("validateConfig accepts one durable handoff activation lifecycle and rejects unsafe placements", () => {
@@ -227,31 +228,31 @@ test("validateConfig accepts one durable handoff activation lifecycle and reject
   }
   const valid = validateConfig(base)
 
-  assert.deepEqual(valid.issues, [])
-  assert.equal(valid.config.processes[1].lifecycle.activateCommand, "jobs activate")
+  expect(valid.issues).toEqual([])
+  expect(valid.config.processes[1].lifecycle.activateCommand).toBe("jobs activate")
 
   const invalidType = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: 5, quietCommand: "jobs retire"}}]})
-  assert.ok(invalidType.issues.some((issue) => issue.message === "processes[1].lifecycle.activateCommand must be a string"))
+  expect(invalidType.issues.some((issue) => issue.message === "processes[1].lifecycle.activateCommand must be a string")).toBeTruthy()
 
   const emptyCommands = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: " ", quietCommand: ""}}]})
-  assert.ok(emptyCommands.issues.some((issue) => issue.message === "processes[1].lifecycle.activateCommand must not be empty"))
-  assert.ok(emptyCommands.issues.some((issue) => issue.message === "processes[1].lifecycle.quietCommand must not be empty"))
+  expect(emptyCommands.issues.some((issue) => issue.message === "processes[1].lifecycle.activateCommand must not be empty")).toBeTruthy()
+  expect(emptyCommands.issues.some((issue) => issue.message === "processes[1].lifecycle.quietCommand must not be empty")).toBeTruthy()
 
   const missingRetirement = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], lifecycle: {activateCommand: "jobs activate"}}]})
-  assert.ok(missingRetirement.issues.some((issue) => /requires lifecycle\.quietCommand/.test(issue.message)))
+  expect(missingRetirement.issues.some((issue) => /requires lifecycle\.quietCommand/.test(issue.message))).toBeTruthy()
 
   const nonHandoff = validateConfig({...base, processes: [base.processes[0], {...base.processes[1], deployStrategy: "persistent"}]})
-  assert.ok(nonHandoff.issues.some((issue) => /activateCommand.*handoff service/.test(issue.message)))
+  expect(nonHandoff.issues.some((issue) => /activateCommand.*handoff service/.test(issue.message))).toBeTruthy()
 
   const withoutRecovery = validateConfig({...base, ownerRecovery: undefined, statePath: undefined})
-  assert.ok(withoutRecovery.issues.some((issue) => /activateCommand requires ownerRecovery and statePath/.test(issue.message)))
+  expect(withoutRecovery.issues.some((issue) => /activateCommand requires ownerRecovery and statePath/.test(issue.message))).toBeTruthy()
 
   const duplicate = validateConfig({...base, processes: [
     base.processes[0],
     base.processes[1],
     {...base.processes[1], id: "jobs-secondary", port: {from: 18200, to: 18299}}
   ]})
-  assert.ok(duplicate.issues.some((issue) => /at most one lifecycle\.activateCommand/.test(issue.message)))
+  expect(duplicate.issues.some((issue) => /at most one lifecycle\.activateCommand/.test(issue.message))).toBeTruthy()
 
   const worker = {
     command: "run worker",
@@ -262,14 +263,14 @@ test("validateConfig accepts one durable handoff activation lifecycle and reject
   }
   const pairedWorker = validateConfig({...base, processes: [...base.processes, worker]})
 
-  assert.deepEqual(pairedWorker.issues, [])
-  assert.equal(pairedWorker.config.processes[2].lifecycle.reactivateCommand, "worker resume")
+  expect(pairedWorker.issues).toEqual([])
+  expect(pairedWorker.config.processes[2].lifecycle.reactivateCommand).toBe("worker resume")
 
   const unpairedWorker = validateConfig({...base, processes: [...base.processes, {...worker, lifecycle: {quietCommand: "worker quiet"}}]})
-  assert.ok(unpairedWorker.issues.some((issue) => /quietCommand requires lifecycle\.reactivateCommand/.test(issue.message)))
+  expect(unpairedWorker.issues.some((issue) => /quietCommand requires lifecycle\.reactivateCommand/.test(issue.message))).toBeTruthy()
 
   const unsupportedPlacement = validateConfig({...base, processes: [...base.processes, {...worker, nonBlockingDrain: false}]})
-  assert.ok(unsupportedPlacement.issues.some((issue) => /reactivateCommand.*nonBlockingDrain companion/.test(issue.message)))
+  expect(unsupportedPlacement.issues.some((issue) => /reactivateCommand.*nonBlockingDrain companion/.test(issue.message))).toBeTruthy()
 })
 
 test("validateConfig accepts indefinite graceful stop windows", () => {
@@ -283,8 +284,8 @@ test("validateConfig accepts indefinite graceful stop windows", () => {
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.deepEqual(issues, [])
-  assert.equal(config.processes[1].gracefulStopMs, "indefinite")
+  expect(issues).toEqual([])
+  expect(config.processes[1].gracefulStopMs).toBe("indefinite")
 })
 
 test("validateConfig accepts handoff services only with a multi-port service range", () => {
@@ -298,8 +299,8 @@ test("validateConfig accepts handoff services only with a multi-port service ran
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.deepEqual(valid.issues, [])
-  assert.equal(valid.config.processes[1].deployStrategy, "handoff")
+  expect(valid.issues).toEqual([])
+  expect(valid.config.processes[1].deployStrategy).toBe("handoff")
 
   const defaulted = validateConfig({
     application: "demo",
@@ -308,7 +309,7 @@ test("validateConfig accepts handoff services only with a multi-port service ran
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.equal(defaulted.config.processes[0].deployStrategy, "persistent")
+  expect(defaulted.config.processes[0].deployStrategy).toBe("persistent")
 
   const invalidProcess = validateConfig({
     application: "demo",
@@ -320,7 +321,7 @@ test("validateConfig accepts handoff services only with a multi-port service ran
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.ok(invalidProcess.issues.some((issue) => issue.message === "Process \"worker\" can only set deployStrategy: \"handoff\" on a service process"), JSON.stringify(invalidProcess.issues))
+  expect({value: Boolean(invalidProcess.issues.some((issue) => issue.message === "Process \"worker\" can only set deployStrategy: \"handoff\" on a service process")), context: JSON.stringify(invalidProcess.issues)}).toMatchObject({value: true})
 
   const missingPort = validateConfig({
     application: "demo",
@@ -332,7 +333,7 @@ test("validateConfig accepts handoff services only with a multi-port service ran
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.ok(missingPort.issues.some((issue) => issue.message === "Handoff service \"beacon\" must define a port range"), JSON.stringify(missingPort.issues))
+  expect({value: Boolean(missingPort.issues.some((issue) => issue.message === "Handoff service \"beacon\" must define a port range")), context: JSON.stringify(missingPort.issues)}).toMatchObject({value: true})
 
   const fixedPort = validateConfig({
     application: "demo",
@@ -344,7 +345,7 @@ test("validateConfig accepts handoff services only with a multi-port service ran
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.ok(fixedPort.issues.some((issue) => issue.message === "Handoff service \"beacon\" must use a multi-port range"), JSON.stringify(fixedPort.issues))
+  expect({value: Boolean(fixedPort.issues.some((issue) => issue.message === "Handoff service \"beacon\" must use a multi-port range")), context: JSON.stringify(fixedPort.issues)}).toMatchObject({value: true})
 })
 
 test("validateConfig rejects a custom stopSignal alongside a stopCommand that would ignore it", () => {
@@ -360,18 +361,17 @@ test("validateConfig rejects a custom stopSignal alongside a stopCommand that wo
   })
 
   // A custom stopSignal with a stopCommand is contradictory: stopCommand runs instead of the signal.
-  assert.ok(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}, stopSignal: "SIGINT"}).issues
-    .some((issue) => /sets both lifecycle.stopCommand and a custom stopSignal/.test(issue.message)),
-  "a custom stopSignal next to a stopCommand must be rejected")
+  expect(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}, stopSignal: "SIGINT"}).issues
+    .some((issue) => /sets both lifecycle.stopCommand and a custom stopSignal/.test(issue.message))).toBe(true)
 
   // stopSignal alone (no stopCommand) is fine — the signal is what stops the worker.
-  assert.deepEqual(validateWorker({stopSignal: "SIGINT"}).issues, [])
+  expect(validateWorker({stopSignal: "SIGINT"}).issues).toEqual([])
 
   // stopCommand alone (default SIGTERM) is fine — nothing custom is silently dropped.
-  assert.deepEqual(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}}).issues, [])
+  expect(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}}).issues).toEqual([])
 
   // An explicit default stopSignal next to a stopCommand is not flagged (SIGTERM is the default).
-  assert.deepEqual(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}, stopSignal: "SIGTERM"}).issues, [])
+  expect(validateWorker({lifecycle: {stopCommand: "kill -TERM $ROLLBRIDGE_PID"}, stopSignal: "SIGTERM"}).issues).toEqual([])
 })
 
 test("validateConfig defaults replicas, accepts companion replicas, and rejects bad placements", () => {
@@ -386,39 +386,39 @@ test("validateConfig defaults replicas, accepts companion replicas, and rejects 
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.equal(validateWorker({command: "run worker", id: "worker", policy: "companion"}).config.processes[1].replicas, 1)
+  expect(validateWorker({command: "run worker", id: "worker", policy: "companion"}).config.processes[1].replicas).toBe(1)
 
   const replicated = validateWorker({command: "run worker", id: "worker", policy: "companion", replicas: 4})
 
-  assert.deepEqual(replicated.issues, [])
-  assert.equal(replicated.config.processes[1].replicas, 4)
+  expect(replicated.issues).toEqual([])
+  expect(replicated.config.processes[1].replicas).toBe(4)
 
   // replicas > 1 on a companion with a port is rejected.
-  assert.ok(validateWorker({command: "run worker", id: "worker", policy: "companion", port: {from: 19000, to: 19099}, replicas: 2}).issues
-    .some((issue) => /can only set replicas > 1 on a companion process without a port/.test(issue.message)))
+  expect(validateWorker({command: "run worker", id: "worker", policy: "companion", port: {from: 19000, to: 19099}, replicas: 2}).issues
+    .some((issue) => /can only set replicas > 1 on a companion process without a port/.test(issue.message))).toBeTruthy()
 
   // replicas > 1 on a non-companion policy is rejected.
-  assert.ok(validateWorker({command: "run broker", id: "broker", policy: "service", replicas: 2}).issues
-    .some((issue) => /can only set replicas > 1 on a companion/.test(issue.message)))
+  expect(validateWorker({command: "run broker", id: "broker", policy: "service", replicas: 2}).issues
+    .some((issue) => /can only set replicas > 1 on a companion/.test(issue.message))).toBeTruthy()
 
   // Non-positive replicas is rejected.
-  assert.ok(validateWorker({command: "run worker", id: "worker", policy: "companion", replicas: 0}).issues
-    .some((issue) => issue.message === "processes[1].replicas must be a positive integer"))
+  expect(validateWorker({command: "run worker", id: "worker", policy: "companion", replicas: 0}).issues
+    .some((issue) => issue.message === "processes[1].replicas must be a positive integer")).toBeTruthy()
 
   // A "#" in a process id (reserved for replica instance ids) is rejected.
-  assert.ok(validateWorker({command: "run worker", id: "work#er", policy: "companion"}).issues
-    .some((issue) => /must not contain "#"/.test(issue.message)))
+  expect(validateWorker({command: "run worker", id: "work#er", policy: "companion"}).issues
+    .some((issue) => /must not contain "#"/.test(issue.message))).toBeTruthy()
 
   // nonBlockingDrain defaults to false, is accepted on a companion, and rejected elsewhere.
-  assert.equal(validateWorker({command: "run worker", id: "worker", policy: "companion"}).config.processes[1].nonBlockingDrain, false)
+  expect(validateWorker({command: "run worker", id: "worker", policy: "companion"}).config.processes[1].nonBlockingDrain).toBe(false)
 
   const draining = validateWorker({command: "run worker", id: "worker", nonBlockingDrain: true, policy: "companion"})
 
-  assert.deepEqual(draining.issues, [])
-  assert.equal(draining.config.processes[1].nonBlockingDrain, true)
+  expect(draining.issues).toEqual([])
+  expect(draining.config.processes[1].nonBlockingDrain).toBe(true)
 
-  assert.ok(validateWorker({command: "run b", id: "broker", nonBlockingDrain: true, policy: "service"}).issues
-    .some((issue) => /can only set nonBlockingDrain on a companion/.test(issue.message)))
+  expect(validateWorker({command: "run b", id: "broker", nonBlockingDrain: true, policy: "service"}).issues
+    .some((issue) => /can only set nonBlockingDrain on a companion/.test(issue.message))).toBeTruthy()
 })
 
 test("validateConfig defaults stopSignal, accepts valid signals, and rejects unknown ones", () => {
@@ -433,16 +433,16 @@ test("validateConfig defaults stopSignal, accepts valid signals, and rejects unk
     proxy: {host: "127.0.0.1", port: 8182}
   })
 
-  assert.equal(validateStopSignal(undefined).config.processes[0].stopSignal, "SIGTERM")
+  expect(validateStopSignal(undefined).config.processes[0].stopSignal).toBe("SIGTERM")
 
   const custom = validateStopSignal("SIGINT")
 
-  assert.deepEqual(custom.issues, [])
-  assert.equal(custom.config.processes[0].stopSignal, "SIGINT")
+  expect(custom.issues).toEqual([])
+  expect(custom.config.processes[0].stopSignal).toBe("SIGINT")
 
   const invalid = validateStopSignal("SIGBOGUS")
 
-  assert.ok(invalid.issues.some((issue) => issue.message === "processes[0].stopSignal must be a valid signal name"), JSON.stringify(invalid.issues.map((issue) => issue.message)))
+  expect({value: Boolean(invalid.issues.some((issue) => issue.message === "processes[0].stopSignal must be a valid signal name")), context: JSON.stringify(invalid.issues.map((issue) => issue.message))}).toMatchObject({value: true})
 })
 
 test("validateConfig normalizes memory supervision and rejects bad values", () => {
@@ -458,25 +458,25 @@ test("validateConfig normalizes memory supervision and rejects bad values", () =
   })
 
   // Omitted → monitoring off.
-  assert.equal(validateMemory(undefined).config.processes[0].memory, undefined)
+  expect(validateMemory(undefined).config.processes[0].memory).toBe(undefined)
 
   const custom = validateMemory({checkIntervalMs: 2000, limitBytes: 1048576, warnBytes: 524288})
 
-  assert.deepEqual(custom.issues, [])
-  assert.deepEqual(custom.config.processes[0].memory, {checkIntervalMs: 2000, limitBytes: 1048576, warnBytes: 524288})
+  expect(custom.issues).toEqual([])
+  expect(custom.config.processes[0].memory).toEqual({checkIntervalMs: 2000, limitBytes: 1048576, warnBytes: 524288})
 
   // Defaults checkIntervalMs and warnBytes when only limitBytes is given.
   const defaulted = validateMemory({limitBytes: 1048576})
 
-  assert.deepEqual(defaulted.issues, [])
-  assert.deepEqual(defaulted.config.processes[0].memory, {checkIntervalMs: 5000, limitBytes: 1048576, warnBytes: 0})
+  expect(defaulted.issues).toEqual([])
+  expect(defaulted.config.processes[0].memory).toEqual({checkIntervalMs: 5000, limitBytes: 1048576, warnBytes: 0})
 
   const invalid = validateMemory({checkIntervalMs: 0, limitBytes: 0, warnBytes: -1})
   const messages = invalid.issues.map((issue) => issue.message)
 
-  assert.ok(messages.includes("processes[0].memory.limitBytes must be a positive integer"), JSON.stringify(messages))
-  assert.ok(messages.includes("processes[0].memory.warnBytes must be a non-negative integer"), JSON.stringify(messages))
-  assert.ok(messages.includes("processes[0].memory.checkIntervalMs must be a positive number"), JSON.stringify(messages))
+  expect({value: Boolean(messages.includes("processes[0].memory.limitBytes must be a positive integer")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("processes[0].memory.warnBytes must be a non-negative integer")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("processes[0].memory.checkIntervalMs must be a positive number")), context: JSON.stringify(messages)}).toMatchObject({value: true})
 })
 
 test("validateConfig rejects a non-positive-integer outputLines with a fix", () => {
@@ -491,8 +491,8 @@ test("validateConfig rejects a non-positive-integer outputLines with a fix", () 
 
   const issue = issues.find((candidate) => candidate.message === "processes[0].outputLines must be a positive integer")
 
-  assert.ok(issue, `expected an outputLines issue in ${JSON.stringify(issues.map((candidate) => candidate.message))}`)
-  assert.match(issue.fix, /positive integer/)
+  if (!issue) throw new Error(`expected an outputLines issue in ${JSON.stringify(issues.map((candidate) => candidate.message))}`)
+  expect(issue.fix).toMatch(/positive integer/)
 })
 
 test("validateConfig parses control.mode, defaults it to unset, and rejects invalid modes", () => {
@@ -509,20 +509,20 @@ test("validateConfig parses control.mode, defaults it to unset, and rejects inva
 
   const parsed = validateControl({mode: "660", path: "/tmp/demo.sock"})
 
-  assert.deepEqual(parsed.issues, [])
-  assert.equal(parsed.config.control.mode, 0o660)
+  expect(parsed.issues).toEqual([])
+  expect(parsed.config.control.mode).toBe(0o660)
 
   // Minimal octal strings are accepted, matching the numeric boundary (e.g. 0).
   const minimal = validateControl({mode: "0", path: "/tmp/demo.sock"})
 
-  assert.deepEqual(minimal.issues, [])
-  assert.equal(minimal.config.control.mode, 0)
+  expect(minimal.issues).toEqual([])
+  expect(minimal.config.control.mode).toBe(0)
 
-  assert.equal(validateControl({path: "/tmp/demo.sock"}).config.control.mode, undefined)
+  expect(validateControl({path: "/tmp/demo.sock"}).config.control.mode).toBe(undefined)
 
   const invalid = validateControl({mode: "abc", path: "/tmp/demo.sock"})
 
-  assert.ok(invalid.issues.some((issue) => issue.message === "control.mode must be an octal file mode between 0 and 0o777"))
+  expect(invalid.issues.some((issue) => issue.message === "control.mode must be an octal file mode between 0 and 0o777")).toBeTruthy()
 })
 
 test("validateConfig accepts control owner/group as ids or names and rejects bad values", () => {
@@ -539,25 +539,25 @@ test("validateConfig accepts control owner/group as ids or names and rejects bad
 
   const numeric = validateControl({group: 1000, owner: 1000, path: "/tmp/demo.sock"})
 
-  assert.deepEqual(numeric.issues, [])
-  assert.equal(numeric.config.control.owner, 1000)
-  assert.equal(numeric.config.control.group, 1000)
+  expect(numeric.issues).toEqual([])
+  expect(numeric.config.control.owner).toBe(1000)
+  expect(numeric.config.control.group).toBe(1000)
 
   const named = validateControl({group: "deploy", owner: "deploy", path: "/tmp/demo.sock"})
 
-  assert.deepEqual(named.issues, [])
-  assert.equal(named.config.control.owner, "deploy")
-  assert.equal(named.config.control.group, "deploy")
+  expect(named.issues).toEqual([])
+  expect(named.config.control.owner).toBe("deploy")
+  expect(named.config.control.group).toBe("deploy")
 
   // Unset by default.
-  assert.equal(validateControl({path: "/tmp/demo.sock"}).config.control.owner, undefined)
-  assert.equal(validateControl({path: "/tmp/demo.sock"}).config.control.group, undefined)
+  expect(validateControl({path: "/tmp/demo.sock"}).config.control.owner).toBe(undefined)
+  expect(validateControl({path: "/tmp/demo.sock"}).config.control.group).toBe(undefined)
 
   const invalid = validateControl({group: -1, owner: true, path: "/tmp/demo.sock"})
   const messages = invalid.issues.map((issue) => issue.message)
 
-  assert.ok(messages.includes("control.owner must be a non-negative integer id or a name"), JSON.stringify(messages))
-  assert.ok(messages.includes("control.group must be a non-negative integer id or a name"), JSON.stringify(messages))
+  expect({value: Boolean(messages.includes("control.owner must be a non-negative integer id or a name")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+  expect({value: Boolean(messages.includes("control.group must be a non-negative integer id or a name")), context: JSON.stringify(messages)}).toMatchObject({value: true})
 })
 
 test("validateConfig defaults health.startDelayMs to 0, accepts an override, and rejects negatives", () => {
@@ -574,17 +574,17 @@ test("validateConfig defaults health.startDelayMs to 0, accepts an override, and
 
   const defaulted = validateHealth({path: "/ping"})
 
-  assert.deepEqual(defaulted.issues, [])
-  assert.equal(defaulted.config.processes[0].health?.startDelayMs, 0)
+  expect(defaulted.issues).toEqual([])
+  expect(defaulted.config.processes[0].health?.startDelayMs).toBe(0)
 
   const custom = validateHealth({path: "/ping", startDelayMs: 2000})
 
-  assert.deepEqual(custom.issues, [])
-  assert.equal(custom.config.processes[0].health?.startDelayMs, 2000)
+  expect(custom.issues).toEqual([])
+  expect(custom.config.processes[0].health?.startDelayMs).toBe(2000)
 
   const negative = validateHealth({path: "/ping", startDelayMs: -1})
 
-  assert.ok(negative.issues.some((issue) => issue.message === "processes[0].health.startDelayMs must be a non-negative number"))
+  expect(negative.issues.some((issue) => issue.message === "processes[0].health.startDelayMs must be a non-negative number")).toBeTruthy()
 })
 
 test("validateConfig defaults releaseRetention, accepts overrides, and rejects bad values", () => {
@@ -602,18 +602,18 @@ test("validateConfig defaults releaseRetention, accepts overrides, and rejects b
 
   const defaulted = validateRetention(undefined)
 
-  assert.deepEqual(defaulted.issues, [])
-  assert.deepEqual(defaulted.config.releaseRetention, {keep: 10, maxAgeMs: 0})
+  expect(defaulted.issues).toEqual([])
+  expect(defaulted.config.releaseRetention).toEqual({keep: 10, maxAgeMs: 0})
 
   const custom = validateRetention({keep: 3, maxAgeMs: 60000})
 
-  assert.deepEqual(custom.issues, [])
-  assert.deepEqual(custom.config.releaseRetention, {keep: 3, maxAgeMs: 60000})
+  expect(custom.issues).toEqual([])
+  expect(custom.config.releaseRetention).toEqual({keep: 3, maxAgeMs: 60000})
 
   const invalid = validateRetention({keep: -1, maxAgeMs: -5})
 
-  assert.ok(invalid.issues.some((issue) => issue.message === "releaseRetention.keep must be a non-negative integer"))
-  assert.ok(invalid.issues.some((issue) => issue.message === "releaseRetention.maxAgeMs must be a non-negative number"))
+  expect(invalid.issues.some((issue) => issue.message === "releaseRetention.keep must be a non-negative integer")).toBeTruthy()
+  expect(invalid.issues.some((issue) => issue.message === "releaseRetention.maxAgeMs must be a non-negative number")).toBeTruthy()
 })
 
 test("validateConfig leaves statePath unset by default, accepts a string, and rejects non-strings", () => {
@@ -629,14 +629,14 @@ test("validateConfig leaves statePath unset by default, accepts a string, and re
     statePath
   })
 
-  assert.equal(validateStatePath(undefined).config.statePath, undefined)
+  expect(validateStatePath(undefined).config.statePath).toBe(undefined)
 
   const set = validateStatePath("/var/lib/rollbridge/demo.state.json")
 
-  assert.deepEqual(set.issues, [])
-  assert.equal(set.config.statePath, "/var/lib/rollbridge/demo.state.json")
+  expect(set.issues).toEqual([])
+  expect(set.config.statePath).toBe("/var/lib/rollbridge/demo.state.json")
 
-  assert.ok(validateStatePath(123).issues.some((issue) => issue.message === "statePath must be a string"))
+  expect(validateStatePath(123).issues.some((issue) => issue.message === "statePath must be a string")).toBeTruthy()
 })
 
 test("ownerRecovery requires durable state and a non-negative integer reconnection grace", () => {
@@ -649,36 +649,31 @@ test("ownerRecovery requires durable state and a non-negative integer reconnecti
   }
   const missingState = validateConfig(raw)
 
-  assert.ok(missingState.issues.some((issue) => issue.message === "ownerRecovery requires statePath"))
+  expect(missingState.issues.some((issue) => issue.message === "ownerRecovery requires statePath")).toBeTruthy()
 
   const valid = validateConfig({...raw, statePath: "/var/lib/rollbridge/demo.state.json"})
 
-  assert.deepEqual(valid.issues, [])
-  assert.deepEqual(valid.config.ownerRecovery, {reconnectGraceMs: 45000})
+  expect(valid.issues).toEqual([])
+  expect(valid.config.ownerRecovery).toEqual({reconnectGraceMs: 45000})
 
   const invalidGrace = validateConfig({...raw, ownerRecovery: {reconnectGraceMs: -1}, statePath: "/var/lib/rollbridge/demo.state.json"})
 
-  assert.ok(invalidGrace.issues.some((issue) => issue.message === "ownerRecovery.reconnectGraceMs must be a non-negative integer"))
+  expect(invalidGrace.issues.some((issue) => issue.message === "ownerRecovery.reconnectGraceMs must be a non-negative integer")).toBeTruthy()
 })
 
-test("normalizeConfig throws an aggregated error listing every issue", () => {
-  assert.throws(
-    () => normalizeConfig({
-      application: "demo",
-      processes: [
-        {command: "run web", id: "web", policy: "proxied"},
-        {command: "run web", id: "web", policy: "proxied"}
-      ],
-      proxy: {port: 8182}
-    }),
-    (error) => {
-      assert.ok(error instanceof Error)
-      assert.match(error.message, /Duplicate process id: web/)
-      assert.match(error.message, /exactly one proxied process; found 2/)
+test("normalizeConfig throws an aggregated error listing every issue", async () => {
+  const normalization = Promise.resolve().then(() => normalizeConfig({
+    application: "demo",
+    processes: [
+      {command: "run web", id: "web", policy: "proxied"},
+      {command: "run web", id: "web", policy: "proxied"}
+    ],
+    proxy: {port: 8182}
+  }))
 
-      return true
-    }
-  )
+  await expect(normalization).rejects.toBeInstanceOf(Error)
+  await expect(normalization).rejects.toMatchObject({message: expect.stringMatching(/Duplicate process id: web/)})
+  await expect(normalization).rejects.toMatchObject({message: expect.stringMatching(/exactly one proxied process; found 2/)})
 })
 
 test("validate CLI command reports every issue with a fix and exits non-zero", async () => {
@@ -693,9 +688,9 @@ test("validate CLI command reports every issue with a fix and exits non-zero", a
   try {
     const {output} = await captureCli(["node", "rollbridge", "validate", "-c", configPath])
 
-    assert.equal(process.exitCode, 1)
-    assert.match(output, /Proxied process web must define a port range/)
-    assert.match(output, /Fix: Add a port range to the proxied process "web"/)
+    expect(process.exitCode).toBe(1)
+    expect(output).toMatch(/Proxied process web must define a port range/)
+    expect(output).toMatch(/Fix: Add a port range to the proxied process "web"/)
   } finally {
     process.exitCode = 0
     await fs.rm(path.dirname(configPath), {force: true, recursive: true})
@@ -715,8 +710,8 @@ test("validate CLI command accepts a valid config without setting a failure exit
   try {
     const {output} = await captureCli(["node", "rollbridge", "validate", "-c", configPath])
 
-    assert.notEqual(process.exitCode, 1)
-    assert.match(output, /is valid: 1 process, proxy on 127\.0\.0\.1:8182\./)
+    expect(process.exitCode).not.toBe(1)
+    expect(output).toMatch(/is valid: 1 process, proxy on 127\.0\.0\.1:8182\./)
   } finally {
     await fs.rm(path.dirname(configPath), {force: true, recursive: true})
   }
@@ -738,17 +733,17 @@ test("validate --json emits a machine-readable result", async () => {
   try {
     const valid = JSON.parse((await captureCli(["node", "rollbridge", "validate", "--json", "-c", validPath])).output)
 
-    assert.equal(valid.valid, true)
-    assert.deepEqual(valid.issues, [])
-    assert.equal(valid.config.processes, 1)
-    assert.notEqual(process.exitCode, 1)
+    expect(valid.valid).toBe(true)
+    expect(valid.issues).toEqual([])
+    expect(valid.config.processes).toBe(1)
+    expect(process.exitCode).not.toBe(1)
 
     const invalid = JSON.parse((await captureCli(["node", "rollbridge", "validate", "--json", "-c", invalidPath])).output)
 
-    assert.equal(invalid.valid, false)
-    assert.equal(invalid.config, null)
-    assert.ok(invalid.issues.some((/** @type {{message: string}} */ issue) => /must define a port range/.test(issue.message)))
-    assert.equal(process.exitCode, 1)
+    expect(invalid.valid).toBe(false)
+    expect(invalid.config).toBe(null)
+    expect(invalid.issues.some((/** @type {{message: string}} */ issue) => /must define a port range/.test(issue.message))).toBeTruthy()
+    expect(process.exitCode).toBe(1)
   } finally {
     process.exitCode = 0
     await fs.rm(path.dirname(validPath), {force: true, recursive: true})
@@ -794,3 +789,4 @@ async function captureCli(argv) {
 
   return {output: lines.join("\n")}
 }
+})

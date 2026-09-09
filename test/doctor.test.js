@@ -1,18 +1,19 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, expect, test} from "@velocious/testing"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {runEnvironmentChecks, runReleaseChecks} from "../src/doctor.js"
 import {writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
+
+describe("doctor", () => {
 
 /**
  * @param {object} args - Options.
@@ -72,7 +73,7 @@ async function occupyPort() {
 function checkNamed(checks, name) {
   const check = checks.find((candidate) => candidate.name === name)
 
-  assert.ok(check, `expected a "${name}" check`)
+  if (!check) throw new Error(`expected a "${name}" check`)
 
   return check
 }
@@ -83,9 +84,9 @@ test("runEnvironmentChecks passes when no daemon runs, the port is free, and the
   try {
     const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort()}))
 
-    assert.equal(checkNamed(checks, "control socket").ok, true)
-    assert.equal(checkNamed(checks, "control socket directory").ok, true)
-    assert.equal(checkNamed(checks, "proxy port").ok, true)
+    expect(checkNamed(checks, "control socket").ok).toBe(true)
+    expect(checkNamed(checks, "control socket directory").ok).toBe(true)
+    expect(checkNamed(checks, "proxy port").ok).toBe(true)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -99,8 +100,8 @@ test("runEnvironmentChecks reports an unavailable proxy port", async () => {
     const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: port}))
     const proxyCheck = checkNamed(checks, "proxy port")
 
-    assert.equal(proxyCheck.ok, false)
-    assert.match(proxyCheck.detail, /unavailable/)
+    expect(proxyCheck.ok).toBe(false)
+    expect(proxyCheck.detail).toMatch(/unavailable/)
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     await fs.rm(root, {force: true, recursive: true})
@@ -113,8 +114,8 @@ test("runEnvironmentChecks checks the state path directory and reports no orphan
   try {
     const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort(), statePath: path.join(root, "state.json")}))
 
-    assert.equal(checkNamed(checks, "state path directory").ok, true)
-    assert.equal(checkNamed(checks, "orphaned processes").ok, true)
+    expect(checkNamed(checks, "state path directory").ok).toBe(true)
+    expect(checkNamed(checks, "orphaned processes").ok).toBe(true)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -126,8 +127,8 @@ test("runEnvironmentChecks omits state checks when no statePath is configured", 
   try {
     const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort()}))
 
-    assert.ok(!checks.some((check) => check.name === "state path directory"))
-    assert.ok(!checks.some((check) => check.name === "orphaned processes"))
+    expect(!checks.some((check) => check.name === "state path directory")).toBeTruthy()
+    expect(!checks.some((check) => check.name === "orphaned processes")).toBeTruthy()
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -146,8 +147,8 @@ test("runEnvironmentChecks does not flag orphans while a daemon is running", asy
     const orphanCheck = checkNamed(checks, "orphaned processes")
 
     // A running daemon's persisted pids are its own managed processes, not orphans.
-    assert.equal(orphanCheck.ok, true)
-    assert.match(orphanCheck.detail, /a daemon is running/)
+    expect(orphanCheck.ok).toBe(true)
+    expect(orphanCheck.detail).toMatch(/a daemon is running/)
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})
@@ -172,8 +173,8 @@ test("runEnvironmentChecks reports orphaned processes left in the state file", a
     const checks = await runEnvironmentChecks(buildConfig({controlPath: path.join(root, "rollbridge.sock"), proxyPort: await freePort(), statePath}))
     const orphanCheck = checkNamed(checks, "orphaned processes")
 
-    assert.equal(orphanCheck.ok, false)
-    assert.match(orphanCheck.detail, new RegExp(`worker \\(pid ${leftover.pid}\\)`))
+    expect(orphanCheck.ok).toBe(false)
+    expect(orphanCheck.detail).toMatch(new RegExp(`worker \\(pid ${leftover.pid}\\)`))
   } finally {
     leftover.kill("SIGKILL")
     await fs.rm(root, {force: true, recursive: true})
@@ -184,8 +185,8 @@ test("runEnvironmentChecks reports a missing control socket directory", async ()
   const checks = await runEnvironmentChecks(buildConfig({controlPath: "/rollbridge-doctor-missing-dir/rollbridge.sock", proxyPort: await freePort()}))
   const directoryCheck = checkNamed(checks, "control socket directory")
 
-  assert.equal(directoryCheck.ok, false)
-  assert.match(directoryCheck.detail, /missing or not writable/)
+  expect(directoryCheck.ok).toBe(false)
+  expect(directoryCheck.detail).toMatch(/missing or not writable/)
 })
 
 test("runEnvironmentChecks passes when the running Rollbridge daemon holds the socket and port", async () => {
@@ -199,9 +200,9 @@ test("runEnvironmentChecks passes when the running Rollbridge daemon holds the s
     const checks = await runEnvironmentChecks(config)
     const socketCheck = checkNamed(checks, "control socket")
 
-    assert.equal(socketCheck.ok, true)
-    assert.match(socketCheck.detail, /Rollbridge daemon for "doctor-test" is running/)
-    assert.equal(checkNamed(checks, "proxy port").ok, true)
+    expect(socketCheck.ok).toBe(true)
+    expect(socketCheck.detail).toMatch(/Rollbridge daemon for "doctor-test" is running/)
+    expect(checkNamed(checks, "proxy port").ok).toBe(true)
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})
@@ -222,8 +223,8 @@ test("runEnvironmentChecks fails when the running daemon does not own the config
   try {
     const checks = await runEnvironmentChecks(changedConfig)
 
-    assert.equal(checkNamed(checks, "control socket").ok, true)
-    assert.equal(checkNamed(checks, "proxy port").ok, false)
+    expect(checkNamed(checks, "control socket").ok).toBe(true)
+    expect(checkNamed(checks, "proxy port").ok).toBe(false)
   } finally {
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     await daemon.shutdown()
@@ -256,9 +257,9 @@ test("runReleaseChecks passes for an existing release with resolvable templates"
     const config = releaseConfig({processes: [{command: "run web --port {{port}} --release {{releaseId}}", cwd: "{{releasePath}}/backend", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
     const checks = await runReleaseChecks(config, {releasePath})
 
-    assert.equal(checkNamed(checks, "release path").ok, true)
-    assert.equal(checkNamed(checks, "process templates").ok, true)
-    assert.equal(checkNamed(checks, "process working directories").ok, true)
+    expect(checkNamed(checks, "release path").ok).toBe(true)
+    expect(checkNamed(checks, "process templates").ok).toBe(true)
+    expect(checkNamed(checks, "process working directories").ok).toBe(true)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -274,8 +275,8 @@ test("runReleaseChecks flags a command that references an undefined template var
     const config = releaseConfig({processes: [{command: "run web --secret {{missingVar}}", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
     const templates = checkNamed(await runReleaseChecks(config, {releasePath}), "process templates")
 
-    assert.equal(templates.ok, false)
-    assert.match(templates.detail, /web:.*missingVar/)
+    expect(templates.ok).toBe(false)
+    expect(templates.detail).toMatch(/web:.*missingVar/)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -292,12 +293,12 @@ test("runReleaseChecks reports a missing process working directory", async () =>
     const config = releaseConfig({processes: [{command: "run web", cwd: "{{releasePath}}/backend", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
     const checks = await runReleaseChecks(config, {releasePath})
 
-    assert.equal(checkNamed(checks, "release path").ok, true)
+    expect(checkNamed(checks, "release path").ok).toBe(true)
 
     const directories = checkNamed(checks, "process working directories")
 
-    assert.equal(directories.ok, false)
-    assert.match(directories.detail, /web .*backend/)
+    expect(directories.ok).toBe(false)
+    expect(directories.detail).toMatch(/web .*backend/)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -310,7 +311,7 @@ test("runReleaseChecks reports a missing release path", async () => {
     const config = releaseConfig({processes: [{command: "run web", id: "web", policy: "proxied", port: {from: 18000, to: 18099}}], root})
     const checks = await runReleaseChecks(config, {releasePath: path.join(root, "does-not-exist")})
 
-    assert.equal(checkNamed(checks, "release path").ok, false)
+    expect(checkNamed(checks, "release path").ok).toBe(false)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -355,8 +356,8 @@ test("doctor CLI passes for a valid, bindable config", async () => {
   try {
     const output = await captureCli(["node", "rollbridge", "doctor", "-c", path.join(root, "rollbridge.js")])
 
-    assert.match(output, /All checks passed\./)
-    assert.notEqual(process.exitCode, 1)
+    expect(output).toMatch(/All checks passed\./)
+    expect(process.exitCode).not.toBe(1)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -370,8 +371,8 @@ test("doctor CLI fails and exits non-zero for an invalid config", async () => {
   try {
     const output = await captureCli(["node", "rollbridge", "doctor", "-c", path.join(root, "rollbridge.js")])
 
-    assert.equal(process.exitCode, 1)
-    assert.match(output, /✗ config:/)
+    expect(process.exitCode).toBe(1)
+    expect(output).toMatch(/✗ config:/)
   } finally {
     process.exitCode = 0
     await fs.rm(root, {force: true, recursive: true})
@@ -396,15 +397,15 @@ test("doctor --json emits structured checks", async () => {
   try {
     const passing = JSON.parse(await captureCli(["node", "rollbridge", "doctor", "--json", "-c", path.join(okRoot, "rollbridge.js")]))
 
-    assert.equal(passing.ok, true)
-    assert.ok(passing.checks.some((/** @type {{name: string, ok: boolean}} */ check) => check.name === "proxy port" && check.ok === true))
-    assert.notEqual(process.exitCode, 1)
+    expect(passing.ok).toBe(true)
+    expect(passing.checks.some((/** @type {{name: string, ok: boolean}} */ check) => check.name === "proxy port" && check.ok === true)).toBeTruthy()
+    expect(process.exitCode).not.toBe(1)
 
     const failing = JSON.parse(await captureCli(["node", "rollbridge", "doctor", "--json", "-c", path.join(badRoot, "rollbridge.js")]))
 
-    assert.equal(failing.ok, false)
-    assert.ok(failing.checks.some((/** @type {{name: string, ok: boolean}} */ check) => check.name === "config" && check.ok === false))
-    assert.equal(process.exitCode, 1)
+    expect(failing.ok).toBe(false)
+    expect(failing.checks.some((/** @type {{name: string, ok: boolean}} */ check) => check.name === "config" && check.ok === false)).toBeTruthy()
+    expect(process.exitCode).toBe(1)
   } finally {
     process.exitCode = 0
     await fs.rm(okRoot, {force: true, recursive: true})
@@ -430,11 +431,11 @@ test("doctor --release-path adds release checks, passing or failing on the worki
   try {
     const passing = await captureCli(["node", "rollbridge", "doctor", "-c", path.join(root, "rollbridge.js"), "--release-path", releasePath])
 
-    assert.match(passing, /✓ release path:/)
-    assert.match(passing, /✓ process templates:/)
-    assert.match(passing, /✓ process working directories:/)
-    assert.match(passing, /All checks passed\./)
-    assert.notEqual(process.exitCode, 1)
+    expect(passing).toMatch(/✓ release path:/)
+    expect(passing).toMatch(/✓ process templates:/)
+    expect(passing).toMatch(/✓ process working directories:/)
+    expect(passing).toMatch(/All checks passed\./)
+    expect(process.exitCode).not.toBe(1)
 
     // A release without the rendered backend directory fails the working-directories check.
     const emptyRelease = path.join(root, "empty-release")
@@ -443,10 +444,11 @@ test("doctor --release-path adds release checks, passing or failing on the worki
 
     const failing = await captureCli(["node", "rollbridge", "doctor", "-c", path.join(root, "rollbridge.js"), "--release-path", emptyRelease])
 
-    assert.match(failing, /✗ process working directories:/)
-    assert.equal(process.exitCode, 1)
+    expect(failing).toMatch(/✗ process working directories:/)
+    expect(process.exitCode).toBe(1)
   } finally {
     process.exitCode = 0
     await fs.rm(root, {force: true, recursive: true})
   }
+})
 })

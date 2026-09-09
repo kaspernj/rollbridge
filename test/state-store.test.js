@@ -1,11 +1,12 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, expect, test} from "@velocious/testing"
 import {clearState, readState, writeState} from "../src/state-store.js"
+
+describe("state-store", () => {
 
 test("writeState then readState round-trips a snapshot", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-state-"))
@@ -16,7 +17,7 @@ test("writeState then readState round-trips a snapshot", async () => {
 
     const state = /** @type {{activeReleaseId: string}} */ (await readState(statePath))
 
-    assert.equal(state.activeReleaseId, "v1")
+    expect(state.activeReleaseId).toBe("v1")
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -28,7 +29,7 @@ test("writeState keeps durable guardian capabilities private", async () => {
 
   try {
     await writeState(statePath, {recovery: {guardian: {token: "private"}}})
-    assert.equal((await fs.stat(statePath)).mode & 0o777, 0o600)
+    expect((await fs.stat(statePath)).mode & 0o777).toBe(0o600)
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -39,11 +40,11 @@ test("readState returns undefined for a missing or unparseable file", async () =
   const statePath = path.join(dir, "state.json")
 
   try {
-    assert.equal(await readState(statePath), undefined)
+    expect(await readState(statePath)).toBe(undefined)
 
     await fs.writeFile(statePath, "{not json")
 
-    assert.equal(await readState(statePath), undefined)
+    expect(await readState(statePath)).toBe(undefined)
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -59,7 +60,7 @@ test("concurrent writes leave a complete, uncorrupted snapshot", async () => {
     const state = /** @type {{n: number}} */ (await readState(statePath))
 
     // A complete snapshot from one of the writers — never a partial/corrupt file or a temp race.
-    assert.ok(state && typeof state.n === "number")
+    expect(state && typeof state.n === "number").toBeTruthy()
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -73,9 +74,10 @@ test("clearState removes the file and ignores a missing one", async () => {
     await writeState(statePath, {ok: true})
     await clearState(statePath)
 
-    assert.equal(await readState(statePath), undefined)
+    expect(await readState(statePath)).toBe(undefined)
     await clearState(statePath)
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
+})
 })

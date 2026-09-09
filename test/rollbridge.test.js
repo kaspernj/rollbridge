@@ -1,19 +1,20 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath, pathToFileURL} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import {liveProcesses, readState, writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
+
+describe("rollbridge", () => {
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
@@ -22,6 +23,7 @@ const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
 const memoryHogPath = path.join(currentDir, "fixtures", "memory-hog.js")
 const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 const singletonAppPath = path.join(currentDir, "fixtures", "singleton-app.js")
+const linuxTest = process.platform === "linux" ? test : test.skip
 
 test("a nonBlockingDrain worker stops immediately while its release is still draining", async () => {
   const fixture = await createFixture({nonBlockingDrainWorker: true})
@@ -47,9 +49,9 @@ test("a nonBlockingDrain worker stops immediately while its release is still dra
 
     // The release is still draining (the WebSocket is held) and its proxied process is still
     // serving, but the worker has already drained.
-    assert.equal(v1.state, "draining")
-    assert.equal(v1.processes.find((processStatus) => processStatus.id === "web")?.state, "running")
-    assert.equal(v1.processes.find((processStatus) => processStatus.id === "worker")?.state, "stopped")
+    expect(v1.state).toBe("draining")
+    expect(v1.processes.find((processStatus) => processStatus.id === "web")?.state).toBe("running")
+    expect(v1.processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("stopped")
   } finally {
     if (socket) socket.close()
     await daemon.shutdown()
@@ -63,16 +65,16 @@ test("deploy switches new HTTP traffic while old WebSockets drain", async () => 
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
 
     const websocket = await openWebSocket(daemon)
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
-    assert.equal(await fetchText(daemon, "/release"), "v2")
+    expect(await fetchText(daemon, "/release")).toBe("v2")
 
     const drainingRelease = statusRelease(daemon, "v1")
-    assert.equal(drainingRelease.state, "draining")
-    assert.equal(drainingRelease.connections.websocket, 1)
+    expect(drainingRelease.state).toBe("draining")
+    expect(drainingRelease.connections.websocket).toBe(1)
 
     websocket.close()
     await waitFor(async () => statusRelease(daemon, "v1").state === "stopped")
@@ -89,13 +91,10 @@ test("failed health check leaves the previous release active", async () => {
   try {
     await daemon.deploy({releaseId: "good", releasePath: fixture.root, revision: "good"})
 
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"}),
-      /Health check failed/
-    )
+    await expect(daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"})).rejects.toThrow(/Health check failed/)
 
-    assert.equal(await fetchText(daemon, "/release"), "good")
-    assert.equal(daemon.status().activeReleaseId, "good")
+    expect(await fetchText(daemon, "/release")).toBe("good")
+    expect(daemon.status().activeReleaseId).toBe("good")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -128,8 +127,8 @@ test("deploy reloads process config and retires the previous worker with the ref
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
     await waitFor(() => statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state === "stopped", 1000)
 
-    assert.equal(daemon.config.processes.find((processConfig) => processConfig.id === "worker")?.gracefulStopMs, 50)
-    assert.equal(await fetchText(daemon, "/release"), "v2")
+    expect(daemon.config.processes.find((processConfig) => processConfig.id === "worker")?.gracefulStopMs).toBe(50)
+    expect(await fetchText(daemon, "/release")).toBe("v2")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -149,12 +148,9 @@ test("deploy rejects a reloaded config that changes the running proxy", async ()
       proxy: {...fixture.config.proxy, host: "0.0.0.0"}
     }), fixture.root)
 
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      /proxy\.host.*restart the Rollbridge daemon/
-    )
-    assert.equal(daemon.status().activeReleaseId, "v1")
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/proxy\.host.*restart the Rollbridge daemon/)
+    expect(daemon.status().activeReleaseId).toBe("v1")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -178,14 +174,11 @@ test("a failed deploy does not adopt reloaded process config", async () => {
     })
 
     await writeConfigFile(failingConfig, fixture.root)
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      /Health check failed/
-    )
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/Health check failed/)
 
-    assert.equal(daemon.config.processes.find((processConfig) => processConfig.id === "web")?.health?.path, "/ping")
-    assert.equal(daemon.status().activeReleaseId, "v1")
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(daemon.config.processes.find((processConfig) => processConfig.id === "web")?.health?.path).toBe("/ping")
+    expect(daemon.status().activeReleaseId).toBe("v1")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -202,11 +195,11 @@ test("wildcard proxy bind host targets release processes through loopback", asyn
     const status = daemon.status()
     const release = statusRelease(daemon, "v1")
 
-    assert.ok(daemon.activeRelease, "expected active release")
-    assert.equal(status.proxy.host, "0.0.0.0")
-    assert.equal(status.proxy.upstreamHost, "127.0.0.1")
-    assert.equal(daemon.activeRelease.proxyTarget().target, `http://127.0.0.1:${release.ports.web}`)
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    if (!daemon.activeRelease) throw new Error("expected active release")
+    expect(status.proxy.host).toBe("0.0.0.0")
+    expect(status.proxy.upstreamHost).toBe("127.0.0.1")
+    expect(daemon.activeRelease.proxyTarget().target).toBe(`http://127.0.0.1:${release.ports.web}`)
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -225,27 +218,24 @@ test("failed release startup logs process output and cleanup status", async () =
   await daemon.start()
 
   try {
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"}),
-      /Health check failed/
-    )
+    await expect(daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"})).rejects.toThrow(/Health check failed/)
 
     const processStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.phase === "before cleanup" && entry.data?.processId === "web")
     const cleanupProcessStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.phase === "after cleanup" && entry.data?.processId === "web")
     const handoffServiceStatusLog = logs.find((entry) => entry.message === "release startup process status" && entry.data?.phase === "after cleanup" && entry.data?.processId === "beacon")
 
-    assert.ok(processStatusLog, "expected failed web process diagnostics to be logged")
-    assert.ok(processStatusLog.data, "expected diagnostic data")
-    assert.ok(Array.isArray(processStatusLog.data.logs), "expected retained process output in diagnostics")
-    assert.ok(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stdout"))
-    assert.ok(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stderr"))
-    assert.equal(processStatusLog.data.state, "running")
-    assert.ok(cleanupProcessStatusLog, "expected failed web cleanup diagnostics to be logged")
-    assert.equal(cleanupProcessStatusLog.data?.state, "stopped")
-    assert.equal(cleanupProcessStatusLog.data?.exitSignal, "SIGTERM")
-    assert.ok(handoffServiceStatusLog, "expected handoff service cleanup diagnostics to be logged")
-    assert.equal(handoffServiceStatusLog.data?.state, "stopped")
-    assert.equal(handoffServiceStatusLog.data?.exitSignal, "SIGTERM")
+    if (!processStatusLog) throw new Error("expected failed web process diagnostics to be logged")
+    if (!processStatusLog.data) throw new Error("expected diagnostic data")
+    if (!Array.isArray(processStatusLog.data.logs)) throw new Error("expected retained process output in diagnostics")
+    expect(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stdout")).toBeTruthy()
+    expect(processStatusLog.data.logs.some((entry) => typeof entry === "object" && entry && "line" in entry && entry.line === "startup stderr")).toBeTruthy()
+    expect(processStatusLog.data.state).toBe("running")
+    if (!cleanupProcessStatusLog) throw new Error("expected failed web cleanup diagnostics to be logged")
+    expect(cleanupProcessStatusLog.data?.state).toBe("stopped")
+    expect(cleanupProcessStatusLog.data?.exitSignal).toBe("SIGTERM")
+    if (!handoffServiceStatusLog) throw new Error("expected handoff service cleanup diagnostics to be logged")
+    expect(handoffServiceStatusLog.data?.state).toBe("stopped")
+    expect(handoffServiceStatusLog.data?.exitSignal).toBe("SIGTERM")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -270,8 +260,8 @@ test("singleton processes restart without overlap during deploy", async () => {
 
     const status = daemon.status()
 
-    assert.equal(status.singletons.length, 1)
-    assert.equal(status.singletons[0].process.state, "running")
+    expect(status.singletons.length).toBe(1)
+    expect(status.singletons[0].process.state).toBe("running")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -319,9 +309,12 @@ test("candidate activation quiesces the old jobs generation before a blocked sin
     await singletonReplacementBlocked
     await Promise.resolve()
 
-    assert.equal(daemon.status().activeReleaseId, "v2", "candidate traffic must already be active")
-    assert.equal(deploySettled, false, "deploy must remain pending on singleton replacement")
-    assert.equal(await fs.readFile(fixture.serviceQuietPath, "utf8"), "v1\n", "old jobs-main must quiesce before singleton replacement completes")
+    // Candidate traffic must already be active.
+    expect(daemon.status().activeReleaseId).toBe("v2")
+    // Deploy must remain pending on singleton replacement.
+    expect(deploySettled).toBe(false)
+    // Old jobs-main must quiesce before singleton replacement completes.
+    expect(await fs.readFile(fixture.serviceQuietPath, "utf8")).toBe("v1\n")
 
     await fs.writeFile(singletonGatePath, "continue\n")
     singletonGateReleased = true
@@ -350,7 +343,7 @@ test("a failed singleton replacement surfaces the error after stopping the old s
     await waitFor(async () => (await processEvents(fixture.singletonLogPath)).some((event) => event.event === "start" && event.releaseId === "v1"))
 
     // The new release's singleton fails to start, so the deploy surfaces the error.
-    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}))
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow()
 
     // The old singleton is stopped before the new one is started, so two copies never
     // overlap — even when the replacement then fails.
@@ -360,9 +353,9 @@ test("a failed singleton replacement surfaces the error after stopping the old s
 
     // Traffic switches before singletons are replaced, so the new release is already active,
     // but its singleton is left failed with no replacement running.
-    assert.equal(status.activeReleaseId, "v2")
-    assert.equal(status.singletons.length, 1)
-    assert.equal(status.singletons[0].process.state, "failed")
+    expect(status.activeReleaseId).toBe("v2")
+    expect(status.singletons.length).toBe(1)
+    expect(status.singletons[0].process.state).toBe("failed")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -379,15 +372,15 @@ test("service processes start before releases and restart with the latest deploy
 
     const firstServiceStatus = daemon.status().services[0].process
 
-    assert.ok(firstServiceStatus.pid, "service should have a pid")
-    assert.match(firstServiceStatus.command, /v1/)
+    expect(firstServiceStatus.pid).toBeTruthy()
+    expect(firstServiceStatus.command).toMatch(/v1/)
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
     const secondServiceStatus = daemon.status().services[0].process
 
-    assert.equal(secondServiceStatus.pid, firstServiceStatus.pid)
-    assert.match(secondServiceStatus.command, /v2/)
+    expect(secondServiceStatus.pid).toBe(firstServiceStatus.pid)
+    expect(secondServiceStatus.command).toMatch(/v2/)
 
     process.kill(-Number(secondServiceStatus.pid), "SIGTERM")
     await waitFor(async () => {
@@ -413,28 +406,28 @@ test("handoff services start per release and drain with their release", async ()
     const v1 = statusRelease(daemon, "v1")
     const v1Service = v1.processes.find((processStatus) => processStatus.id === "beacon")
 
-    assert.ok(v1Service?.pid, "v1 service should be running")
-    assert.equal(v1.ports.beacon > 0, true)
+    expect(v1Service?.pid).toBeTruthy()
+    expect(v1.ports.beacon > 0).toBe(true)
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
     const v2 = statusRelease(daemon, "v2")
     const v2Service = v2.processes.find((processStatus) => processStatus.id === "beacon")
 
-    assert.ok(v2Service?.pid, "v2 service should be running")
-    assert.notEqual(v2.ports.beacon, v1.ports.beacon)
-    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state, "quiesced")
+    expect(v2Service?.pid).toBeTruthy()
+    expect(v2.ports.beacon).not.toBe(v1.ports.beacon)
+    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("quiesced")
 
     socket.close()
     socket = undefined
 
     await waitFor(() => statusRelease(daemon, "v1").state === "stopped")
-    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state, "stopped")
+    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("stopped")
 
     const events = await processEvents(fixture.serviceLogPath)
 
-    assert.ok(events.some((event) => event.event === "start" && event.releaseId === "v1"), "v1 service should start")
-    assert.ok(events.some((event) => event.event === "start" && event.releaseId === "v2"), "v2 service should start")
-    assert.ok(events.some((event) => event.event === "stop" && event.releaseId === "v1"), "v1 service should stop after drain")
+    expect(events.some((event) => event.event === "start" && event.releaseId === "v1")).toBe(true)
+    expect(events.some((event) => event.event === "start" && event.releaseId === "v2")).toBe(true)
+    expect(events.some((event) => event.event === "stop" && event.releaseId === "v1")).toBe(true)
   } finally {
     if (socket) socket.close()
     await daemon.shutdown()
@@ -457,8 +450,8 @@ test("handoff services stop after release-local dependents finish draining", asy
 
     const drainingRelease = statusRelease(daemon, "v1")
 
-    assert.equal(drainingRelease.state, "draining")
-    assert.equal(drainingRelease.processes.find((processStatus) => processStatus.id === "beacon")?.state, "quiesced")
+    expect(drainingRelease.state).toBe("draining")
+    expect(drainingRelease.processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("quiesced")
 
     socket.close()
     socket = undefined
@@ -467,7 +460,8 @@ test("handoff services stop after release-local dependents finish draining", asy
     const events = await processEvents(fixture.serviceLogPath)
     const v1ServiceStop = events.find((event) => event.event === "stop" && event.releaseId === "v1")
 
-    assert.ok(v1ServiceStop, "v1 handoff service should stop after release drain")
+    // V1 handoff service should stop after release drain.
+    expect(v1ServiceStop).toBeTruthy()
   } finally {
     if (socket) socket.close()
     await daemon.shutdown()
@@ -485,20 +479,26 @@ test("candidate activation retires jobs-main with its workers without waiting fo
     const oldService = oldRelease.processes.find((processStatus) => processStatus.id === "beacon")
     const oldWorker = oldRelease.processes.find((processStatus) => processStatus.id === "worker")
 
-    assert.ok(oldService?.pid)
-    assert.ok(oldWorker?.pid)
+    expect(oldService?.pid).toBeTruthy()
+    expect(oldWorker?.pid).toBeTruthy()
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    assert.equal(daemon.status().activeReleaseId, "v2", "traffic must switch only after the complete candidate is healthy")
-    assert.equal(await fs.readFile(fixture.serviceQuietPath, "utf8"), "v1\n", "old jobs-main must quiesce immediately after candidate activation")
+    // Traffic must switch only after the complete candidate is healthy.
+    expect(daemon.status().activeReleaseId).toBe("v2")
+    // Old jobs-main must quiesce immediately after candidate activation.
+    expect(await fs.readFile(fixture.serviceQuietPath, "utf8")).toBe("v1\n")
 
     const retired = statusRelease(daemon, "v1")
 
-    assert.equal(retired.state, "draining", "deployment completion must not wait for the old jobs generation")
-    assert.equal(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state, "quiesced", "old jobs-main must remain alive and quiesced with its draining workers")
-    assert.notEqual(retired.processes.find((processStatus) => processStatus.id === "worker")?.state, "stopped", "old worker must remain in its original generation until accepted work settles")
-    assert.notEqual(statusRelease(daemon, "v2").ports.beacon, retired.ports.beacon, "old and new workers must retain distinct jobs-main endpoints")
+    // Deployment completion must not wait for the old jobs generation.
+    expect(retired.state).toBe("draining")
+    // Old jobs-main must remain alive and quiesced with its draining workers.
+    expect(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("quiesced")
+    // Old worker must remain in its original generation until accepted work settles.
+    expect(retired.processes.find((processStatus) => processStatus.id === "worker")?.state).not.toBe("stopped")
+    // Old and new workers must retain distinct jobs-main endpoints.
+    expect(statusRelease(daemon, "v2").ports.beacon).not.toBe(retired.ports.beacon)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -511,14 +511,14 @@ test("opt-in generation lifecycle acknowledges old retirement before activating 
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1"])
-    assert.equal(daemon.status().activeReleaseId, "v1")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1"])
+    expect(daemon.status().activeReleaseId).toBe("v1")
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
-    assert.equal(daemon.status().activeReleaseId, "v2")
-    assert.equal(daemon.status().generationTransition?.phase, "committed")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
+    expect(daemon.status().activeReleaseId).toBe("v2")
+    expect(daemon.status().generationTransition?.phase).toBe("committed")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -535,11 +535,11 @@ test("manual restart reaches the active handoff coordinator and restores its lif
     const result = await daemon.restartProcesses({processId: "beacon"})
     const after = statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "beacon")?.pid
 
-    assert.deepEqual(result, {restarted: ["beacon"]})
-    assert.ok(before)
-    assert.ok(after)
-    assert.notEqual(after, before)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v1"])
+    expect(result).toEqual({restarted: ["beacon"]})
+    expect(before).toBeTruthy()
+    expect(after).toBeTruthy()
+    expect(after).not.toBe(before)
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v1"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -574,14 +574,14 @@ test("generation commit is durable before awaited post-transition work", async (
 
     const persisted = /** @type {{activeReleaseId?: string, generationTransition?: {phase?: string}, singletonReleaseIds?: Record<string, string>} | undefined} */ (await readState(fixture.statePath))
 
-    assert.equal(daemon.status().activeReleaseId, "v2")
-    assert.equal(persisted?.activeReleaseId, "v2")
-    assert.equal(persisted?.generationTransition?.phase, "committed_pending")
-    assert.equal(persisted?.singletonReleaseIds?.["jobs-main"], "v1")
+    expect(daemon.status().activeReleaseId).toBe("v2")
+    expect(persisted?.activeReleaseId).toBe("v2")
+    expect(persisted?.generationTransition?.phase).toBe("committed_pending")
+    expect(persisted?.singletonReleaseIds?.["jobs-main"]).toBe("v1")
 
     releaseReplacement()
     await deployPromise
-    assert.equal(daemon.status().generationTransition?.phase, "committed")
+    expect(daemon.status().generationTransition?.phase).toBe("committed")
   } finally {
     releaseReplacement()
     await deployPromise?.catch(() => {})
@@ -598,18 +598,19 @@ test("exact committed retry finishes pending singleton replacement before succes
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /ENOENT/)
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/ENOENT/)
 
-    assert.equal(daemon.status().activeReleaseId, "v2", "traffic remains durably committed")
-    assert.equal(daemon.status().generationTransition?.phase, "committed_pending")
-    assert.notEqual(daemon.status().singletons[0]?.process.state, "running")
+    // Traffic remains durably committed.
+    expect(daemon.status().activeReleaseId).toBe("v2")
+    expect(daemon.status().generationTransition?.phase).toBe("committed_pending")
+    expect(daemon.status().singletons[0]?.process.state).not.toBe("running")
 
     await fs.mkdir(path.join(fixture.root, "v2"))
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    assert.equal(daemon.status().generationTransition?.phase, "committed")
-    assert.equal(daemon.status().singletons[0]?.process.state, "running")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+    expect(daemon.status().generationTransition?.phase).toBe("committed")
+    expect(daemon.status().singletons[0]?.process.state).toBe("running")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -621,12 +622,12 @@ test("first generation is not committed when its activation acknowledgement fail
   const daemon = await startDaemon(fixture.config)
 
   try {
-    await assert.rejects(() => daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"}), /activate command exited non-zero/)
+    await expect(daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})).rejects.toThrow(/activate command exited non-zero/)
     const status = daemon.status()
 
-    assert.equal(status.activeReleaseId, null)
-    assert.equal(status.generationTransition?.phase, "activating_candidate")
-    assert.deepEqual(status.releaseReferences.map((reference) => reference.releaseId), ["v1"])
+    expect(status.activeReleaseId).toBe(null)
+    expect(status.generationTransition?.phase).toBe("activating_candidate")
+    expect(status.releaseReferences.map((reference) => reference.releaseId)).toEqual(["v1"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -639,21 +640,21 @@ test("retirement acknowledgement failure retains the exact transition, blocks ot
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /retirement quiescence failed/)
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/retirement quiescence failed/)
 
     const failed = daemon.status()
 
-    assert.equal(failed.activeReleaseId, "v1")
-    assert.equal(failed.generationTransition?.phase, "retiring_previous")
-    assert.match(String(failed.generationTransition?.error), /quiet command exited non-zero/)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1"])
-    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+    expect(failed.activeReleaseId).toBe("v1")
+    expect(failed.generationTransition?.phase).toBe("retiring_previous")
+    expect(String(failed.generationTransition?.error)).toMatch(/quiet command exited non-zero/)
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1"])
+    await expect(daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})).rejects.toThrow(/transition.*v2.*unresolved/i)
 
     await fs.writeFile(fixture.retirementGatePath, "allow\n")
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    assert.equal(daemon.status().activeReleaseId, "v2")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+    expect(daemon.status().activeReleaseId).toBe("v2")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -669,41 +670,37 @@ test("candidate activation failure reports restoration failure and exact recover
     const incumbentCoordinator = daemon.releases.get("v1")?.getProcess("beacon")
     const reactivate = incumbentCoordinator?.reactivateStrict.bind(incumbentCoordinator)
 
-    assert.ok(incumbentCoordinator && reactivate)
+    if (!(incumbentCoordinator && reactivate)) throw new Error("Missing required fixture: incumbentCoordinator && reactivate")
     incumbentCoordinator.reactivateStrict = async () => { throw new Error("incumbent restoration rejected") }
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      error => {
-        assert.ok(error instanceof AggregateError)
-        assert.match(error.message, /activate command exited non-zero/)
-        assert.match(error.message, /incumbent v1 restoration failed: incumbent restoration rejected/i)
-        return true
-      }
-    )
+    const deployment = daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    await expect(deployment).rejects.toBeInstanceOf(AggregateError)
+    await expect(deployment).rejects.toMatchObject({message: expect.stringMatching(/activate command exited non-zero/)})
+    await expect(deployment).rejects.toMatchObject({message: expect.stringMatching(/incumbent v1 restoration failed: incumbent restoration rejected/i)})
 
     const failed = daemon.status()
 
-    assert.equal(failed.activeReleaseId, "v1")
-    assert.equal(failed.generationTransition?.phase, "restoring_previous")
-    assert.match(String(failed.generationTransition?.activationError), /activate command exited non-zero/)
-    assert.match(String(failed.generationTransition?.compensationError), /incumbent restoration rejected/)
+    expect(failed.activeReleaseId).toBe("v1")
+    expect(failed.generationTransition?.phase).toBe("restoring_previous")
+    expect(String(failed.generationTransition?.activationError)).toMatch(/activate command exited non-zero/)
+    expect(String(failed.generationTransition?.compensationError)).toMatch(/incumbent restoration rejected/)
     const failedEvents = daemon.eventLog.recent()
     const activationEvent = failedEvents.find((event) => event.message === "release generation activation failed")
     const restorationEvent = failedEvents.find((event) => event.message === "release generation compensation restoration failed")
 
-    assert.match(String(activationEvent?.data.error), /activate command exited non-zero/)
-    assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
-    assert.match(String(restorationEvent?.data.error), /incumbent restoration rejected/)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2"])
-    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+    expect(String(activationEvent?.data.error)).toMatch(/activate command exited non-zero/)
+    expect(String(restorationEvent?.data.activationError)).toMatch(/activate command exited non-zero/)
+    expect(String(restorationEvent?.data.error)).toMatch(/incumbent restoration rejected/)
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2"])
+    await expect(daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})).rejects.toThrow(/transition.*v2.*unresolved/i)
     const failedCandidate = daemon.releases.get("v2")
 
-    assert.ok(failedCandidate)
+    if (!failedCandidate) throw new Error("Missing required fixture: failedCandidate")
     await failedCandidate.stop()
     incumbentCoordinator.reactivateStrict = reactivate
     await incumbentCoordinator.stop()
-    assert.equal(failedCandidate.state, "stopped")
-    assert.equal(incumbentCoordinator.status().state, "stopped")
+    expect(failedCandidate.state).toBe("stopped")
+    expect(incumbentCoordinator.status().state).toBe("stopped")
     daemon.config = structuredClone(daemon.config)
     daemon.config.processes[0].lifecycle.activateTimeoutMs = (daemon.config.processes[0].lifecycle.activateTimeoutMs ?? 30000) + 1
     const recovery = await sendControlCommand({
@@ -717,13 +714,13 @@ test("candidate activation failure reports restoration failure and exact recover
       path: fixture.config.control.path
     })
 
-    assert.equal(recovery.recoveryStatus, "recovered")
-    assert.equal(daemon.status().activeReleaseId, "v1")
-    assert.equal(daemon.status().generationTransition, undefined)
+    expect(recovery.recoveryStatus).toBe("recovered")
+    expect(daemon.status().activeReleaseId).toBe("v1")
+    expect(daemon.status().generationTransition).toBe(undefined)
     const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
 
-    assert.equal(persisted?.generationTransition, undefined)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+    expect(persisted?.generationTransition).toBe(undefined)
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
 
     const idempotent = await sendControlCommand({
       command: {
@@ -736,10 +733,9 @@ test("candidate activation failure reports restoration failure and exact recover
       path: fixture.config.control.path
     })
 
-    assert.equal(idempotent.recoveryStatus, "already_recovered")
+    expect(idempotent.recoveryStatus).toBe("already_recovered")
     await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
-    await assert.rejects(
-      () => sendControlCommand({
+    await expect(sendControlCommand({
         command: {
           command: "recover-generation-transition",
           previousReleaseId: "v1",
@@ -748,9 +744,7 @@ test("candidate activation failure reports restoration failure and exact recover
           revision: "v3"
         },
         path: fixture.config.control.path
-      }),
-      /not a safe failed pre-commit transition/i
-    )
+      })).rejects.toThrow(/not a safe failed pre-commit transition/i)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -765,12 +759,9 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     const incumbentCoordinator = daemon.releases.get("v1")?.getProcess("beacon")
 
-    assert.ok(incumbentCoordinator)
+    if (!incumbentCoordinator) throw new Error("Missing required fixture: incumbentCoordinator")
     incumbentCoordinator.reactivateStrict = async () => { throw new Error("Cannot activate background jobs generation from retired") }
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      /Cannot activate background jobs generation from retired/i
-    )
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/Cannot activate background jobs generation from retired/i)
 
     const candidate = daemon.releases.get("v2")
     const transition = daemon.generationTransition
@@ -788,46 +779,49 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
       path: fixture.config.control.path
     })
 
-    assert.ok(candidate && transition && incumbentWebPid)
-    assert.equal(candidate.state, "draining", "ordinary failed compensation leaves the candidate draining")
+    if (!(candidate && transition && incumbentWebPid)) throw new Error("Missing required fixture: candidate && transition && incumbentWebPid")
+    // Ordinary failed compensation leaves the candidate draining.
+    expect(candidate.state).toBe("draining")
 
     const retainedCandidateConfig = candidate.config
 
     candidate.config = {...candidate.config, releaseRetention: {...candidate.config.releaseRetention, keep: candidate.config.releaseRetention.keep + 1}}
-    await assert.rejects(() => exactRecovery(), /does not retain its exact path, revision, and config authority/i)
+    await expect(exactRecovery()).rejects.toThrow(/does not retain its exact path, revision, and config authority/i)
     candidate.config = retainedCandidateConfig
-    await assert.rejects(() => exactRecovery({previousReleaseId: "wrong-v1"}), /refusing stale recovery/i)
-    await assert.rejects(() => exactRecovery({revision: "wrong-v2"}), /exact same release, path, revision, and config authority/i)
+    await expect(exactRecovery({previousReleaseId: "wrong-v1"})).rejects.toThrow(/refusing stale recovery/i)
+    await expect(exactRecovery({revision: "wrong-v2"})).rejects.toThrow(/exact same release, path, revision, and config authority/i)
     transition.phase = "retiring_failed_candidate"
-    await assert.rejects(() => exactRecovery(), /requires retiring_previous or restoring_previous/i)
+    await expect(exactRecovery()).rejects.toThrow(/requires retiring_previous or restoring_previous/i)
     transition.phase = "restoring_previous"
     const terminalFailure = transition.compensationError
 
     transition.compensationError = "incumbent activation was temporarily unavailable"
-    await assert.rejects(() => exactRecovery(), /terminal retirement/i)
+    await expect(exactRecovery()).rejects.toThrow(/terminal retirement/i)
     transition.compensationError = terminalFailure
     await incumbentCoordinator.setLifecycleRole("retired")
-    assert.equal(incumbentCoordinator.status().lifecycleRole, "retired")
+    expect(incumbentCoordinator.status().lifecycleRole).toBe("retired")
     const checkpoint = daemon.checkpointGenerationTransition.bind(daemon)
 
     daemon.checkpointGenerationTransition = async () => { throw new Error("injected checkpoint failure") }
-    await assert.rejects(() => exactRecovery(), /checkpoint failed: injected checkpoint failure/i)
-    assert.equal(daemon.generationTransition, transition)
+    await expect(exactRecovery()).rejects.toThrow(/checkpoint failed: injected checkpoint failure/i)
+    expect(daemon.generationTransition).toBe(transition)
     daemon.checkpointGenerationTransition = checkpoint
 
     const eventsBeforeRecovery = await lifecycleEvents(fixture.lifecycleLogPath)
     const recovery = await exactRecovery()
 
-    assert.equal(recovery.recoveryStatus, "retired_incumbent_accepted")
-    assert.equal(recovery.jobsStatus, "degraded")
-    assert.equal(daemon.status().generationTransition?.phase, "degraded_active")
-    assert.equal(statusRelease(daemon, "v1").processes.find(({id}) => id === "web")?.pid, incumbentWebPid)
-    assert.equal(await fetchText(daemon, "/release"), "v1")
-    assert.ok(["draining", "stopped"].includes(candidate.state), "guarded recovery returns before failed-candidate drain completion")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), eventsBeforeRecovery, "recovery must not activate either retained generation")
+    expect(recovery.recoveryStatus).toBe("retired_incumbent_accepted")
+    expect(recovery.jobsStatus).toBe("degraded")
+    expect(daemon.status().generationTransition?.phase).toBe("degraded_active")
+    expect(statusRelease(daemon, "v1").processes.find(({id}) => id === "web")?.pid).toBe(incumbentWebPid)
+    expect(await fetchText(daemon, "/release")).toBe("v1")
+    // Guarded recovery returns before failed-candidate drain completion.
+    expect(["draining", "stopped"].includes(candidate.state)).toBe(true)
+    // Recovery must not activate either retained generation.
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(eventsBeforeRecovery)
     const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
 
-    assert.equal(/** @type {{phase?: string} | undefined} */ (persisted?.generationTransition)?.phase, "degraded_active")
+    expect(/** @type {{phase?: string} | undefined} */ (persisted?.generationTransition)?.phase).toBe("degraded_active")
 
     transition.phase = "retiring_previous"
     transition.error = "Release v1 retirement quiescence failed: quiet command exited non-zero with status 1"
@@ -836,8 +830,9 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     await daemon.checkpointGenerationTransition()
     const legacyRecovery = await exactRecovery()
 
-    assert.equal(legacyRecovery.recoveryStatus, "retired_incumbent_accepted")
-    assert.equal(daemon.status().generationTransition?.phase, "degraded_active", "guarded recovery migrates a legacy terminal retirement fence")
+    expect(legacyRecovery.recoveryStatus).toBe("retired_incumbent_accepted")
+    // Guarded recovery migrates a legacy terminal retirement fence.
+    expect(daemon.status().generationTransition?.phase).toBe("degraded_active")
 
     transition.phase = "restoring_previous"
     transition.compensationError = "Process background-jobs-main is not retained for reactivation"
@@ -845,17 +840,19 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     await daemon.checkpointGenerationTransition()
     const absentCoordinatorRecovery = await exactRecovery()
 
-    assert.equal(absentCoordinatorRecovery.jobsStatus, "degraded")
-    assert.equal(daemon.status().generationTransition?.phase, "degraded_active", "terminally absent incumbent coordinator remains guarded jobs-degraded authority")
-    await assert.rejects(() => daemon.deploy({releaseId: "bad-v3", releasePath: fixture.root, revision: "bad-v3"}), /health check failed/i)
-    assert.equal(daemon.status().generationTransition?.phase, "degraded_active")
-    assert.equal(statusRelease(daemon, "v1").processes.find(({id}) => id === "web")?.pid, incumbentWebPid)
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(absentCoordinatorRecovery.jobsStatus).toBe("degraded")
+    // Terminally absent incumbent coordinator remains guarded jobs-degraded authority.
+    expect(daemon.status().generationTransition?.phase).toBe("degraded_active")
+    await expect(daemon.deploy({releaseId: "bad-v3", releasePath: fixture.root, revision: "bad-v3"})).rejects.toThrow(/health check failed/i)
+    expect(daemon.status().generationTransition?.phase).toBe("degraded_active")
+    expect(statusRelease(daemon, "v1").processes.find(({id}) => id === "web")?.pid).toBe(incumbentWebPid)
+    expect(await fetchText(daemon, "/release")).toBe("v1")
     await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
-    assert.equal(daemon.status().activeReleaseId, "v3")
-    assert.equal(daemon.status().generationTransition?.phase, "committed")
-    assert.equal(await fetchText(daemon, "/release"), "v3")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
+    expect(daemon.status().activeReleaseId).toBe("v3")
+    expect(daemon.status().generationTransition?.phase).toBe("committed")
+    expect(await fetchText(daemon, "/release")).toBe("v3")
+    // Fresh deployment must not re-retire a degraded incumbent generation.
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "activate:v3"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -868,23 +865,20 @@ test("candidate activation failure compensates to the incumbent and admits a dif
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      /activate command exited non-zero.*compensation restored incumbent v1 as authoritative and retired failed candidate v2/i
-    )
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/activate command exited non-zero.*compensation restored incumbent v1 as authoritative and retired failed candidate v2/i)
 
     const compensated = daemon.status()
 
-    assert.equal(compensated.activeReleaseId, "v1")
-    assert.equal(compensated.generationTransition, undefined)
-    assert.equal(await fetchText(daemon, "/release"), "v1")
-    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "running")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+    expect(compensated.activeReleaseId).toBe("v1")
+    expect(compensated.generationTransition).toBe(undefined)
+    expect(await fetchText(daemon, "/release")).toBe("v1")
+    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("running")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
 
     await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
 
-    assert.equal(daemon.status().activeReleaseId, "v3")
-    assert.equal(await fetchText(daemon, "/release"), "v3")
+    expect(daemon.status().activeReleaseId).toBe("v3")
+    expect(await fetchText(daemon, "/release")).toBe("v3")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -897,20 +891,17 @@ test("ambiguous candidate activation retires the candidate before reactivating t
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      /activate command exited non-zero.*compensation restored incumbent v1 as authoritative and retired failed candidate v2/i
-    )
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/activate command exited non-zero.*compensation restored incumbent v1 as authoritative and retired failed candidate v2/i)
 
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), [
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual([
       "activate:v1",
       "retire:v1",
       "activate:v2",
       "retire:v2",
       "activate:v1"
     ])
-    assert.equal(daemon.status().activeReleaseId, "v1")
-    assert.equal(daemon.status().generationTransition, undefined)
+    expect(daemon.status().activeReleaseId).toBe("v1")
+    expect(daemon.status().generationTransition).toBe(undefined)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -923,20 +914,17 @@ test("candidate activation recovery reverses a worker-specific quiet hook before
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      /compensation restored incumbent v1 as authoritative/i
-    )
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/compensation restored incumbent v1 as authoritative/i)
 
     const events = await lifecycleEvents(fixture.lifecycleLogPath)
     const candidateRetired = events.indexOf("worker-retire:v2")
     const workerReactivated = events.indexOf("worker-reactivate:v1")
 
-    assert.ok(candidateRetired >= 0, JSON.stringify(events))
-    assert.ok(workerReactivated > candidateRetired, JSON.stringify(events))
-    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "running")
-    assert.equal(daemon.status().activeReleaseId, "v1")
-    assert.equal(daemon.status().generationTransition, undefined)
+    expect({value: Boolean(candidateRetired >= 0), context: JSON.stringify(events)}).toMatchObject({value: true})
+    expect({value: Boolean(workerReactivated > candidateRetired), context: JSON.stringify(events)}).toMatchObject({value: true})
+    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("running")
+    expect(daemon.status().activeReleaseId).toBe("v1")
+    expect(daemon.status().generationTransition).toBe(undefined)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -949,28 +937,22 @@ test("candidate activation recovery keeps the fence when a worker-specific resum
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      error => {
-        const failure = /** @type {Error} */ (error)
+    const deployment = daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-        assert.match(failure.message, /activate command exited non-zero/)
-        assert.match(failure.message, /reactivate command exited non-zero/)
-        return true
-      }
-    )
+    await expect(deployment).rejects.toMatchObject({message: expect.stringMatching(/activate command exited non-zero/)})
+    await expect(deployment).rejects.toMatchObject({message: expect.stringMatching(/reactivate command exited non-zero/)})
 
     const status = daemon.status()
     const restorationEvent = daemon.eventLog.recent().find((event) => event.message === "release generation compensation restoration failed")
 
-    assert.equal(status.activeReleaseId, "v1")
-    assert.equal(status.generationTransition?.phase, "restoring_previous")
-    assert.match(String(status.generationTransition?.activationError), /activate command exited non-zero/)
-    assert.match(String(status.generationTransition?.compensationError), /reactivate command exited non-zero/)
-    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "quiesced")
-    assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
-    assert.match(String(restorationEvent?.data.error), /reactivate command exited non-zero/)
-    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+    expect(status.activeReleaseId).toBe("v1")
+    expect(status.generationTransition?.phase).toBe("restoring_previous")
+    expect(String(status.generationTransition?.activationError)).toMatch(/activate command exited non-zero/)
+    expect(String(status.generationTransition?.compensationError)).toMatch(/reactivate command exited non-zero/)
+    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("quiesced")
+    expect(String(restorationEvent?.data.activationError)).toMatch(/activate command exited non-zero/)
+    expect(String(restorationEvent?.data.error)).toMatch(/reactivate command exited non-zero/)
+    await expect(daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})).rejects.toThrow(/transition.*v2.*unresolved/i)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -989,17 +971,14 @@ test("compensation keeps the fence when the cleared checkpoint cannot be persist
       if (!daemon.generationTransition) throw new Error("cleared checkpoint unavailable")
       await checkpoint()
     }
-    await assert.rejects(
-      () => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}),
-      /activate command exited non-zero.*compensation checkpoint clear failed: cleared checkpoint unavailable/i
-    )
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/activate command exited non-zero.*compensation checkpoint clear failed: cleared checkpoint unavailable/i)
 
-    assert.equal(daemon.status().activeReleaseId, "v1")
-    assert.equal(daemon.status().generationTransition?.phase, "restoring_previous")
+    expect(daemon.status().activeReleaseId).toBe("v1")
+    expect(daemon.status().generationTransition?.phase).toBe("restoring_previous")
     const persisted = /** @type {{generationTransition?: {phase?: string}} | undefined} */ (await readState(fixture.statePath))
 
-    assert.equal(persisted?.generationTransition?.phase, "restoring_previous")
-    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+    expect(persisted?.generationTransition?.phase).toBe("restoring_previous")
+    await expect(daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})).rejects.toThrow(/transition.*v2.*unresolved/i)
 
     daemon.checkpointGenerationTransition = checkpoint
     const recovery = await sendControlCommand({
@@ -1013,8 +992,8 @@ test("compensation keeps the fence when the cleared checkpoint cannot be persist
       path: fixture.config.control.path
     })
 
-    assert.equal(recovery.recoveryStatus, "recovered")
-    assert.equal(daemon.status().generationTransition, undefined)
+    expect(recovery.recoveryStatus).toBe("recovered")
+    expect(daemon.status().generationTransition).toBe(undefined)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1029,16 +1008,16 @@ test("unresolved generation transition fences stop, restart, and rollback mutati
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     const incumbentCoordinator = daemon.releases.get("v1")?.getProcess("beacon")
 
-    assert.ok(incumbentCoordinator)
+    if (!incumbentCoordinator) throw new Error("Missing required fixture: incumbentCoordinator")
     incumbentCoordinator.reactivateStrict = async () => { throw new Error("incumbent restoration rejected") }
-    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /activate command exited non-zero/)
+    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/activate command exited non-zero/)
 
-    await assert.rejects(() => daemon.stopRelease("v2"), /cannot stop.*generation transition.*unresolved/i)
-    await assert.rejects(() => daemon.restartProcesses({processId: "beacon"}), /cannot restart.*generation transition.*unresolved/i)
-    await assert.rejects(() => daemon.rollback({releaseId: "v2"}), /cannot rollback.*generation transition.*unresolved/i)
+    await expect(daemon.stopRelease("v2")).rejects.toThrow(/cannot stop.*generation transition.*unresolved/i)
+    await expect(daemon.restartProcesses({processId: "beacon"})).rejects.toThrow(/cannot restart.*generation transition.*unresolved/i)
+    await expect(daemon.rollback({releaseId: "v2"})).rejects.toThrow(/cannot rollback.*generation transition.*unresolved/i)
 
-    assert.notEqual(statusRelease(daemon, "v2").processes.find((entry) => entry.id === "web")?.state, "stopped")
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(statusRelease(daemon, "v2").processes.find((entry) => entry.id === "web")?.state).not.toBe("stopped")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1053,13 +1032,13 @@ test("active generation restores its exact lifecycle role after coordinator auto
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     const coordinator = statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")
 
-    assert.ok(coordinator?.pid)
+    if (!coordinator?.pid) throw new Error("Missing required fixture: coordinator?.pid")
     process.kill(-coordinator.pid, "SIGKILL")
     await waitFor(async () => (await lifecycleEvents(fixture.lifecycleLogPath)).length === 2 && statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")?.state === "running", 3000)
 
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "activate:v1"])
-    assert.equal(statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")?.state, "running")
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v1"])
+    expect(statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")?.state).toBe("running")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1077,7 +1056,7 @@ test("failed active-role restoration is loud and never reports the restarted coo
     await fs.rm(fixture.activationGatePath)
     const coordinator = statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")
 
-    assert.ok(coordinator?.pid)
+    if (!coordinator?.pid) throw new Error("Missing required fixture: coordinator?.pid")
     process.kill(-coordinator.pid, "SIGKILL")
     await waitFor(() => {
       const status = statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")
@@ -1087,9 +1066,10 @@ test("failed active-role restoration is loud and never reports the restarted coo
 
     const failed = statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")
 
-    assert.equal(failed?.lifecycleRole, "active")
-    assert.equal(failed?.restarts, 1, "role restoration failure must not create an internal retry loop")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1"])
+    expect(failed?.lifecycleRole).toBe("active")
+    // Role restoration failure must not create an internal retry loop.
+    expect(failed?.restarts).toBe(1)
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1110,25 +1090,27 @@ test("retired generation coordinator remains fenced after exit", async () => {
     const coordinator = statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")
     const coordinatorProcess = daemon.releases.get("v1")?.getProcess("beacon")
 
-    assert.ok(coordinator?.pid)
-    assert.ok(coordinatorProcess)
-    assert.equal(coordinator.lifecycleRole, "retired")
-    assert.equal(daemon.guardian?.processes.get("release:v1:beacon"), coordinatorProcess, "retirement refresh must preserve exact guardian event routing")
+    if (!coordinator?.pid) throw new Error("Missing required fixture: coordinator?.pid")
+    if (!coordinatorProcess) throw new Error("Missing required fixture: coordinatorProcess")
+    expect(coordinator.lifecycleRole).toBe("retired")
+    // Retirement refresh must preserve exact guardian event routing.
+    expect(daemon.guardian?.processes.get("release:v1:beacon")).toBe(coordinatorProcess)
     const exited = once(coordinatorProcess, "exit")
 
     process.kill(-coordinator.pid, "SIGKILL")
     const [exit] = await exited
     const stopped = coordinatorProcess.status()
 
-    assert.equal(exit.code, null)
-    assert.equal(exit.id, "beacon")
-    assert.equal(exit.signal, "SIGKILL")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
-    assert.equal(stopped.lifecycleRole, "retired")
-    assert.equal(stopped.pid, undefined)
-    assert.equal(stopped.restarts, 0)
-    assert.equal(stopped.state, "stopped")
-    assert.equal(coordinatorProcess.restartTimer, undefined, "retired process must not queue a restart")
+    expect(exit.code).toBe(null)
+    expect(exit.id).toBe("beacon")
+    expect(exit.signal).toBe("SIGKILL")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
+    expect(stopped.lifecycleRole).toBe("retired")
+    expect(stopped.pid).toBe(undefined)
+    expect(stopped.restarts).toBe(0)
+    expect(stopped.state).toBe("stopped")
+    // Retired process must not queue a restart.
+    expect(coordinatorProcess.restartTimer).toBe(undefined)
   } finally {
     socket?.close()
     await daemon.shutdown()
@@ -1153,14 +1135,14 @@ test("multiple retired jobs generations keep distinct endpoints and live referen
     const status = daemon.status()
     const generations = ["v1", "v2", "v3"].map((releaseId) => statusRelease(daemon, releaseId))
 
-    assert.deepEqual(generations.map((release) => release.state), ["draining", "draining", "active"])
-    assert.equal(new Set(generations.map((release) => release.ports.beacon)).size, 3)
-    assert.deepEqual(status.releaseReferences.map((reference) => reference.releaseId), ["v1", "v2", "v3"])
-    assert.deepEqual(status.releaseReferences.map((reference) => reference.releasePath), ["v1", "v2", "v3"].map((releaseId) => path.join(fixture.root, releaseId)))
+    expect(generations.map((release) => release.state)).toEqual(["draining", "draining", "active"])
+    expect(new Set(generations.map((release) => release.ports.beacon)).size).toBe(3)
+    expect(status.releaseReferences.map((reference) => reference.releaseId)).toEqual(["v1", "v2", "v3"])
+    expect(status.releaseReferences.map((reference) => reference.releasePath)).toEqual(["v1", "v2", "v3"].map((releaseId) => path.join(fixture.root, releaseId)))
 
     for (const socket of sockets.splice(0)) socket.close()
     await waitFor(() => statusRelease(daemon, "v1").state === "stopped" && statusRelease(daemon, "v2").state === "stopped")
-    assert.deepEqual(daemon.status().releaseReferences.map((reference) => reference.releaseId), ["v3"])
+    expect(daemon.status().releaseReferences.map((reference) => reference.releaseId)).toEqual(["v3"])
   } finally {
     for (const socket of sockets) socket.close()
     await daemon.shutdown()
@@ -1177,16 +1159,17 @@ test("candidate failure preserves old traffic, jobs generation, endpoint, and re
     const before = statusRelease(daemon, "good")
     const beforeService = before.processes.find((processStatus) => processStatus.id === "beacon")
 
-    await assert.rejects(() => daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"}), /Health check failed/)
+    await expect(daemon.deploy({releaseId: "bad", releasePath: fixture.root, revision: "bad"})).rejects.toThrow(/Health check failed/)
 
     const after = statusRelease(daemon, "good")
 
-    assert.equal(await fetchText(daemon, "/release"), "good")
-    assert.equal(after.state, "active")
-    assert.equal(after.ports.beacon, before.ports.beacon)
-    assert.equal(after.processes.find((processStatus) => processStatus.id === "beacon")?.pid, beforeService?.pid)
-    assert.equal((await fs.readFile(fixture.serviceQuietPath, "utf8")).includes("good\n"), false, "candidate cleanup must not quiesce the active generation")
-    assert.deepEqual(daemon.status().releaseReferences.map((reference) => reference.releaseId), ["good"])
+    expect(await fetchText(daemon, "/release")).toBe("good")
+    expect(after.state).toBe("active")
+    expect(after.ports.beacon).toBe(before.ports.beacon)
+    expect(after.processes.find((processStatus) => processStatus.id === "beacon")?.pid).toBe(beforeService?.pid)
+    // Candidate cleanup must not quiesce the active generation.
+    expect((await fs.readFile(fixture.serviceQuietPath, "utf8")).includes("good\n")).toBe(false)
+    expect(daemon.status().releaseReferences.map((reference) => reference.releaseId)).toEqual(["good"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1206,12 +1189,12 @@ test("handoff-service quiescence failure is visible and leaves the generation al
 
     const retired = statusRelease(daemon, "v1")
 
-    assert.equal(retired.state, "draining")
-    assert.match(String(retired.retirementError), /quiet command exited non-zero.*23/)
-    assert.equal(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state, "stopping")
-    assert.notEqual(retired.processes.find((processStatus) => processStatus.id === "worker")?.state, "stopped")
-    assert.ok(logs.some((entry) => entry.message === "release retirement quiescence failed" && entry.data?.releaseId === "v1"))
-    assert.deepEqual(result.retirement, {error: retired.retirementError, releaseId: "v1", status: "quiescence_failed"})
+    expect(retired.state).toBe("draining")
+    expect(String(retired.retirementError)).toMatch(/quiet command exited non-zero.*23/)
+    expect(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("stopping")
+    expect(retired.processes.find((processStatus) => processStatus.id === "worker")?.state).not.toBe("stopped")
+    expect(logs.some((entry) => entry.message === "release retirement quiescence failed" && entry.data?.releaseId === "v1")).toBeTruthy()
+    expect(result.retirement).toEqual({error: retired.retirementError, releaseId: "v1", status: "quiescence_failed"})
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1227,21 +1210,21 @@ test("a replicated companion starts one instance per replica, and restart target
 
     const release = daemon.status().releases.find((candidate) => candidate.state === "active")
 
-    assert.ok(release)
+    if (!release) throw new Error("Missing required fixture: release")
 
     const workerIds = release.processes.filter((processStatus) => processStatus.id.startsWith("worker")).map((processStatus) => processStatus.id).sort()
 
-    assert.deepEqual(workerIds, ["worker#0", "worker#1", "worker#2"])
+    expect(workerIds).toEqual(["worker#0", "worker#1", "worker#2"])
 
     // A specific replica id restarts only that replica.
     const one = await daemon.restartProcesses({processId: "worker#1"})
 
-    assert.deepEqual(one.restarted, ["worker#1"])
+    expect(one.restarted).toEqual(["worker#1"])
 
     // The base id restarts every replica.
     const all = /** @type {string[]} */ ((await daemon.restartProcesses({processId: "worker"})).restarted)
 
-    assert.deepEqual([...all].sort(), ["worker#0", "worker#1", "worker#2"])
+    expect([...all].sort()).toEqual(["worker#0", "worker#1", "worker#2"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1258,12 +1241,12 @@ test("restart bounces a single process by id", async () => {
     const before = pidsById(daemon.status())
     const result = await daemon.restartProcesses({processId: "beacon"})
 
-    assert.deepEqual(result.restarted, ["beacon"])
+    expect(result.restarted).toEqual(["beacon"])
 
     const after = pidsById(daemon.status())
 
-    assert.ok(before.beacon && after.beacon, "beacon should have a pid before and after")
-    assert.notEqual(after.beacon, before.beacon)
+    expect(before.beacon && after.beacon).toBeTruthy()
+    expect(after.beacon).not.toBe(before.beacon)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1281,14 +1264,15 @@ test("restart with no selector bounces every non-proxied process but not the pro
     const result = await daemon.restartProcesses()
     const restarted = /** @type {string[]} */ (result.restarted)
 
-    assert.deepEqual([...restarted].sort(), ["beacon", "jobs-main", "worker"])
+    expect([...restarted].sort()).toEqual(["beacon", "jobs-main", "worker"])
 
     const after = pidsById(daemon.status())
 
-    assert.equal(after.web, before.web, "proxied process should not be restarted")
-    assert.notEqual(after.beacon, before.beacon)
-    assert.notEqual(after["jobs-main"], before["jobs-main"])
-    assert.notEqual(after.worker, before.worker)
+    // Proxied process should not be restarted.
+    expect(after.web).toBe(before.web)
+    expect(after.beacon).not.toBe(before.beacon)
+    expect(after["jobs-main"]).not.toBe(before["jobs-main"])
+    expect(after.worker).not.toBe(before.worker)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1305,12 +1289,13 @@ test("restart --policy targets only processes with that policy", async () => {
     const before = pidsById(daemon.status())
     const result = await daemon.restartProcesses({policy: "companion"})
 
-    assert.deepEqual(result.restarted, ["worker"])
+    expect(result.restarted).toEqual(["worker"])
 
     const after = pidsById(daemon.status())
 
-    assert.notEqual(after.worker, before.worker)
-    assert.equal(after.beacon, before.beacon, "the service should be left running")
+    expect(after.worker).not.toBe(before.worker)
+    // The service should be left running.
+    expect(after.beacon).toBe(before.beacon)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1324,9 +1309,9 @@ test("restart refuses the proxied process and reports unknown ids", async () => 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
 
-    await assert.rejects(() => daemon.restartProcesses({processId: "web"}), /proxied process cannot be restarted/)
-    await assert.rejects(() => daemon.restartProcesses({policy: "proxied"}), /proxied process cannot be restarted/)
-    await assert.rejects(() => daemon.restartProcesses({processId: "missing"}), /No managed process with id "missing"/)
+    await expect(daemon.restartProcesses({processId: "web"})).rejects.toThrow(/proxied process cannot be restarted/)
+    await expect(daemon.restartProcesses({policy: "proxied"})).rejects.toThrow(/proxied process cannot be restarted/)
+    await expect(daemon.restartProcesses({processId: "missing"})).rejects.toThrow(/No managed process with id "missing"/)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1343,15 +1328,15 @@ test("restart revives a stopped process instead of erroring", async () => {
     // Simulate the worker having exited (e.g. crashed and exhausted its restart budget).
     const worker = daemon.activeRelease?.getProcess("worker")
 
-    assert.ok(worker, "worker process should exist")
+    if (!worker) throw new Error("worker process should exist")
     await worker.stop()
-    assert.equal(worker.status().state, "stopped")
+    expect(worker.status().state).toBe("stopped")
 
     const result = await daemon.restartProcesses({processId: "worker"})
 
-    assert.deepEqual(result.restarted, ["worker"])
-    assert.equal(worker.status().state, "running")
-    assert.ok(worker.status().pid)
+    expect(result.restarted).toEqual(["worker"])
+    expect(worker.status().state).toBe("running")
+    expect(worker.status().pid).toBeTruthy()
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1371,8 +1356,8 @@ test("the restart control command bounces a process over the socket", async () =
       path: fixture.config.control.path
     })
 
-    assert.deepEqual(response.restarted, ["beacon"])
-    assert.notEqual(pidsById(daemon.status()).beacon, before.beacon)
+    expect(response.restarted).toEqual(["beacon"])
+    expect(pidsById(daemon.status()).beacon).not.toBe(before.beacon)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1388,15 +1373,15 @@ test("status and events distinguish deploy starts from manual restarts", async (
 
     const afterDeploy = daemon.status().services.find((service) => service.id === "beacon")
 
-    assert.ok(afterDeploy)
-    assert.equal(afterDeploy.process.lastStartReason, "deploy")
+    if (!afterDeploy) throw new Error("Missing required fixture: afterDeploy")
+    expect(afterDeploy.process.lastStartReason).toBe("deploy")
 
     await daemon.restartProcesses({processId: "beacon"})
 
     const afterRestart = daemon.status().services.find((service) => service.id === "beacon")
 
-    assert.ok(afterRestart)
-    assert.equal(afterRestart.process.lastStartReason, "manual")
+    if (!afterRestart) throw new Error("Missing required fixture: afterRestart")
+    expect(afterRestart.process.lastStartReason).toBe("manual")
 
     const events = /** @type {import("../src/event-log.js").DaemonEvent[]} */ ((await sendControlCommand({
       command: {command: "events"},
@@ -1404,8 +1389,8 @@ test("status and events distinguish deploy starts from manual restarts", async (
     })).events)
     const startReasons = events.filter((event) => event.message === "process started").map((event) => event.data.reason)
 
-    assert.ok(startReasons.includes("deploy"), JSON.stringify(startReasons))
-    assert.ok(startReasons.includes("manual"), JSON.stringify(startReasons))
+    expect({value: Boolean(startReasons.includes("deploy")), context: JSON.stringify(startReasons)}).toMatchObject({value: true})
+    expect({value: Boolean(startReasons.includes("manual")), context: JSON.stringify(startReasons)}).toMatchObject({value: true})
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1434,7 +1419,8 @@ test("persists daemon state to statePath and removes it on a clean shutdown", as
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
 
-  assert.equal(stateAfterShutdown, undefined, "state file removed on clean shutdown")
+  // State file removed on clean shutdown.
+  expect(stateAfterShutdown).toBe(undefined)
 })
 
 test("persisted daemon state excludes process commands, environment values, and output", async () => {
@@ -1442,7 +1428,7 @@ test("persisted daemon state excludes process commands, environment values, and 
   const fixture = await createFixture({persistState: true})
   const web = fixture.config.processes.find((processConfig) => processConfig.id === "web")
 
-  assert.ok(web)
+  if (!web) throw new Error("Missing required fixture: web")
   web.env.ROLLBRIDGE_TEST_SECRET = secret
   web.command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`console.log(process.env.ROLLBRIDGE_TEST_SECRET); import(${JSON.stringify(pathToFileURL(dummyAppPath).href)})`)}`
 
@@ -1452,20 +1438,21 @@ test("persisted daemon state excludes process commands, environment values, and 
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     const webProcess = daemon.activeRelease?.getProcess("web")
 
-    assert.ok(webProcess)
+    if (!webProcess) throw new Error("Missing required fixture: webProcess")
     await recordedLogLine(webProcess, secret)
-    assert.ok(webProcess.status().logs.some((entry) => entry.line === secret), "secret output must be retained before persistence")
+    // Secret output must be retained before persistence.
+    expect(webProcess.status().logs.some((entry) => entry.line === secret)).toBe(true)
 
     daemon.persistState()
     await waitFor(async () => (await fs.readFile(fixture.statePath, "utf8")).includes('"activeReleaseId": "v1"'))
 
     const persisted = await fs.readFile(fixture.statePath, "utf8")
 
-    assert.doesNotMatch(persisted, /state-secret-value/)
-    assert.doesNotMatch(persisted, /ROLLBRIDGE_TEST_SECRET/)
-    assert.doesNotMatch(persisted, /"command"/)
-    assert.doesNotMatch(persisted, /"logs"/)
-    assert.deepEqual(liveProcesses(JSON.parse(persisted), () => true).map(({id, releaseId}) => ({id, releaseId})), [{id: "web", releaseId: "v1"}])
+    expect(persisted).not.toMatch(/state-secret-value/)
+    expect(persisted).not.toMatch(/ROLLBRIDGE_TEST_SECRET/)
+    expect(persisted).not.toMatch(/"command"/)
+    expect(persisted).not.toMatch(/"logs"/)
+    expect(liveProcesses(JSON.parse(persisted), () => true).map(({id, releaseId}) => ({id, releaseId}))).toEqual([{id: "web", releaseId: "v1"}])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1482,7 +1469,8 @@ test("a clean shutdown clears the state file even when a persist write is in fli
     // Shut down immediately — the deploy's fire-and-forget persist may still be in flight.
     await daemon.shutdown()
 
-    assert.equal(await readState(fixture.statePath), undefined, "state file must not be recreated by an in-flight write")
+    // State file must not be recreated by an in-flight write.
+    expect(await readState(fixture.statePath)).toBe(undefined)
   } finally {
     if (!daemon.stopping) await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1519,7 +1507,7 @@ test("reports orphaned managed processes from a previous daemon's state", async 
 
     await daemon.reportOrphans()
 
-    assert.ok(logs.some((entry) => entry.message === "orphaned managed process detected" && entry.data.pid === leftover.pid), JSON.stringify(logs))
+    expect({value: Boolean(logs.some((entry) => entry.message === "orphaned managed process detected" && entry.data.pid === leftover.pid)), context: JSON.stringify(logs)}).toMatchObject({value: true})
 
     // A dead pid is not reported.
     logs.length = 0
@@ -1531,7 +1519,7 @@ test("reports orphaned managed processes from a previous daemon's state", async 
     })
     await daemon.reportOrphans()
 
-    assert.ok(!logs.some((entry) => entry.message === "orphaned managed process detected"))
+    expect(!logs.some((entry) => entry.message === "orphaned managed process detected")).toBeTruthy()
   } finally {
     leftover.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
@@ -1566,16 +1554,16 @@ test("status surfaces still-alive orphaned processes from a previous daemon and 
     await daemon.reportOrphans()
 
     // status reflects the still-running child even though the daemon cannot re-manage it.
-    assert.deepEqual(daemon.status().orphans, [{id: "worker", pid: leftover.pid, releaseId: "v1"}])
+    expect(daemon.status().orphans).toEqual([{id: "worker", pid: leftover.pid, releaseId: "v1"}])
 
     // Once the leftover is stopped, status re-checks liveness and drops it.
     leftover.kill("SIGKILL")
     await waitFor(() => daemon.status().orphans.length === 0)
-    assert.deepEqual(daemon.status().orphans, [])
+    expect(daemon.status().orphans).toEqual([])
 
     // The dead entry is pruned from the underlying list, not merely filtered, so a recycled pid
     // can't resurrect a cleared orphan.
-    assert.deepEqual(daemon.orphans, [])
+    expect(daemon.orphans).toEqual([])
   } finally {
     leftover.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
@@ -1596,14 +1584,14 @@ test("the daemon records a structured event history served by the events command
     const events = /** @type {import("../src/event-log.js").DaemonEvent[]} */ (response.events)
     const messages = events.map((event) => event.message)
 
-    assert.ok(messages.includes("deploy starting"), JSON.stringify(messages))
-    assert.ok(messages.includes("traffic switched"), JSON.stringify(messages))
+    expect({value: Boolean(messages.includes("deploy starting")), context: JSON.stringify(messages)}).toMatchObject({value: true})
+    expect({value: Boolean(messages.includes("traffic switched")), context: JSON.stringify(messages)}).toMatchObject({value: true})
 
     const switched = events.find((event) => event.message === "traffic switched")
 
-    assert.ok(switched)
-    assert.equal(switched.data.releaseId, "v1")
-    assert.match(switched.at, /^\d{4}-\d{2}-\d{2}T.*Z$/)
+    if (!switched) throw new Error("Missing required fixture: switched")
+    expect(switched.data.releaseId).toBe("v1")
+    expect(switched.at).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1618,32 +1606,32 @@ test("the events command honors --limit and records failed commands", async () =
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
 
     // An unknown command is rejected and recorded as a "command failed" event.
-    await assert.rejects(() => sendControlCommand({
+    await expect(sendControlCommand({
       command: {command: "bogus"},
       path: fixture.config.control.path
-    }))
+    })).rejects.toThrow()
 
     const all = /** @type {import("../src/event-log.js").DaemonEvent[]} */ ((await sendControlCommand({
       command: {command: "events"},
       path: fixture.config.control.path
     })).events)
 
-    assert.ok(all.some((event) => event.message === "command failed"))
+    expect(all.some((event) => event.message === "command failed")).toBeTruthy()
 
     const limited = /** @type {import("../src/event-log.js").DaemonEvent[]} */ ((await sendControlCommand({
       command: {command: "events", limit: 1},
       path: fixture.config.control.path
     })).events)
 
-    assert.equal(limited.length, 1)
-    assert.deepEqual(limited[0], all[all.length - 1])
+    expect(limited.length).toBe(1)
+    expect(limited[0]).toEqual(all[all.length - 1])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
 })
 
-test("a process over its memory limit is restarted with reason memory", {skip: process.platform !== "linux" && "requires /proc (Linux)"}, async () => {
+linuxTest("a process over its memory limit is restarted with reason memory", async () => {
   const limitBytes = 64 * 1024 * 1024
   const fixture = await createFixture({memoryLimitBytes: limitBytes})
   const daemon = await startDaemon(fixture.config)
@@ -1656,17 +1644,17 @@ test("a process over its memory limit is restarted with reason memory", {skip: p
 
     const hog = activeProcessStatus(daemon, "hog")
 
-    assert.ok(hog, "hog process should be present")
-    assert.ok(hog.memoryRestarts >= 1, `expected a memory restart, got ${hog.memoryRestarts}`)
-    assert.equal(hog.lastStartReason, "memory")
-    assert.equal(typeof hog.lastMemoryRestartAt, "string")
+    if (!hog) throw new Error("hog process should be present")
+    expect({value: Boolean(hog.memoryRestarts >= 1), context: `expected a memory restart, got ${hog.memoryRestarts}`}).toMatchObject({value: true})
+    expect(hog.lastStartReason).toBe("memory")
+    expect(typeof hog.lastMemoryRestartAt).toBe("string")
 
     // Keep the replacement alive long enough to observe its next monitor sample. The fixture
     // remains over the configured limit after every launch, otherwise it can restart again and
     // clear rssBytes/children before this polling loop observes them on slower CI runners.
     const hogProcess = daemon.activeRelease?.processes.get("hog")
 
-    assert.ok(hogProcess?.memory)
+    if (!hogProcess?.memory) throw new Error("Missing required fixture: hogProcess?.memory")
     hogProcess.memory.limitBytes = Number.MAX_SAFE_INTEGER
 
     // rssBytes is sampled on the monitor's interval; wait for a measurement of the running process.
@@ -1679,9 +1667,9 @@ test("a process over its memory limit is restarted with reason memory", {skip: p
     // The same monitor sample reports the process tree.
     const monitored = activeProcessStatus(daemon, "hog")
 
-    assert.ok(monitored)
-    assert.ok(monitored.children.length >= 1, "status should include the process tree")
-    assert.ok(monitored.children.some((child) => typeof child.rssBytes === "number" && child.rssBytes > 0))
+    if (!monitored) throw new Error("Missing required fixture: monitored")
+    expect(monitored.children.length >= 1).toBe(true)
+    expect(monitored.children.some((child) => typeof child.rssBytes === "number" && child.rssBytes > 0)).toBeTruthy()
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1696,14 +1684,14 @@ test("rollback re-activates the previous release and switches traffic back", asy
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    assert.equal(await fetchText(daemon, "/release"), "v2")
+    expect(await fetchText(daemon, "/release")).toBe("v2")
 
     const result = await daemon.rollback()
 
-    assert.equal(result.activeReleaseId, "v1")
-    assert.equal(result.previousReleaseId, "v2")
-    assert.equal(daemon.status().activeReleaseId, "v1")
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(result.activeReleaseId).toBe("v1")
+    expect(result.previousReleaseId).toBe("v2")
+    expect(daemon.status().activeReleaseId).toBe("v1")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1721,8 +1709,8 @@ test("rollback --release-id targets a specific retained release", async () => {
 
     const result = await daemon.rollback({releaseId: "v1"})
 
-    assert.equal(result.activeReleaseId, "v1")
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(result.activeReleaseId).toBe("v1")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1736,9 +1724,9 @@ test("rollback rejects no-previous, unknown, and already-active targets", async 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
 
-    await assert.rejects(() => daemon.rollback(), /No previous release/)
-    await assert.rejects(() => daemon.rollback({releaseId: "v1"}), /already active/)
-    await assert.rejects(() => daemon.rollback({releaseId: "nope"}), /No retained release "nope"/)
+    await expect(daemon.rollback()).rejects.toThrow(/No previous release/)
+    await expect(daemon.rollback({releaseId: "v1"})).rejects.toThrow(/already active/)
+    await expect(daemon.rollback({releaseId: "nope"})).rejects.toThrow(/No retained release "nope"/)
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1760,17 +1748,17 @@ test("rollback to a still-draining release stops the old instance instead of orp
 
     const draining = statusRelease(daemon, "v1")
 
-    assert.equal(draining.state, "draining")
+    expect(draining.state).toBe("draining")
 
     const oldWebPid = draining.processes.find((processStatus) => processStatus.id === "web")?.pid
 
-    assert.ok(oldWebPid, "the draining release should have a running web process")
+    if (!oldWebPid) throw new Error("the draining release should have a running web process")
 
     await daemon.rollback({releaseId: "v1"})
 
-    assert.equal(daemon.status().activeReleaseId, "v1")
+    expect(daemon.status().activeReleaseId).toBe("v1")
     // The old draining instance was stopped before its id was reused, so its process is gone.
-    assert.throws(() => process.kill(/** @type {number} */ (oldWebPid), 0), /ESRCH/)
+    await expect(() => process.kill(/** @type {number} */ (oldWebPid), 0)).toThrow(/ESRCH/)
   } finally {
     if (socket) socket.close()
     await daemon.shutdown()
@@ -1791,8 +1779,8 @@ test("the rollback control command switches traffic over the socket", async () =
       path: fixture.config.control.path
     })
 
-    assert.equal(response.activeReleaseId, "v1")
-    assert.equal(await fetchText(daemon, "/release"), "v1")
+    expect(response.activeReleaseId).toBe("v1")
+    expect(await fetchText(daemon, "/release")).toBe("v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1819,8 +1807,8 @@ test("control socket accepts deploy and status commands", async () => {
       path: fixture.config.control.path
     })
 
-    assert.equal(status.activeReleaseId, "control-v1")
-    assert.equal(await fetchText(daemon, "/release"), "control-v1")
+    expect(status.activeReleaseId).toBe("control-v1")
+    expect(await fetchText(daemon, "/release")).toBe("control-v1")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1836,28 +1824,23 @@ test("starting a second daemon on a live control socket reports the running daem
 
     const second = new RollbridgeDaemon({config: fixture.config, logger: () => {}})
 
-    await assert.rejects(
-      () => second.prepareControlSocketPath(),
-      (error) => {
-        assert.ok(error instanceof Error)
-        assert.match(error.message, /A Rollbridge daemon for application "rollbridge-test" is already running/)
-        assert.match(error.message, /active release: v1/)
-        assert.match(error.message, /rollbridge shutdown/)
+    const preparation = second.prepareControlSocketPath()
 
-        return true
-      }
-    )
+    await expect(preparation).rejects.toBeInstanceOf(Error)
+    await expect(preparation).rejects.toMatchObject({message: expect.stringMatching(/A Rollbridge daemon for application "rollbridge-test" is already running/)})
+    await expect(preparation).rejects.toMatchObject({message: expect.stringMatching(/active release: v1/)})
+    await expect(preparation).rejects.toMatchObject({message: expect.stringMatching(/rollbridge shutdown/)})
 
     // The original daemon keeps its socket and still answers control commands.
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.config.control.path})
-    assert.equal(status.application, "rollbridge-test")
+    expect(status.application).toBe("rollbridge-test")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
 })
 
-test("the daemon applies control.owner and control.group to the bound socket", {skip: process.platform !== "linux" && "requires POSIX chown"}, async () => {
+linuxTest("the daemon applies control.owner and control.group to the bound socket", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const {uid, username} = os.userInfo()
@@ -1877,8 +1860,8 @@ test("the daemon applies control.owner and control.group to the bound socket", {
 
     const stats = await fs.stat(socketPath)
 
-    assert.equal(stats.uid, uid)
-    assert.equal(stats.gid, gid)
+    expect(stats.uid).toBe(uid)
+    expect(stats.gid).toBe(gid)
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})
@@ -1907,10 +1890,7 @@ test("a control socket held by a non-Rollbridge process reports a generic confli
   const daemon = new RollbridgeDaemon({config, logger: () => {}})
 
   try {
-    await assert.rejects(
-      () => daemon.prepareControlSocketPath(),
-      /The control socket .* is already in use by another process/
-    )
+    await expect(daemon.prepareControlSocketPath()).rejects.toThrow(/The control socket .* is already in use by another process/)
   } finally {
     for (const socket of connections) socket.destroy()
     await new Promise((resolve) => stranger.close(() => resolve(undefined)))
@@ -1934,7 +1914,7 @@ test("applies the configured control socket permission mode", async () => {
   try {
     const stats = await fs.stat(socketPath)
 
-    assert.equal(stats.mode & 0o777, 0o660)
+    expect(stats.mode & 0o777).toBe(0o660)
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})
@@ -1974,10 +1954,10 @@ test("deploy can ensure the daemon before sending the release command", async ()
 
     const proxy = /** @type {{port: number}} */ (status.proxy)
 
-    assert.equal(status.activeReleaseId, "ensured-v1")
-    assert.equal(status.bootstrap, undefined)
-    assert.match(await fs.readFile(pidPath, "utf8"), /\d+/)
-    assert.equal(await fetchTextFromPort(proxy.port, "/release"), "ensured-v1")
+    expect(status.activeReleaseId).toBe("ensured-v1")
+    expect(status.bootstrap).toBe(undefined)
+    expect(await fs.readFile(pidPath, "utf8")).toMatch(/\d+/)
+    expect(await fetchTextFromPort(proxy.port, "/release")).toBe("ensured-v1")
   } finally {
     try {
       await sendControlCommand({
@@ -2156,7 +2136,7 @@ async function fetchText(daemon, pathName) {
 async function fetchTextFromPort(port, pathName) {
   const response = await fetch(`http://127.0.0.1:${port}${pathName}`)
 
-  assert.equal(response.status, 200)
+  expect(response.status).toBe(200)
 
   return (await response.text()).trim()
 }
@@ -2185,7 +2165,7 @@ function statusRelease(daemon, releaseId) {
   const status = daemon.status()
   const release = status.releases.find((candidate) => candidate.releaseId === releaseId)
 
-  assert.ok(release, `Release ${releaseId} should be present`)
+  if (!release) throw new Error(`Release ${releaseId} should be present`)
 
   return release
 }
@@ -2305,3 +2285,4 @@ function activeProcessStatus(daemon, processId) {
 
   return release ? release.processes.find((processStatus) => processStatus.id === processId) : undefined
 }
+})

@@ -1,9 +1,10 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import http from "node:http"
-import test from "node:test"
+import {describe, expect, test} from "@velocious/testing"
 import {waitForHealth} from "../src/health.js"
+
+describe("health", () => {
 
 /**
  * Starts a health server that records when it first receives a probe.
@@ -40,7 +41,7 @@ test("waitForHealth delays the first probe by startDelayMs", async () => {
       port: server.port
     })
 
-    assert.ok(server.firstProbeDelay() >= 180, `expected first probe to be delayed ~200ms, was ${server.firstProbeDelay()}ms`)
+    expect({value: Boolean(server.firstProbeDelay() >= 180), context: `expected first probe to be delayed ~200ms, was ${server.firstProbeDelay()}ms`}).toMatchObject({value: true})
   } finally {
     await server.close()
   }
@@ -56,8 +57,9 @@ test("waitForHealth probes immediately when startDelayMs is 0", async () => {
       port: server.port
     })
 
-    assert.ok(server.firstProbeDelay() < 150, `expected an immediate first probe, was ${server.firstProbeDelay()}ms`)
+    expect({value: Boolean(server.firstProbeDelay() < 150), context: `expected an immediate first probe, was ${server.firstProbeDelay()}ms`}).toMatchObject({value: true})
   } finally {
     await server.close()
   }
+})
 })

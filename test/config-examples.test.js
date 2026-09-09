@@ -1,34 +1,32 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {loadConfig} from "../src/config.js"
+
+describe("config-examples", () => {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
 test("TensorBuzz example config loads", async () => {
   const config = await loadConfig(path.join(repoRoot, "examples", "tensorbuzz.com.js"))
 
-  assert.equal(config.application, "tensorbuzz")
-  assert.equal(config.control.path, "/tmp/rollbridge-tensorbuzz.sock")
-  assert.equal(config.proxy.host, "127.0.0.1")
-  assert.equal(config.proxy.port, 4500)
-  assert.equal(config.proxy.healthPath, "/ping")
-  assert.deepEqual(
-    config.processes.map((processConfig) => [processConfig.id, processConfig.policy]),
-    [
+  expect(config.application).toBe("tensorbuzz")
+  expect(config.control.path).toBe("/tmp/rollbridge-tensorbuzz.sock")
+  expect(config.proxy.host).toBe("127.0.0.1")
+  expect(config.proxy.port).toBe(4500)
+  expect(config.proxy.healthPath).toBe("/ping")
+  expect(config.processes.map((processConfig) => [processConfig.id, processConfig.policy])).toEqual([
       ["beacon", "service"],
       ["background-jobs-main", "service"],
       ["background-jobs-worker", "companion"],
       ["web", "proxied"]
-    ]
-  )
-  assert.equal(config.processes[2].lifecycle.reactivateCommand, "appctl jobs-worker-reactivate --pid $ROLLBRIDGE_PID")
-  assert.equal(config.processes[3].env.VELOCIOUS_BACKGROUND_JOBS_PORT, "{{ports.background-jobs-main}}")
+    ])
+  expect(config.processes[2].lifecycle.reactivateCommand).toBe("appctl jobs-worker-reactivate --pid $ROLLBRIDGE_PID")
+  expect(config.processes[3].env.VELOCIOUS_BACKGROUND_JOBS_PORT).toBe("{{ports.background-jobs-main}}")
 })
 
 test("loadConfig resolves a config module that exports a function", async () => {
@@ -50,11 +48,12 @@ test("loadConfig resolves a config module that exports a function", async () => 
   try {
     const config = await loadConfig(configPath)
 
-    assert.equal(config.application, "computed-app")
-    assert.equal(config.proxy.port, 8190)
-    assert.equal(config.processes[0].id, "web")
+    expect(config.application).toBe("computed-app")
+    expect(config.proxy.port).toBe(8190)
+    expect(config.processes[0].id).toBe("web")
   } finally {
     delete process.env.ROLLBRIDGE_TEST_APP
     await fs.rm(dir, {force: true, recursive: true})
   }
+})
 })
