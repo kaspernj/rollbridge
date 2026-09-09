@@ -505,7 +505,7 @@ test("candidate activation retires jobs-main with its workers without waiting fo
   }
 })
 
-test("opt-in generation lifecycle commits the candidate before asynchronously retiring the old generation", async () => {
+test("opt-in generation lifecycle acknowledges old retirement before activating the candidate", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
@@ -516,7 +516,7 @@ test("opt-in generation lifecycle commits the candidate before asynchronously re
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1"]), ["activate:v1", "activate:v2", "retire:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
     assert.equal(daemon.status().activeReleaseId, "v2")
     assert.equal(daemon.status().generationTransition?.phase, "committed")
   } finally {
@@ -609,7 +609,7 @@ test("exact committed retry finishes pending singleton replacement before succes
 
     assert.equal(daemon.status().generationTransition?.phase, "committed")
     assert.equal(daemon.status().singletons[0]?.process.state, "running")
-    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1"]), ["activate:v1", "activate:v2", "retire:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -633,23 +633,27 @@ test("first generation is not committed when its activation acknowledgement fail
   }
 })
 
-test("asynchronous retirement failure does not block the committed candidate", async () => {
+test("retirement acknowledgement failure retains the exact transition, blocks other deploys, and exact resume continues it", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceQuietFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    await assert.rejects(() => daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"}), /retirement quiescence failed/)
+
+    const failed = daemon.status()
+
+    assert.equal(failed.activeReleaseId, "v1")
+    assert.equal(failed.generationTransition?.phase, "retiring_previous")
+    assert.match(String(failed.generationTransition?.error), /quiet command exited non-zero/)
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1"])
+    await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
+
+    await fs.writeFile(fixture.retirementGatePath, "allow\n")
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
-    await waitFor(() => daemon.releases.get("v1")?.retirementError !== undefined)
 
-    const committed = daemon.status()
-
-    assert.equal(committed.activeReleaseId, "v2")
-    assert.equal(committed.generationTransition?.phase, "committed")
-    assert.match(String(daemon.releases.get("v1")?.retirementError), /quiet command exited non-zero/)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "activate:v2"])
-    await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
-    assert.equal(daemon.status().activeReleaseId, "v3")
+    assert.equal(daemon.status().activeReleaseId, "v2")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -690,7 +694,7 @@ test("candidate activation failure reports restoration failure and exact recover
     assert.match(String(activationEvent?.data.error), /activate command exited non-zero/)
     assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
     assert.match(String(restorationEvent?.data.error), /incumbent restoration rejected/)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2"])
     await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
     const failedCandidate = daemon.releases.get("v2")
 
@@ -719,7 +723,7 @@ test("candidate activation failure reports restoration failure and exact recover
     const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
 
     assert.equal(persisted?.generationTransition, undefined)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2", "retire:v1", "activate:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
 
     const idempotent = await sendControlCommand({
       command: {
@@ -851,7 +855,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     assert.equal(daemon.status().activeReleaseId, "v3")
     assert.equal(daemon.status().generationTransition?.phase, "committed")
     assert.equal(await fetchText(daemon, "/release"), "v3")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -875,7 +879,7 @@ test("candidate activation failure compensates to the incumbent and admits a dif
     assert.equal(compensated.generationTransition, undefined)
     assert.equal(await fetchText(daemon, "/release"), "v1")
     assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "running")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2", "activate:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
 
     await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
 
@@ -900,6 +904,7 @@ test("ambiguous candidate activation retires the candidate before reactivating t
 
     assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), [
       "activate:v1",
+      "retire:v1",
       "activate:v2",
       "retire:v2",
       "activate:v1"
@@ -962,7 +967,7 @@ test("candidate activation recovery keeps the fence when a worker-specific resum
     assert.equal(status.generationTransition?.phase, "restoring_previous")
     assert.match(String(status.generationTransition?.activationError), /activate command exited non-zero/)
     assert.match(String(status.generationTransition?.compensationError), /reactivate command exited non-zero/)
-    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "running")
+    assert.equal(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state, "quiesced")
     assert.match(String(restorationEvent?.data.activationError), /activate command exited non-zero/)
     assert.match(String(restorationEvent?.data.error), /reactivate command exited non-zero/)
     await assert.rejects(() => daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"}), /transition.*v2.*unresolved/i)
@@ -1118,7 +1123,7 @@ test("retired generation coordinator remains fenced after exit", async () => {
     assert.equal(exit.code, null)
     assert.equal(exit.id, "beacon")
     assert.equal(exit.signal, "SIGKILL")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "activate:v2", "retire:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
     assert.equal(stopped.lifecycleRole, "retired")
     assert.equal(stopped.pid, undefined)
     assert.equal(stopped.restarts, 0)
@@ -2120,16 +2125,6 @@ async function createFixture(options = {}) {
  */
 async function lifecycleEvents(lifecycleLogPath) {
   return (await fs.readFile(lifecycleLogPath, "utf8")).trim().split("\n").filter(Boolean)
-}
-
-/**
- * @param {string} lifecycleLogPath - Fixture lifecycle log.
- * @param {string[]} expected - Exact lifecycle events to await.
- * @returns {Promise<string[]>} The matching ordered events.
- */
-async function waitForLifecycleEvents(lifecycleLogPath, expected) {
-  await waitFor(async () => JSON.stringify(await lifecycleEvents(lifecycleLogPath)) === JSON.stringify(expected))
-  return await lifecycleEvents(lifecycleLogPath)
 }
 
 /**

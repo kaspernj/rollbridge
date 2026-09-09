@@ -1677,7 +1677,7 @@ test("same-authority owner replacement preserves completed activation compensati
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
     await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath}), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v2\nactivate:v1\n")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
 
     await writeConfig(configPath, failedConfig(oldSocketPath, false))
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
@@ -1685,7 +1685,7 @@ test("same-authority owner replacement preserves completed activation compensati
     const status = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
     assert.equal(status.activeReleaseId, "v1")
     assert.equal(status.generationTransition, undefined)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v2\nactivate:v1\n", "replacement must not replay completed compensation hooks")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n", "replacement must not replay completed compensation hooks")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -1736,7 +1736,7 @@ test("config-changing owner replacement proceeds after activation compensation c
 
     assert.equal(status.activeReleaseId, "v1")
     assert.equal(status.generationTransition, undefined)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v2\nactivate:v1\n")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
 
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -1780,7 +1780,7 @@ test("owner replacement admits only the unresolved transition's exact retained c
   assert.equal(admitted(exactConfig, "/srv/releases/wrong"), false)
 })
 
-test("candidate-first compensation preserves incumbent web authority and fences retired-incumbent recovery", async () => {
+test("owner replacement preserves accepted degraded incumbent web authority", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-degraded-active-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "state.json")
@@ -1791,6 +1791,7 @@ test("candidate-first compensation preserves incumbent web authority and fences 
   const v2Path = path.join(root, "v2")
   const proxyPort = await findAvailablePort({host: "127.0.0.1", range: {from: 24000, to: 24999}, usedPorts: new Set()})
   let owner
+  let replacement
   const failedConfig = () => {
     const raw = config({activationLogPath: lifecycleLogPath, controlPath: socketPath, extraCompanion: false, proxyPort, statePath})
     const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (raw.processes)
@@ -1817,28 +1818,33 @@ test("candidate-first compensation preserves incumbent web authority and fences 
     const webPid = releaseProcessPid(before, "v1", "web")
 
     assert.equal(/** @type {{releaseId: string, state: string}[]} */ (before.releases).find(({releaseId}) => releaseId === "v2")?.state, "draining")
-    await assert.rejects(
-      sendControlCommand({command: {
-        acceptRetiredIncumbent: true,
-        command: "recover-generation-transition",
-        previousReleaseId: "v1",
-        releaseId: "v2",
-        releasePath: v2Path,
-        revision: "v2"
-      }, path: socketPath}),
-      /does not retain a retired or terminally absent generation coordinator/
-    )
-    const fenced = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const recovery = await sendControlCommand({command: {
+      acceptRetiredIncumbent: true,
+      command: "recover-generation-transition",
+      previousReleaseId: "v1",
+      releaseId: "v2",
+      releasePath: v2Path,
+      revision: "v2"
+    }, path: socketPath})
+    await waitForReleaseState(socketPath, "v2", "stopped")
+    const accepted = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(recovery.jobsStatus, "degraded")
+    assert.equal(/** @type {{releaseId: string, state: string}[]} */ (accepted.releases).find(({releaseId}) => releaseId === "v2")?.state, "stopped")
+    assert.equal(/** @type {{phase?: string}} */ (accepted.generationTransition).phase, "degraded_active")
+    replacement = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(replacement, "owner replacement committed")
+    const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const response = await fetch(`http://127.0.0.1:${proxyPort}/release`)
 
-    assert.equal(fenced.activeReleaseId, "v1")
-    assert.equal(/** @type {{phase?: string}} */ (fenced.generationTransition).phase, "restoring_previous")
-    assert.equal(releaseProcessPid(fenced, "v1", "web"), webPid)
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(/** @type {{phase?: string}} */ (recovered.generationTransition).phase, "degraded_active")
+    assert.equal(releaseProcessPid(recovered, "v1", "web"), webPid)
     assert.equal(response.status, 200)
     assert.equal((await response.text()).trim(), "v1")
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v2\n")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\n")
   } finally {
-    if (owner && owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL")
+    for (const child of [owner, replacement]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }

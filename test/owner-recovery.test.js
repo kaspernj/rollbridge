@@ -171,7 +171,7 @@ test("exact bootstrap restores the committed generation after external owner ret
     assert.ok(active.services.every(({process}) => typeof process.pid === "number" && process.state === "running"))
     assert.ok(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running"))
     assert.deepEqual(recoveryOrder, ["service", "activate", "singleton"], "candidate activation must precede post-commit singleton completion")
-    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"]), ["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"])
+    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"]), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
   } finally {
     if (recovered) {
       const activeRecovery = recovered.status().activeReleaseId === "v2"
@@ -307,7 +307,7 @@ test("journaled committed bootstrap recovery resumes after a restart begins", as
     assert.ok(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running"))
     assert.equal(releaseProcessPid(active, "v1", "worker"), v1WorkerPid)
     assert.equal(isProcessRunning(v1WorkerPid), true)
-    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"]), ["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"])
+    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"]), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
   } finally {
     if (recovered) {
       const shutdown = recovered.shutdown()
@@ -690,7 +690,7 @@ test("guardian recovery becomes ready before replaying a gated generation hook",
 
   assert.ok(jobs && worker)
   jobs.gracefulStopMs = 5000
-  lifecycle.quietCommand = `if [ "$ROLLBRIDGE_RELEASE_ID" = "v1" ]; then printf 'waiting\n' >> ${JSON.stringify(retirementWaitingPath)}; while [ ! -f ${JSON.stringify(retirementGatePath)} ]; do sleep 0.02; done; fi; printf 'retire:%s\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(fixture.lifecycleLogPath)}`
+  lifecycle.quietCommand = `printf 'waiting\n' >> ${JSON.stringify(retirementWaitingPath)}; while [ ! -f ${JSON.stringify(retirementGatePath)} ]; do sleep 0.02; done; printf 'retire:%s\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(fixture.lifecycleLogPath)}`
   worker.lifecycle = {drainCommand: "true", drainTimeoutMs: 1000}
   await writeConfig(fixture.configPath, fixture.config)
   const owner = spawnDaemon(fixture.configPath, undefined, {daemonPidPath, startupTimeoutMs: 3000})
@@ -718,16 +718,26 @@ test("guardian recovery becomes ready before replaying a gated generation hook",
 
     assert.equal(recovering.daemonPid, recoveredDaemonPid)
     assert.equal(recovering.ownerRecovery?.ready, true)
-    assert.equal(recovering.activeReleaseId, "v2")
+    assert.equal(recovering.generationTransition?.phase, "retiring_previous")
     assert.equal(typeof guardianPid, "number")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "activate:v2"])
+    await assert.rejects(
+      sendControlCommand({command: {command: "stop", releaseId: "v1"}, path: fixture.socketPath}),
+      /Another owner mutation/
+    )
+    await assert.rejects(
+      sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath}),
+      /Cannot shut down while generation transition recovery is in progress/
+    )
+    await assert.rejects(
+      sendControlCommand({command: {attestation: `sha256:${"a".repeat(64)}`, command: "retire-owner"}, path: fixture.socketPath}),
+      /Cannot retire owner while generation transition recovery is in progress/
+    )
 
     process.kill(recoveredDaemonPid, "SIGTERM")
-    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v2"]), ["activate:v1", "activate:v2", "retire:v2"])
     await fs.writeFile(retirementGatePath, "release retirement\n")
     await waitForProcessExit(recoveredDaemonPid, 5000)
     await waitForProcessExit(guardianPid, 5000)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "activate:v2", "retire:v2", "retire:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v1", "activate:v2", "retire:v2"])
   } finally {
     await fs.writeFile(retirementGatePath, "release retirement\n").catch(() => undefined)
     await sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath}).catch(() => undefined)
@@ -752,7 +762,7 @@ test("owner recovery preserves a completed activation compensation without repla
       sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath}),
       /activate command exited non-zero/
     )
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2", "activate:v1"])
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
 
     owner.kill("SIGKILL")
     await once(owner, "exit")
@@ -763,7 +773,7 @@ test("owner recovery preserves a completed activation compensation without repla
 
     assert.equal(recovered.activeReleaseId, "v1")
     assert.equal(recovered.generationTransition, undefined)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2", "activate:v1"], "owner recovery must not replay completed compensation hooks")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "activate:v1"], "owner recovery must not replay completed compensation hooks")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -863,7 +873,7 @@ test("owner recovery preserves complete private transition authority across a ca
 
     assert.equal(recovered.status().activeReleaseId, "v2")
     assert.equal(recovered.status().generationTransition?.phase, "committed")
-    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1"]), ["activate:v1", "activate:v2", "retire:v1"])
+    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2"]), ["activate:v1", "retire:v1", "activate:v2"])
   } finally {
     if (recovered) await recovered.shutdown().catch(() => {})
     await stopFixtureGuardian(fixture.statePath)
@@ -1072,7 +1082,7 @@ test("owner recovery retains a stopped previous release until committed-pending 
   }
 })
 
-test("owner recovery preserves asynchronous retirement with the previous release's exact definition", async () => {
+test("owner recovery replays ambiguous retirement with the previous release's exact definition", async () => {
   const fixture = await createFixture()
   const retirementGatePath = path.join(fixture.root, "retirement.allow")
   const retirementWaitingPath = path.join(fixture.root, "retirement.waiting")
@@ -1104,14 +1114,15 @@ test("owner recovery preserves asynchronous retirement with the previous release
     owner.kill("SIGKILL")
     await once(owner, "exit")
     await fs.writeFile(retirementGatePath, "release retirement\n")
+
     owner = spawnDaemon(fixture.configPath)
     const recoverySettled = waitForLog(owner, "release generation transition recovery settled")
 
     await waitForLog(owner, "control socket listening")
     await waitForState(fixture.statePath, (state) => state.generationTransition?.phase === "committed", AbortSignal.timeout(5000))
     await recoverySettled
-    assert.equal((await fs.readFile(retirementWaitingPath, "utf8")).trim().split("\n").length, 1, "the guardian-owned retirement continues without a duplicate replay")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "activate:v2", "retire:v1"])
+    assert.equal((await fs.readFile(retirementWaitingPath, "utf8")).trim().split("\n").length, 2, "ambiguous retirement must replay exactly once")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v1", "activate:v2"])
     assert.equal((await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})).activeReleaseId, "v2")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
@@ -1769,13 +1780,22 @@ async function lifecycleEvents(lifecycleLogPath) {
  * @returns {Promise<string[]>} The matching ordered events.
  */
 async function waitForLifecycleEvents(lifecycleLogPath, expected) {
-  const deadline = Date.now() + 3000
+  const watcher = fs.watch(lifecycleLogPath, {signal: AbortSignal.timeout(3000)})
 
-  while (Date.now() < deadline) {
+  try {
     const events = await lifecycleEvents(lifecycleLogPath)
 
     if (JSON.stringify(events) === JSON.stringify(expected)) return events
-    await new Promise((resolve) => setTimeout(resolve, 25))
+    for await (const _event of watcher) {
+      const changedEvents = await lifecycleEvents(lifecycleLogPath)
+
+      if (JSON.stringify(changedEvents) === JSON.stringify(expected)) return changedEvents
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw new Error(`Timed out waiting for lifecycle events: ${JSON.stringify(expected)}`, {cause: error})
+    throw error
+  } finally {
+    await watcher.return?.()
   }
 
   throw new Error(`Timed out waiting for lifecycle events: ${JSON.stringify(expected)}`)
