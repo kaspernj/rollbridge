@@ -112,7 +112,7 @@ test("status can omit process logs without changing the default status payload",
   assert.ok(full.releases[0]?.processes.every((processStatus) => Array.isArray(processStatus.logs)))
   assert.ok(full.services.every(({process: processStatus}) => Array.isArray(processStatus.logs)))
   assert.ok(full.singletons.every(({process: processStatus}) => Array.isArray(processStatus.logs)))
-  assert.deepEqual(compact, {
+  assert.deepEqual(statusWithoutProcessUptimes(compact), statusWithoutProcessUptimes({
     ...full,
     releases: full.releases.map((release) => ({
       ...release,
@@ -126,7 +126,29 @@ test("status can omit process logs without changing the default status payload",
       ...singleton,
       process: (({logs: _logs, ...processStatus}) => processStatus)(process)
     }))
-  })
+  }))
   assert.equal(invalid.status, "error")
   assert.equal(invalid.error, "includeLogs must be a boolean")
 })
+
+/**
+ * @param {import("../src/daemon.js").DaemonStatus | import("../src/daemon.js").DaemonStatusWithoutLogs} status - Status response.
+ * @returns {Record<string, import("../src/json.js").JsonValue>} Status without volatile process uptime.
+ */
+function statusWithoutProcessUptimes(status) {
+  return {
+    ...status,
+    releases: status.releases.map((release) => ({
+      ...release,
+      processes: release.processes.map(({uptimeMs: _uptimeMs, ...processStatus}) => processStatus)
+    })),
+    services: status.services.map(({process, ...service}) => ({
+      ...service,
+      process: (({uptimeMs: _uptimeMs, ...processStatus}) => processStatus)(process)
+    })),
+    singletons: status.singletons.map(({process, ...singleton}) => ({
+      ...singleton,
+      process: (({uptimeMs: _uptimeMs, ...processStatus}) => processStatus)(process)
+    }))
+  }
+}

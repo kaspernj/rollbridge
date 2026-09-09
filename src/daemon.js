@@ -2917,9 +2917,24 @@ export default class RollbridgeDaemon {
     return this.proxyPort
   }
 
-  /** @overload @returns {DaemonStatus} Full status payload. */
-  /** @overload @param {{includeLogs: false}} options - Log-free status response options. @returns {DaemonStatusWithoutLogs} Log-free status payload. */
-  /** @param {{includeLogs?: boolean}} [options] - Status response options. @returns {DaemonStatus | DaemonStatusWithoutLogs} Status payload. */
+  /**
+   * @overload
+   * @returns {DaemonStatus} Full status payload.
+   */
+  /**
+   * @overload
+   * @param {{includeLogs: false}} options - Log-free status response options.
+   * @returns {DaemonStatusWithoutLogs} Log-free status payload.
+   */
+  /**
+   * @overload
+   * @param {{includeLogs: boolean}} options - Status response options.
+   * @returns {DaemonStatus | DaemonStatusWithoutLogs} Status payload.
+   */
+  /**
+   * @param {{includeLogs?: boolean}} [options] - Status response options.
+   * @returns {DaemonStatus | DaemonStatusWithoutLogs} Status payload.
+   */
   status({includeLogs = true} = {}) {
     // Re-check liveness and prune the dead permanently, so the list self-clears as the operator
     // stops the leftovers (e.g. via `rollbridge recover`). Pruning (not just filtering) matters:
