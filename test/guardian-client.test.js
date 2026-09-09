@@ -6,10 +6,12 @@ import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import GuardianClient from "../src/guardian-client.js"
 import {waitForProcessExit} from "./support/process.js"
+
+describe("guardian-client", () => {
 
 const legacyGuardianPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "pre-split3-process-guardian.js")
 const recoveryOwnerPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "guardian-recovery-owner.js")
@@ -1828,3 +1830,4 @@ function killExactProcessGroup(pid) {
     if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ESRCH") throw error
   }
 }
+})

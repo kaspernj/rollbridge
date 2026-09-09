@@ -2,8 +2,10 @@
 
 import assert from "node:assert/strict"
 import net from "node:net"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {findAvailablePort} from "../src/port-allocator.js"
+
+describe("port-allocator", () => {
 
 const host = "127.0.0.1"
 
@@ -73,4 +75,5 @@ test("findAvailablePort skips the occupied port and records the allocated one", 
   } finally {
     await closeServer(server)
   }
+})
 })

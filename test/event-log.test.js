@@ -1,8 +1,10 @@
 // @ts-check
 
 import assert from "node:assert/strict"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import EventLog from "../src/event-log.js"
+
+describe("event-log", () => {
 
 test("records events with a timestamp, message, and data", () => {
   const log = new EventLog(10)
@@ -43,4 +45,5 @@ test("recent returns every event when the limit is omitted or not a positive num
   assert.equal(log.recent().length, 3)
   assert.equal(log.recent(0).length, 3)
   assert.equal(log.recent(99).length, 3)
+})
 })

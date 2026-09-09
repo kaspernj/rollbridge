@@ -6,10 +6,12 @@ import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {normalizeConfig} from "../src/config.js"
 import {isProcessAlive} from "../src/state-store.js"
 import {predeployCleanup} from "../src/predeploy-cleanup.js"
+
+describe("predeploy-cleanup", () => {
 
 /**
  * @param {string} dir - Working directory.
@@ -128,4 +130,5 @@ test("predeploy cleanup stops an active daemon when the proxy config changed", a
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
+})
 })

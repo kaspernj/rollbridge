@@ -4,9 +4,11 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {normalizeConfig, validateConfig} from "../src/config.js"
 import {runCli} from "../src/cli.js"
+
+describe("config-validation", () => {
 
 test("validateConfig collects duplicate ids, proxied ports, and policy combinations", () => {
   const {issues} = validateConfig({
@@ -774,3 +776,4 @@ async function captureCli(argv) {
 
   return {output: lines.join("\n")}
 }
+})

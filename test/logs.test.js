@@ -4,11 +4,13 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {formatLogSources, runCli} from "../src/cli.js"
+
+describe("logs", () => {
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
@@ -96,4 +98,5 @@ test("logs CLI prints captured output per managed process", async () => {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})
   }
+})
 })

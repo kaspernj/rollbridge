@@ -7,7 +7,7 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {openControlSession, sendControlCommand} from "../src/control-client.js"
@@ -15,6 +15,8 @@ import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic} from "../src/daemon
 import GuardianClient from "../src/guardian-client.js"
 import {findAvailablePort} from "../src/port-allocator.js"
 import {waitForProcessExit} from "./support/process.js"
+
+describe("owner-replacement", () => {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const binPath = path.join(repoRoot, "bin", "rollbridge")
@@ -2276,3 +2278,4 @@ async function stopGuardian(statePath) {
     if (!error || typeof error !== "object" || !("code" in error) || !["ENOENT", "ESRCH"].includes(String(error.code))) throw error
   }
 }
+})

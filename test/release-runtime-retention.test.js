@@ -7,10 +7,12 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {sendControlCommand} from "../src/control-client.js"
 import GuardianClient from "../src/guardian-client.js"
+
+describe("release-runtime-retention", () => {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const dummyAppPath = path.join(repoRoot, "test", "fixtures", "dummy-app.js")
@@ -475,3 +477,4 @@ async function stopGuardian(statePath) {
     if (!error || typeof error !== "object" || !("code" in error) || !["ENOENT", "ESRCH"].includes(String(error.code))) throw error
   }
 }
+})

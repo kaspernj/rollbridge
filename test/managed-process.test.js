@@ -4,9 +4,11 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import ManagedProcess from "../src/managed-process.js"
+
+describe("managed-process", () => {
 
 const crasherPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "crasher.js")
 
@@ -837,4 +839,5 @@ test("the unlimited constant-delay fast path still applies maxDelayMs", () => {
   managed.scheduleRestart()
 
   assert.equal(queued, 5)
+})
 })

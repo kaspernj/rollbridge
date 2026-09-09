@@ -2,8 +2,10 @@
 
 import assert from "node:assert/strict"
 import http from "node:http"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {waitForHealth} from "../src/health.js"
+
+describe("health", () => {
 
 /**
  * Starts a health server that records when it first receives a probe.
@@ -60,4 +62,5 @@ test("waitForHealth probes immediately when startDelayMs is 0", async () => {
   } finally {
     await server.close()
   }
+})
 })

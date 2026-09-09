@@ -5,16 +5,18 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test, {after, before} from "node:test"
+import {afterAll, beforeAll, describe, test} from "@velocious/testing"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
+
+describe("control-protocol", () => {
 
 let root = ""
 let socketPath = ""
 let daemon = /** @type {RollbridgeDaemon | undefined} */ (undefined)
 
-before(async () => {
+beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-control-"))
   socketPath = path.join(root, "rollbridge.sock")
 
@@ -29,7 +31,7 @@ before(async () => {
   await daemon.start()
 })
 
-after(async () => {
+afterAll(async () => {
   if (daemon) await daemon.shutdown()
   await fs.rm(root, {force: true, recursive: true})
 })
@@ -91,4 +93,5 @@ test("a known command missing a required field returns a field error", async () 
 
   assert.equal(response.status, "error")
   assert.equal(response.error, "releasePath is required")
+})
 })

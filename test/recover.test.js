@@ -6,11 +6,13 @@ import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {recoverOrphans} from "../src/recover.js"
 import {isProcessAlive, readState, writeState} from "../src/state-store.js"
+
+describe("recover", () => {
 
 /**
  * @param {string} dir - Working directory.
@@ -159,4 +161,5 @@ test("recover refuses while a daemon is running", async () => {
     await daemon.shutdown()
     await fs.rm(dir, {force: true, recursive: true})
   }
+})
 })

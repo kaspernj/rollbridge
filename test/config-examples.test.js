@@ -4,9 +4,11 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {loadConfig} from "../src/config.js"
+
+describe("config-examples", () => {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 
@@ -56,4 +58,5 @@ test("loadConfig resolves a config module that exports a function", async () => 
     delete process.env.ROLLBRIDGE_TEST_APP
     await fs.rm(dir, {force: true, recursive: true})
   }
+})
 })

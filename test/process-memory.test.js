@@ -2,12 +2,14 @@
 
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import os from "node:os"
 import path from "node:path"
 import {measureProcessGroupRssBytes, processGroupHasLiveMembers, processGroupMembers} from "../src/process-memory.js"
 
-const linuxOnly = process.platform !== "linux" && "requires /proc (Linux)"
+describe("process-memory", () => {
+
+const linuxTest = process.platform === "linux" ? test : test.skip
 
 /**
  * @returns {number} The current process's group id, read from /proc.
@@ -18,17 +20,17 @@ function currentProcessGroupId() {
   return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2])
 }
 
-test("measures the resident memory of a live process group", {skip: linuxOnly}, () => {
+linuxTest("measures the resident memory of a live process group", () => {
   const rssBytes = measureProcessGroupRssBytes(currentProcessGroupId())
 
   assert.ok(typeof rssBytes === "number" && rssBytes > 0, `expected a positive RSS, got ${rssBytes}`)
 })
 
-test("returns undefined for a process group with no members", {skip: linuxOnly}, () => {
+linuxTest("returns undefined for a process group with no members", () => {
   assert.equal(measureProcessGroupRssBytes(2147483646), undefined)
 })
 
-test("lists process-group members with their command and resident memory", {skip: linuxOnly}, () => {
+linuxTest("lists process-group members with their command and resident memory", () => {
   const members = processGroupMembers(currentProcessGroupId())
   const self = members.find((member) => member.pid === process.pid)
 
@@ -37,7 +39,7 @@ test("lists process-group members with their command and resident memory", {skip
   assert.equal(typeof self.command, "string")
 })
 
-test("returns an empty list for a process group with no members", {skip: linuxOnly}, () => {
+linuxTest("returns an empty list for a process group with no members", () => {
   assert.deepEqual(processGroupMembers(2147483646), [])
 })
 
@@ -57,4 +59,5 @@ test("treats a process group containing only defunct members as stopped", () => 
   } finally {
     fs.rmSync(procPath, {force: true, recursive: true})
   }
+})
 })

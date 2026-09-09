@@ -7,12 +7,14 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {runEnvironmentChecks, runReleaseChecks} from "../src/doctor.js"
 import {writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
+
+describe("doctor", () => {
 
 /**
  * @param {object} args - Options.
@@ -449,4 +451,5 @@ test("doctor --release-path adds release checks, passing or failing on the worki
     process.exitCode = 0
     await fs.rm(root, {force: true, recursive: true})
   }
+})
 })

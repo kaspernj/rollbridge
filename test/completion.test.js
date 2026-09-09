@@ -1,8 +1,10 @@
 // @ts-check
 
 import assert from "node:assert/strict"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {runCli} from "../src/cli.js"
+
+describe("completion", () => {
 
 /**
  * Runs the CLI while capturing stdout, stderr, and the resulting exit code.
@@ -62,4 +64,5 @@ test("completion rejects an unsupported shell with a non-zero exit code", async 
 
   assert.equal(code, 1)
   assert.match(errorOutput, /Unsupported shell "fish"\. Supported shells: bash, zsh\./)
+})
 })

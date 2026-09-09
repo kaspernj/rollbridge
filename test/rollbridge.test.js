@@ -7,13 +7,15 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath, pathToFileURL} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import {liveProcesses, readState, writeState} from "../src/state-store.js"
 import {runCli} from "../src/cli.js"
+
+describe("rollbridge", () => {
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
@@ -22,6 +24,7 @@ const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
 const memoryHogPath = path.join(currentDir, "fixtures", "memory-hog.js")
 const serviceAppPath = path.join(currentDir, "fixtures", "service-app.js")
 const singletonAppPath = path.join(currentDir, "fixtures", "singleton-app.js")
+const linuxTest = process.platform === "linux" ? test : test.skip
 
 test("a nonBlockingDrain worker stops immediately while its release is still draining", async () => {
   const fixture = await createFixture({nonBlockingDrainWorker: true})
@@ -1304,7 +1307,7 @@ test("the events command honors --limit and records failed commands", async () =
   }
 })
 
-test("a process over its memory limit is restarted with reason memory", {skip: process.platform !== "linux" && "requires /proc (Linux)"}, async () => {
+linuxTest("a process over its memory limit is restarted with reason memory", async () => {
   const limitBytes = 64 * 1024 * 1024
   const fixture = await createFixture({memoryLimitBytes: limitBytes})
   const daemon = await startDaemon(fixture.config)
@@ -1518,7 +1521,7 @@ test("starting a second daemon on a live control socket reports the running daem
   }
 })
 
-test("the daemon applies control.owner and control.group to the bound socket", {skip: process.platform !== "linux" && "requires POSIX chown"}, async () => {
+linuxTest("the daemon applies control.owner and control.group to the bound socket", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-test-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const {uid, username} = os.userInfo()
@@ -1962,3 +1965,4 @@ function activeProcessStatus(daemon, processId) {
 
   return release ? release.processes.find((processStatus) => processStatus.id === processId) : undefined
 }
+})

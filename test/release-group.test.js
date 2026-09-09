@@ -1,9 +1,11 @@
 // @ts-check
 
 import assert from "node:assert/strict"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import ReleaseGroup from "../src/release-group.js"
 import {normalizeConfig} from "../src/config.js"
+
+describe("release-group", () => {
 
 /**
  * @param {import("../src/json.js").JsonValue} webProcess - The single proxied process definition.
@@ -94,4 +96,5 @@ test("committed generation restoration does not start after shutdown begins", as
 
   await assert.rejects(() => release.restartCommittedGeneration(), /shutting down/)
   assert.equal(starts, 0)
+})
 })

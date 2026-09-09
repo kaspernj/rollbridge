@@ -7,10 +7,12 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {sendControlCommand} from "../src/control-client.js"
 import {isProcessAlive, liveProcesses, readState, writeState} from "../src/state-store.js"
+
+describe("daemon-bootstrap", () => {
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
@@ -680,3 +682,4 @@ function assertRelease(status, releaseId) {
   assert.ok(release && typeof release === "object" && !Array.isArray(release))
   return release
 }
+})

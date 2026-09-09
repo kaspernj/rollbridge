@@ -4,8 +4,12 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {prepareDaemonRuntime} from "../src/daemon-runtime.js"
+
+describe("daemon-runtime", () => {
+
+const posixPermissionsTest = process.platform === "win32" ? test.skip : test
 
 test("concurrent runtime preparation converges on one validated content-addressed snapshot", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-runtime-concurrent-"))
@@ -42,7 +46,7 @@ test("preparation fails closed when an existing content-addressed snapshot is co
   }
 })
 
-test("runtime preparation rejects a symlinked or shared-writable parent", async (t) => {
+posixPermissionsTest("runtime preparation rejects a symlinked or shared-writable parent", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-runtime-permissions-"))
   const target = path.join(root, "target")
   const symlink = path.join(root, "symlink")
@@ -53,11 +57,6 @@ test("runtime preparation rejects a symlinked or shared-writable parent", async 
     await fs.symlink(target, symlink, "dir")
     await assert.rejects(() => prepareDaemonRuntime(symlink), /must be a real directory/)
 
-    if (process.platform === "win32") {
-      t.skip("POSIX directory permissions are not available on Windows")
-      return
-    }
-
     await fs.mkdir(shared, {mode: 0o777})
     await fs.chmod(shared, 0o777)
     await assert.rejects(() => prepareDaemonRuntime(shared), /must not be writable by group or other users/)
@@ -66,12 +65,7 @@ test("runtime preparation rejects a symlinked or shared-writable parent", async 
   }
 })
 
-test("runtime preparation rejects a private leaf beneath a replaceable ancestor", async (t) => {
-  if (process.platform === "win32") {
-    t.skip("POSIX directory permissions are not available on Windows")
-    return
-  }
-
+posixPermissionsTest("runtime preparation rejects a private leaf beneath a replaceable ancestor", async () => {
   const unsafeAncestor = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-runtime-unsafe-ancestor-"))
   const privateLeaf = path.join(unsafeAncestor, "private-runtime")
 
@@ -87,4 +81,5 @@ test("runtime preparation rejects a private leaf beneath a replaceable ancestor"
     await fs.chmod(unsafeAncestor, 0o700)
     await fs.rm(unsafeAncestor, {force: true, recursive: true})
   }
+})
 })

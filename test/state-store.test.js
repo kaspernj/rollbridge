@@ -4,8 +4,10 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {clearState, readState, writeState} from "../src/state-store.js"
+
+describe("state-store", () => {
 
 test("writeState then readState round-trips a snapshot", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-state-"))
@@ -78,4 +80,5 @@ test("clearState removes the file and ignores a missing one", async () => {
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
+})
 })

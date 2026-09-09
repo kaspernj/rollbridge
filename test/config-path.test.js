@@ -4,9 +4,11 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {loadConfig, resolveConfigPath} from "../src/config.js"
 import {runCli} from "../src/cli.js"
+
+describe("config-path", () => {
 
 const validConfig = {
   application: "demo",
@@ -101,5 +103,6 @@ test("validate CLI command resolves the default config when --config is omitted"
     await fs.rm(dir, {force: true, recursive: true})
   }
 
-  assert.match(lines.join("\n"), /rollbridge\.js is valid: 1 process, proxy on 127\.0\.0\.1:8182\./)
+assert.match(lines.join("\n"), /rollbridge\.js is valid: 1 process, proxy on 127\.0\.0\.1:8182\./)
+})
 })

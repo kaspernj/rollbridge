@@ -29,7 +29,7 @@
     "all-checks": "npm run typecheck && npm run lint && npm test",
     "lint": "npm run eslint && npm run typecheck",
     "release:patch": "release-patch",
-    "test": "node --test test/*.test.js",
+    "test": "velocious-test test/*.test.js",
     "typecheck": "tsc --noEmit",
     "eslint": "eslint"
   },
@@ -44,6 +44,7 @@
     "@eslint/js": "^10.0.1",
     "@types/http-proxy": "^1.17.17",
     "@types/node": "^25.9.1",
+    "@velocious/testing": "^0.0.12",
     "eslint": "^10.4.0",
     "eslint-plugin-jsdoc": "^62.9.0",
     "globals": "^17.6.0",

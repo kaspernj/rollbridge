@@ -4,10 +4,12 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import RollbridgeDaemon, {releasesToPrune} from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
+
+describe("release-retention", () => {
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
@@ -105,3 +107,4 @@ async function waitFor(callback) {
 
   throw new Error("Timed out waiting for condition")
 }
+})

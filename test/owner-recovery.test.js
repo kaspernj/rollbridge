@@ -7,13 +7,15 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
 import {isProcessRunning, waitForProcessExit} from "./support/process.js"
+
+describe("owner-recovery", () => {
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url))
 const binPath = path.join(currentDir, "..", "bin", "rollbridge")
@@ -2100,3 +2102,4 @@ async function waitForLog(child, message, {allowChildExit = false} = {}) {
     child.stderr?.setEncoding("utf8").on("data", onErrorData)
   })
 }
+})

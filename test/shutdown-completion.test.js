@@ -7,12 +7,14 @@ import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import test from "node:test"
+import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
 import RollbridgeDaemon from "../src/daemon.js"
 import {isProcessAlive, readState} from "../src/state-store.js"
+
+describe("shutdown-completion", () => {
 
 const dummyAppPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "dummy-app.js")
 
@@ -414,3 +416,4 @@ async function waitForFile(filePath) {
 
   throw new Error(`Watcher ended before ${filePath} appeared`)
 }
+})
