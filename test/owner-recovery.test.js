@@ -171,7 +171,7 @@ test("exact bootstrap restores the committed generation after external owner ret
     assert.ok(active.services.every(({process}) => typeof process.pid === "number" && process.state === "running"))
     assert.ok(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running"))
     assert.deepEqual(recoveryOrder, ["service", "activate", "singleton"], "candidate activation must precede post-commit singleton completion")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
+    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"]), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
   } finally {
     if (recovered) {
       const activeRecovery = recovered.status().activeReleaseId === "v2"
@@ -307,7 +307,7 @@ test("journaled committed bootstrap recovery resumes after a restart begins", as
     assert.ok(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running"))
     assert.equal(releaseProcessPid(active, "v1", "worker"), v1WorkerPid)
     assert.equal(isProcessRunning(v1WorkerPid), true)
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
+    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"]), ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
   } finally {
     if (recovered) {
       const shutdown = recovered.shutdown()
@@ -873,7 +873,7 @@ test("owner recovery preserves complete private transition authority across a ca
 
     assert.equal(recovered.status().activeReleaseId, "v2")
     assert.equal(recovered.status().generationTransition?.phase, "committed")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "activate:v2"])
+    assert.deepEqual(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2"]), ["activate:v1", "retire:v1", "activate:v2"])
   } finally {
     if (recovered) await recovered.shutdown().catch(() => {})
     await stopFixtureGuardian(fixture.statePath)
@@ -988,6 +988,7 @@ test("owner recovery uses the owning release singleton definition during a commi
     assert.equal(pending.activeReleaseId, "v2")
     assert.equal(pending.generationTransition?.phase, "committed_pending")
     assert.equal(pending.singletonReleaseIds?.singleton, "v1")
+    await owner.persistState({throwOnError: true})
     await owner.retireCommittedOwner(undefined)
     owner.guardian?.disconnect()
 
@@ -1771,6 +1772,33 @@ async function createFixture(options = {}) {
  */
 async function lifecycleEvents(lifecycleLogPath) {
   return (await fs.readFile(lifecycleLogPath, "utf8")).trim().split("\n").filter(Boolean)
+}
+
+/**
+ * @param {string} lifecycleLogPath - Fixture lifecycle log.
+ * @param {string[]} expected - Exact lifecycle events to await.
+ * @returns {Promise<string[]>} The matching ordered events.
+ */
+async function waitForLifecycleEvents(lifecycleLogPath, expected) {
+  const watcher = fs.watch(lifecycleLogPath, {signal: AbortSignal.timeout(3000)})
+
+  try {
+    const events = await lifecycleEvents(lifecycleLogPath)
+
+    if (JSON.stringify(events) === JSON.stringify(expected)) return events
+    for await (const _event of watcher) {
+      const changedEvents = await lifecycleEvents(lifecycleLogPath)
+
+      if (JSON.stringify(changedEvents) === JSON.stringify(expected)) return changedEvents
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw new Error(`Timed out waiting for lifecycle events: ${JSON.stringify(expected)}`, {cause: error})
+    throw error
+  } finally {
+    await watcher.return?.()
+  }
+
+  throw new Error(`Timed out waiting for lifecycle events: ${JSON.stringify(expected)}`)
 }
 
 /**

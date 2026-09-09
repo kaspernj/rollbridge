@@ -1678,10 +1678,7 @@ export default class RollbridgeDaemon {
     let retirementFailure = activationLifecycle ? undefined : previousRelease?.retirementError
 
     if (transition.phase === "candidate_ready") {
-      // Generation activation is the authority switch: activate the healthy candidate
-      // before asking the incumbent to quiesce. The committed path below starts the
-      // incumbent drain asynchronously so deploy success never waits for old work.
-      if (previousRelease && !transition.degradedIncumbent && !activationLifecycle) await this.updateGenerationTransition("retiring_previous")
+      if (previousRelease && !transition.degradedIncumbent) await this.updateGenerationTransition("retiring_previous")
       else await this.updateGenerationTransition("previous_retired")
     }
 

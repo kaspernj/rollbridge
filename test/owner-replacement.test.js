@@ -1826,6 +1826,7 @@ test("owner replacement preserves accepted degraded incumbent web authority", as
       releasePath: v2Path,
       revision: "v2"
     }, path: socketPath})
+    await waitForReleaseState(socketPath, "v2", "stopped")
     const accepted = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
     assert.equal(recovery.jobsStatus, "degraded")
@@ -1833,7 +1834,6 @@ test("owner replacement preserves accepted degraded incumbent web authority", as
     assert.equal(/** @type {{phase?: string}} */ (accepted.generationTransition).phase, "degraded_active")
     replacement = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(replacement, "owner replacement committed")
-    await new Promise((resolve) => setTimeout(resolve, 250))
     const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const response = await fetch(`http://127.0.0.1:${proxyPort}/release`)
 

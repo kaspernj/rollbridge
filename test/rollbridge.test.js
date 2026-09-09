@@ -505,7 +505,7 @@ test("candidate activation retires jobs-main with its workers without waiting fo
   }
 })
 
-test("opt-in generation lifecycle retires the old generation before activating and committing the candidate", async () => {
+test("opt-in generation lifecycle acknowledges old retirement before activating the candidate", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
@@ -633,7 +633,7 @@ test("first generation is not committed when its activation acknowledgement fail
   }
 })
 
-test("retirement failure retains the exact transition, blocks other deploys, and exact resume continues it", async () => {
+test("retirement acknowledgement failure retains the exact transition, blocks other deploys, and exact resume continues it", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceQuietFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
@@ -855,7 +855,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     assert.equal(daemon.status().activeReleaseId, "v3")
     assert.equal(daemon.status().generationTransition?.phase, "committed")
     assert.equal(await fetchText(daemon, "/release"), "v3")
-    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
+    assert.deepEqual(await lifecycleEvents(fixture.lifecycleLogPath), ["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "activate:v3"], "fresh deployment must not re-retire a degraded incumbent generation")
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -1106,6 +1106,7 @@ test("retired generation coordinator remains fenced after exit", async () => {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     socket = await openWebSocket(daemon)
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    await waitFor(() => statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")?.lifecycleRole === "retired")
     const coordinator = statusRelease(daemon, "v1").processes.find((entry) => entry.id === "beacon")
     const coordinatorProcess = daemon.releases.get("v1")?.getProcess("beacon")
 

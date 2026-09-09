@@ -2,7 +2,7 @@
 
 Rollbridge treats web authority, jobs-generation authority, durable transition state, and old-release draining as separate concerns.
 
-A successful activation-lifecycle deployment starts and health-checks the candidate, activates its jobs generation, switches web authority, checkpoints `committed`, and returns. Old-release retirement and process drain continue asynchronously and must not gate deployment completion.
+A successful activation-lifecycle deployment starts and health-checks the candidate, waits for the old generation's retirement/quiescence acknowledgement, activates the candidate jobs generation, switches web authority, checkpoints `committed`, and returns. The acknowledged old generation then continues draining and stopping asynchronously; deployment completion does not wait for that later work.
 
 Failed candidates never receive traffic. Recovery is exact-authority and journaled; no operator should edit durable state. A degraded incumbent keeps web authority while jobs remain explicitly degraded until a fresh generation commits.
 
