@@ -6,6 +6,7 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import {afterAll, beforeAll, describe, test} from "@velocious/testing"
+import {fileURLToPath} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
@@ -15,6 +16,9 @@ describe("control-protocol", () => {
 let root = ""
 let socketPath = ""
 let daemon = /** @type {RollbridgeDaemon | undefined} */ (undefined)
+const currentDir = path.dirname(fileURLToPath(import.meta.url))
+const dummyAppPath = path.join(currentDir, "fixtures", "dummy-app.js")
+const runningProcessCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`
 
 beforeAll(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-control-"))
@@ -23,7 +27,11 @@ beforeAll(async () => {
   const config = normalizeConfig({
     application: "rollbridge-control-test",
     control: {path: socketPath},
-    processes: [{command: "true", id: "web", policy: "proxied", port: {from: 0, to: 0}}],
+    processes: [
+      {command: runningProcessCommand, id: "beacon", policy: "service", port: {from: 0, to: 0}},
+      {command: `${JSON.stringify(process.execPath)} ${JSON.stringify(dummyAppPath)}`, health: {intervalMs: 50, path: "/ping", timeoutMs: 3000}, id: "web", policy: "proxied", port: {from: 0, to: 0}},
+      {command: runningProcessCommand, id: "jobs-main", policy: "singleton"}
+    ],
     proxy: {host: "127.0.0.1", port: 0}
   })
 
@@ -94,4 +102,55 @@ test("a known command missing a required field returns a field error", async () 
   assert.equal(response.status, "error")
   assert.equal(response.error, "releasePath is required")
 })
+test("status can omit process logs without changing the default status payload", async () => {
+  assert.ok(daemon)
+  await daemon.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
+
+  const full = /** @type {import("../src/daemon.js").DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: socketPath}))
+  const compact = /** @type {import("../src/daemon.js").DaemonStatusWithoutLogs} */ (await sendControlCommand({command: {command: "status", includeLogs: false}, path: socketPath}))
+  const invalid = await sendRawControlLine(JSON.stringify({command: "status", includeLogs: "false"}))
+
+  assert.ok(full.releases[0]?.processes.every((processStatus) => Array.isArray(processStatus.logs)))
+  assert.ok(full.services.every(({process: processStatus}) => Array.isArray(processStatus.logs)))
+  assert.ok(full.singletons.every(({process: processStatus}) => Array.isArray(processStatus.logs)))
+  assert.deepEqual(statusWithoutProcessUptimes(compact), statusWithoutProcessUptimes({
+    ...full,
+    releases: full.releases.map((release) => ({
+      ...release,
+      processes: release.processes.map(({logs: _logs, ...processStatus}) => processStatus)
+    })),
+    services: full.services.map(({process, ...service}) => ({
+      ...service,
+      process: (({logs: _logs, ...processStatus}) => processStatus)(process)
+    })),
+    singletons: full.singletons.map(({process, ...singleton}) => ({
+      ...singleton,
+      process: (({logs: _logs, ...processStatus}) => processStatus)(process)
+    }))
+  }))
+  assert.equal(invalid.status, "error")
+  assert.equal(invalid.error, "includeLogs must be a boolean")
+})
+
+/**
+ * @param {import("../src/daemon.js").DaemonStatus | import("../src/daemon.js").DaemonStatusWithoutLogs} status - Status response.
+ * @returns {Record<string, import("../src/json.js").JsonValue>} Status without volatile process uptime.
+ */
+function statusWithoutProcessUptimes(status) {
+  return {
+    ...status,
+    releases: status.releases.map((release) => ({
+      ...release,
+      processes: release.processes.map(({uptimeMs: _uptimeMs, ...processStatus}) => processStatus)
+    })),
+    services: status.services.map(({process, ...service}) => ({
+      ...service,
+      process: (({uptimeMs: _uptimeMs, ...processStatus}) => processStatus)(process)
+    })),
+    singletons: status.singletons.map(({process, ...singleton}) => ({
+      ...singleton,
+      process: (({uptimeMs: _uptimeMs, ...processStatus}) => processStatus)(process)
+    }))
+  }
+}
 })

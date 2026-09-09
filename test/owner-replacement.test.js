@@ -11,7 +11,7 @@ import {describe, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {openControlSession, sendControlCommand} from "../src/control-client.js"
-import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic} from "../src/daemon.js"
+import RollbridgeDaemon, {isLegacyGuardianPrepareDiagnostic, ownerConfigDigest, ownerReplacementTransitionAuthorityMatches} from "../src/daemon.js"
 import GuardianClient from "../src/guardian-client.js"
 import {findAvailablePort} from "../src/port-allocator.js"
 import {waitForProcessExit} from "./support/process.js"
@@ -409,9 +409,7 @@ test("failed partial upgrade resumes an incumbent retired release drain", {timeo
   }
 })
 
-test("partial guardian classification failures preserve the incumbent, children, and retained stream", async (t) => {
-  for (const fault of ["malformed-capability", "wrong-pid", "wrong-provenance"]) {
-    await t.test(fault, async () => {
+test.each(["malformed-capability", "wrong-pid", "wrong-provenance"])("partial guardian classification failure %s preserves the incumbent, children, and retained stream", async fault => {
       const root = await fs.mkdtemp(path.join(os.tmpdir(), `rollbridge-owner-replacement-partial-${fault}-`))
       const socketPath = path.join(root, "rollbridge.sock")
       const statePath = path.join(root, "state.json")
@@ -489,8 +487,6 @@ test("partial guardian classification failures preserve the incumbent, children,
         await stopGuardian(statePath)
         await fs.rm(root, {force: true, recursive: true})
       }
-    })
-  }
 })
 
 test("first pre-split package upgrade is explicitly disruptive and later replacements are atomic", async () => {
@@ -1651,7 +1647,7 @@ test("pruned release connection completion closes the incumbent listener session
   assert.equal(daemon.incumbentListenerControl, session)
 })
 
-test("same-authority owner replacement preserves a failed generation transition without retrying its hook", async () => {
+test("same-authority owner replacement preserves completed activation compensation without replaying hooks", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-failed-generation-"))
   const oldSocketPath = path.join(root, "old.sock")
   const statePath = path.join(root, "state.json")
@@ -1679,18 +1675,15 @@ test("same-authority owner replacement preserves a failed generation transition 
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
     await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath}), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
 
     await writeConfig(configPath, failedConfig(oldSocketPath, false))
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(candidate, "owner replacement committed")
     const status = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
-    const generationTransition = status.generationTransition
-
-    assert.ok(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))
-    assert.equal(generationTransition.phase, "activating_candidate")
-    assert.match(String(generationTransition.error), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n", "replacement must preserve, not retry, the failed activation")
+    assert.equal(status.activeReleaseId, "v1")
+    assert.equal(status.generationTransition, undefined)
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n", "replacement must not replay completed compensation hooks")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -1702,7 +1695,7 @@ test("same-authority owner replacement preserves a failed generation transition 
   }
 })
 
-test("config-changing owner replacement rejects an unresolved generation transition", async () => {
+test("config-changing owner replacement proceeds after activation compensation clears the transition", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-unresolved-config-"))
   const oldSocketPath = path.join(root, "old.sock")
   const newSocketPath = path.join(root, "new.sock")
@@ -1736,21 +1729,120 @@ test("config-changing owner replacement rejects an unresolved generation transit
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     const result = await collectUntilExitOrLog(candidate, "owner replacement committed")
 
-    assert.equal(result.message, undefined, result.output)
-    assert.match(result.output, /config authority.*unresolved generation transition/i)
-    const status = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
-    const generationTransition = status.generationTransition
+    assert.equal(result.message, "owner replacement committed", result.output)
+    const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
 
-    assert.ok(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))
-    assert.equal(generationTransition.phase, "activating_candidate")
-    assert.match(String(generationTransition.error), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\n")
-    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
+    assert.equal(status.activeReleaseId, "v1")
+    assert.equal(status.generationTransition, undefined)
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
+    const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
 
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
     await shutdown
   } finally {
     for (const child of [owner, candidate]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+    await stopGuardian(statePath)
+    await fs.rm(root, {force: true, recursive: true})
+  }
+})
+
+test("owner replacement admits only the unresolved transition's exact retained candidate config", () => {
+  const exactConfig = normalizeConfig(config({controlPath: "/tmp/exact.sock", extraCompanion: false, statePath: "/tmp/exact-state.json"}))
+  const unrelatedConfig = normalizeConfig(config({controlPath: "/tmp/unrelated.sock", extraCompanion: true, statePath: "/tmp/exact-state.json"}))
+  const replacementConfig = structuredClone(unrelatedConfig)
+
+  replacementConfig.releaseRetention.keep += 1
+  const transition = /** @type {Parameters<typeof ownerReplacementTransitionAuthorityMatches>[1]} */ (/** @type {import("../src/json.js").JsonValue} */ ({
+    candidateReleaseId: "v2",
+    candidateReleasePath: "/srv/releases/v2",
+    candidateRevision: "revision-v2",
+    configDigest: ownerConfigDigest(exactConfig)
+  }))
+  /**
+   * @param {import("../src/config.js").RollbridgeConfig | undefined} candidateConfig - Candidate authority.
+   * @param {string} [releasePath] - Retained candidate path.
+   * @returns {boolean} Whether replacement is admitted.
+   */
+  const admitted = (candidateConfig, releasePath = "/srv/releases/v2") => ownerReplacementTransitionAuthorityMatches(
+    /** @type {Parameters<typeof ownerReplacementTransitionAuthorityMatches>[0]} */ (/** @type {import("../src/json.js").JsonValue} */ ({
+      config: unrelatedConfig,
+      releaseConfigs: candidateConfig ? {v2: candidateConfig} : {},
+      snapshot: {releases: [{releaseId: "v2", releasePath, revision: "revision-v2"}]}
+    })),
+    transition,
+    ownerConfigDigest(replacementConfig)
+  )
+
+  assert.equal(admitted(exactConfig), true)
+  assert.equal(admitted(unrelatedConfig), false)
+  assert.equal(admitted(exactConfig, "/srv/releases/wrong"), false)
+})
+
+test("owner replacement preserves accepted degraded incumbent web authority", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-degraded-active-"))
+  const socketPath = path.join(root, "rollbridge.sock")
+  const statePath = path.join(root, "state.json")
+  const configPath = path.join(root, "rollbridge.cjs")
+  const lifecycleLogPath = path.join(root, "generation.lifecycle")
+  const retiredMarkerPath = path.join(root, "incumbent.retired")
+  const v1Path = path.join(root, "v1")
+  const v2Path = path.join(root, "v2")
+  const proxyPort = await findAvailablePort({host: "127.0.0.1", range: {from: 24000, to: 24999}, usedPorts: new Set()})
+  let owner
+  let replacement
+  const failedConfig = () => {
+    const raw = config({activationLogPath: lifecycleLogPath, controlPath: socketPath, extraCompanion: false, proxyPort, statePath})
+    const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (raw.processes)
+    const worker = processes.find((processConfig) => processConfig.id === "worker")
+    const workerLifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (worker?.lifecycle)
+    const generation = processes.find((processConfig) => processConfig.id === "generation-main")
+    const lifecycle = /** @type {Record<string, import("../src/json.js").JsonValue>} */ (generation?.lifecycle)
+
+    delete workerLifecycle.drainCommand
+    workerLifecycle.drainTimeoutMs = 0
+    lifecycle.activateCommand = `[ "$ROLLBRIDGE_RELEASE_ID" != v2 ] || exit 24; [ "$ROLLBRIDGE_RELEASE_ID" != v1 ] || [ ! -f ${JSON.stringify(retiredMarkerPath)} ] || exit 26; printf 'activate:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+    lifecycle.quietCommand = `touch ${JSON.stringify(retiredMarkerPath)}; printf 'retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(lifecycleLogPath)}`
+    return raw
+  }
+
+  try {
+    await Promise.all([fs.mkdir(v1Path), fs.mkdir(v2Path)])
+    await writeConfig(configPath, failedConfig())
+    owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(owner, "control socket listening")
+    await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: socketPath})
+    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath}), /pre-commit compensation failed.*status 26/i)
+    const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const webPid = releaseProcessPid(before, "v1", "web")
+
+    assert.equal(/** @type {{releaseId: string, state: string}[]} */ (before.releases).find(({releaseId}) => releaseId === "v2")?.state, "draining")
+    const recovery = await sendControlCommand({command: {
+      acceptRetiredIncumbent: true,
+      command: "recover-generation-transition",
+      previousReleaseId: "v1",
+      releaseId: "v2",
+      releasePath: v2Path,
+      revision: "v2"
+    }, path: socketPath})
+    const accepted = await sendControlCommand({command: {command: "status"}, path: socketPath})
+
+    assert.equal(recovery.jobsStatus, "degraded")
+    assert.equal(/** @type {{releaseId: string, state: string}[]} */ (accepted.releases).find(({releaseId}) => releaseId === "v2")?.state, "stopped")
+    assert.equal(/** @type {{phase?: string}} */ (accepted.generationTransition).phase, "degraded_active")
+    replacement = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
+    await waitForLog(replacement, "owner replacement committed")
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
+    const response = await fetch(`http://127.0.0.1:${proxyPort}/release`)
+
+    assert.equal(recovered.activeReleaseId, "v1")
+    assert.equal(/** @type {{phase?: string}} */ (recovered.generationTransition).phase, "degraded_active")
+    assert.equal(releaseProcessPid(recovered, "v1", "web"), webPid)
+    assert.equal(response.status, 200)
+    assert.equal((await response.text()).trim(), "v1")
+    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\n")
+  } finally {
+    for (const child of [owner, replacement]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
     await stopGuardian(statePath)
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -1930,7 +2022,7 @@ async function removeDaemonRecoveryCapability(packagePath, {abortedPath, prepare
   const guardianPath = path.join(packagePath, "src", "process-guardian.js")
   const daemonPath = path.join(packagePath, "src", "daemon.js")
   const source = await fs.readFile(guardianPath, "utf8")
-  const capability = "  if (request.command === \"capabilities\") return {daemonRecovery: 1}\n\n"
+  const capability = "  if (request.command === \"capabilities\") return {daemonRecovery: 1, generationReactivation: 1}\n\n"
   const incumbentAbortNotification = "  if (ownerClient && !ownerClient.destroyed) ownerClient.write(`${JSON.stringify({event: \"replacement-aborted\", reason})}\\n`)\n"
   const legacyCapability = `  if (request.command === "capabilities") {
     while (!fsSync.existsSync(${JSON.stringify(preparedPath)})) await new Promise((resolve) => setTimeout(resolve, 5))

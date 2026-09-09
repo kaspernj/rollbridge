@@ -259,7 +259,7 @@ async function handleLine(socket, line) {
 async function execute(request, socket) {
   if (shuttingDown) throw new Error("Process guardian is shutting down")
 
-  if (request.command === "capabilities") return {daemonRecovery: 1}
+  if (request.command === "capabilities") return {daemonRecovery: 1, generationReactivation: 1}
 
   if (request.command === "owner-replacement-capabilities") {
     return {commands: ["commit-retired-owner-replacement"], protocol: "owner-replacement", version: 1}
@@ -631,7 +631,11 @@ async function execute(request, socket) {
       },
       shouldRestart: () => record.desired
     }
-    const managedProcess = legacyGuardian
+    // Only process keys inventoried from the legacy guardian remain delegated to it.
+    // New release processes must be owned by the current guardian so current lifecycle
+    // fields (including activation timeouts) are enforced instead of downgraded by an
+    // older guardian protocol implementation.
+    const managedProcess = recoversLegacyProcess && legacyGuardian
       ? legacyGuardian.process(request.key, managedDefinition)
       : new ManagedProcess(managedDefinition)
 
@@ -655,6 +659,9 @@ async function execute(request, socket) {
     await record.process.start(request.reason, request.lifecycleRole)
   } else if (request.command === "activate") {
     await record.process.activateStrict()
+  } else if (request.command === "reactivate" || request.command === "reactivate-with-command") {
+    await record.process.reactivateStrict()
+    record.desired = true
   } else if (request.command === "quiesce") {
     record.desired = false
     await record.process.quiesceStrict()

@@ -24,9 +24,13 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
  * @typedef {{disruptive: true, mode: "legacy-first-upgrade", reason: string}} OwnerTransition
- * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "committed_pending" | "committed" | "restoring_committed"} GenerationTransitionPhase
- * @typedef {{activationLifecycle?: boolean, candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, configDigest: string, error?: string, journalRevision?: number, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
+ * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "restoring_previous" | "retiring_failed_candidate" | "degraded_active" | "committed_pending" | "committed" | "restoring_committed"} GenerationTransitionPhase
+ * @typedef {{activationError?: string, activationLifecycle?: boolean, candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, compensationError?: string, configDigest: string, degradedIncumbent?: boolean, error?: string, journalRevision?: number, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
  * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, generationTransition?: GenerationTransition, ownerRecovery: {configDigest: string, ready: boolean} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
+ * @typedef {Omit<import("./managed-process.js").ManagedProcessStatus, "logs">} ManagedProcessStatusWithoutLogs
+ * @typedef {Omit<import("./release-group.js").ReleaseStatus, "processes"> & {processes: ManagedProcessStatusWithoutLogs[]}} ReleaseStatusWithoutLogs
+ * @typedef {Omit<ProcessStatus, "process"> & {process: ManagedProcessStatusWithoutLogs}} ProcessStatusWithoutLogs
+ * @typedef {Omit<DaemonStatus, "releases" | "services" | "singletons"> & {releases: ReleaseStatusWithoutLogs[], services: ProcessStatusWithoutLogs[], singletons: ProcessStatusWithoutLogs[]}} DaemonStatusWithoutLogs
  * @typedef {{configDigest: string, format: number, guardian: {pid?: number, socketPath: string, token: string}, reconnectGraceMs: number}} OwnerRecoveryMetadata
  * @typedef {DaemonStatus & {recovery: OwnerRecoveryMetadata, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>}} OwnerRecoverySnapshot
  * @typedef {{authority: JsonValue, config: import("./config.js").RollbridgeConfig, listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>, listenerSourceId?: string, recovery?: {command: JsonValue, reconnectGraceMs: number, startupTimeoutMs: number}, releaseConfigs?: Record<string, import("./config.js").RollbridgeConfig>, retiredListenerHandoff?: number, serviceReleaseIds?: Record<string, string>, singletonReleaseIds?: Record<string, string>, snapshot: OwnerRecoverySnapshot}} PrivateOwnerState
@@ -127,7 +131,7 @@ export default class RollbridgeDaemon {
     const transition = this.generationTransition
     const recoveredReplacementProxy = this.guardian ? await this.finalizeRecoveredOwnerReplacement() : false
 
-    if (this.guardian && transition && transition.phase !== "committed" && !transition.error) {
+    if (this.guardian && transition && transition.phase !== "committed" && transition.phase !== "degraded_active" && !transition.error) {
       this.generationTransitionRecovery = true
       try {
         await this.executeOwnerMutation("recover generation transition", async () => {
@@ -184,6 +188,28 @@ export default class RollbridgeDaemon {
     await this.startProxy()
     await this.guardian.finalizeOwnerReplacement(replacementId)
     return true
+  }
+
+  /** Re-establishes durable guardian ownership from an exact committed external-owner bootstrap. */
+  async resetRetiredOwnerRecovery() {
+    if (!this.statePath || !this.config.ownerRecovery || !this.bootstrap) throw new Error("Retired owner reset requires ownerRecovery, statePath, and the exact bootstrap tuple")
+    const state = await readState(this.statePath)
+    const snapshot = state && typeof state === "object" && !Array.isArray(state) ? /** @type {OwnerRecoverySnapshot} */ (state) : undefined
+    const transition = snapshot?.generationTransition
+    const persistedBootstrap = snapshot?.bootstrap
+    const exactBootstrap = snapshot?.activeReleaseId === this.bootstrap.releaseId &&
+      persistedBootstrap?.releaseId === this.bootstrap.releaseId && persistedBootstrap?.releasePath === this.bootstrap.releasePath && persistedBootstrap?.revision === this.bootstrap.revision &&
+      transition?.phase === "committed" && transition.candidateReleaseId === this.bootstrap.releaseId && transition.candidateReleasePath === this.bootstrap.releasePath && transition.candidateRevision === this.bootstrap.revision
+    if (!snapshot || snapshot.recovery?.guardian || !exactBootstrap) throw new Error("Retired owner reset requires an exact committed bootstrap with missing guardian identity")
+    const control = await inspectControlSocket(this.config.control.path)
+    if (control.alive) throw new Error(`Retired owner reset refuses responsive control owner at ${this.config.control.path}`)
+    this.guardianIdentity = {socketPath: `${this.statePath}.guardian.sock`, token: crypto.randomBytes(32).toString("hex")}
+    this.guardian = new GuardianClient(this.guardianIdentity)
+    await this.guardian.launch()
+    this.guardianIdentity.pid = this.guardian.pid
+    this.watchOwnerReplacementEvents()
+    await this.guardian.claimOwner(this.config.ownerRecovery.reconnectGraceMs ?? 30000, this.ownerAuthority())
+    this.logger("retired owner guardian reset prepared", {guardianPid: this.guardianIdentity.pid ?? null, releaseId: this.bootstrap.releaseId})
   }
 
   /** Connects to the durable process guardian and reconstructs a matching persisted owner snapshot. */
@@ -505,7 +531,8 @@ export default class RollbridgeDaemon {
       if (!transfer?.config || !transfer.snapshot) throw new Error("Committed owner published incomplete replacement state")
       const unresolvedTransition = transfer.snapshot.generationTransition
 
-      if (unresolvedTransition && unresolvedTransition.phase !== "committed" && unresolvedTransition.configDigest !== this.ownerRecoveryConfigDigest()) {
+      if (unresolvedTransition && unresolvedTransition.phase !== "committed" &&
+        !ownerReplacementTransitionAuthorityMatches(transfer, unresolvedTransition, this.ownerRecoveryConfigDigest())) {
         throw new Error(`Owner replacement cannot change config authority while unresolved generation transition ${unresolvedTransition.candidateReleaseId} remains at ${unresolvedTransition.phase}`)
       }
       const registeredProcesses = new Map((await this.guardian.inventory()).map(({key, provenance}) => [key, provenance]))
@@ -1337,8 +1364,18 @@ export default class RollbridgeDaemon {
         }))
     }
 
+    if (commandName === "recover-generation-transition") {
+      return await this.executeOwnerMutation("recover generation transition", async () => await this.recoverGenerationTransition({
+        acceptRetiredIncumbent: data.acceptRetiredIncumbent === true,
+        previousReleaseId: requiredString(data.previousReleaseId, "previousReleaseId"),
+        releaseId: requiredString(data.releaseId, "releaseId"),
+        releasePath: requiredString(data.releasePath, "releasePath"),
+        revision: requiredString(data.revision, "revision")
+      }))
+    }
+
     if (commandName === "status") {
-      return this.status()
+      return this.status({includeLogs: statusIncludeLogs(data.includeLogs)})
     }
 
     if (commandName === "events") {
@@ -1549,7 +1586,7 @@ export default class RollbridgeDaemon {
     const newReleaseId = releaseId || revision || new Date().toISOString().replace(/[^0-9]/g, "")
     const transition = this.generationTransition
 
-    if (transition && transition.phase !== "committed") {
+    if (transition && transition.phase !== "committed" && transition.phase !== "degraded_active") {
       this.assertExactGenerationTransition(transition, {config: nextConfig, releaseId: newReleaseId, releasePath, revision: revision || newReleaseId})
       return await this.resumeGenerationTransition()
     }
@@ -1609,6 +1646,7 @@ export default class RollbridgeDaemon {
       candidateReleasePath: release.releasePath,
       candidateRevision: release.revision,
       configDigest: ownerConfigDigest(nextConfig),
+      degradedIncumbent: transition?.phase === "degraded_active",
       journalRevision: 0,
       phase: activationLifecycle ? "candidate_ready" : "activating_candidate",
       previousReleaseId: previousRelease?.releaseId ?? null,
@@ -1627,6 +1665,10 @@ export default class RollbridgeDaemon {
     const transition = this.generationTransition
 
     if (!transition) throw new Error("No release generation transition to resume")
+    if (transition.phase === "degraded_active") throw new Error("Degraded incumbent authority requires a fresh deployment, not transition resume")
+    if (transition.phase === "restoring_previous" || transition.phase === "retiring_failed_candidate") {
+      return await this.compensatePreCommitActivationFailure()
+    }
     const release = this.releases.get(transition.candidateReleaseId)
     const previousRelease = transition.previousReleaseId ? this.releases.get(transition.previousReleaseId) : undefined
 
@@ -1636,7 +1678,10 @@ export default class RollbridgeDaemon {
     let retirementFailure = activationLifecycle ? undefined : previousRelease?.retirementError
 
     if (transition.phase === "candidate_ready") {
-      if (previousRelease) await this.updateGenerationTransition("retiring_previous")
+      // Generation activation is the authority switch: activate the healthy candidate
+      // before asking the incumbent to quiesce. The committed path below starts the
+      // incumbent drain asynchronously so deploy success never waits for old work.
+      if (previousRelease && !transition.degradedIncumbent && !activationLifecycle) await this.updateGenerationTransition("retiring_previous")
       else await this.updateGenerationTransition("previous_retired")
     }
 
@@ -1668,7 +1713,23 @@ export default class RollbridgeDaemon {
 
         await this.failGenerationTransition(failure)
         this.logger("release generation activation failed", {error: failure, releaseId: release.releaseId})
-        throw error
+        if (!previousRelease || !activationLifecycle) throw error
+
+        let compensation
+
+        try {
+          compensation = await this.compensatePreCommitActivationFailure()
+        } catch (compensationError) {
+          throw new AggregateError(
+            [error, compensationError],
+            `${failure}; pre-commit compensation failed: ${compensationError instanceof Error ? compensationError.message : String(compensationError)}`,
+            {cause: compensationError}
+          )
+        }
+        const compensatedError = /** @type {Error & {compensation?: Record<string, JsonValue>}} */ (new Error(`${failure}; compensation restored incumbent ${compensation.previousReleaseId} as authoritative and retired failed candidate ${compensation.candidateReleaseId}`, {cause: error}))
+
+        compensatedError.compensation = compensation
+        throw compensatedError
       }
 
       // Activation acknowledgement and the logical proxy commit deliberately share one
@@ -1733,11 +1794,242 @@ export default class RollbridgeDaemon {
   }
 
   /**
+   * Restores the authoritative proxy target and retires only the failed candidate.
+   * Every external effect is preceded by a durable phase checkpoint so recovery can
+   * safely replay the paired lifecycle hooks, which are already idempotent contracts.
+   * @returns {Promise<Record<string, JsonValue>>} Structured recovery result.
+   */
+  async compensatePreCommitActivationFailure() {
+    const transition = this.generationTransition
+
+    if (!transition) throw new Error("No release generation transition to compensate")
+    if (transition.phase !== "activating_candidate" && transition.phase !== "restoring_previous" && transition.phase !== "retiring_failed_candidate") {
+      throw new Error(`Generation transition ${transition.candidateReleaseId} at ${transition.phase} is not safe for pre-commit compensation`)
+    }
+    if (!transition.previousReleaseId) throw new Error("Pre-commit compensation requires a retained previous release")
+    const candidate = this.releases.get(transition.candidateReleaseId)
+    const previous = this.releases.get(transition.previousReleaseId)
+
+    if (!candidate) throw new Error(`Generation transition candidate ${transition.candidateReleaseId} is not retained`)
+    if (!previous) throw new Error(`Generation transition previous release ${transition.previousReleaseId} is not retained`)
+    if (this.activeRelease !== previous) throw new Error(`Previous release ${previous.releaseId} is not the authoritative proxy target`)
+
+    if (transition.phase === "activating_candidate") {
+      if (!transition.error && !transition.activationError) throw new Error("Candidate activation has no recorded failure to compensate")
+      transition.activationError = transition.activationError || transition.error
+      transition.compensationError = undefined
+      await this.updateGenerationTransition("retiring_failed_candidate")
+    }
+
+    if (transition.phase === "retiring_failed_candidate") {
+      try {
+        await candidate.beginRetirement(candidate.config, {retry: true})
+        const candidateServiceIds = [...this.serviceReleaseIds.entries()]
+          .filter(([, releaseId]) => releaseId === candidate.releaseId)
+          .map(([serviceId]) => serviceId)
+
+        await this.stopStartedServices(candidateServiceIds)
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error)
+
+        transition.compensationError = failure
+        await this.failGenerationTransition(`Failed candidate ${candidate.releaseId} retirement failed: ${failure}`)
+        this.logger("release generation compensation candidate retirement failed", {
+          activationError: transition.activationError,
+          error: failure,
+          releaseId: candidate.releaseId
+        })
+        throw new Error(`failed candidate ${candidate.releaseId} retirement failed: ${failure}`, {cause: error})
+      }
+      transition.compensationError = undefined
+      await this.updateGenerationTransition("restoring_previous")
+      this.logger("release generation compensation candidate retired", {releaseId: candidate.releaseId})
+    }
+
+    if (transition.phase === "restoring_previous") {
+      if (candidate.state !== "draining" && candidate.state !== "stopped") throw new Error(`Failed candidate ${candidate.releaseId} is not retired before incumbent restoration`)
+      try {
+        await previous.reactivateGeneration()
+      } catch (error) {
+        const failure = error instanceof Error ? error.message : String(error)
+
+        transition.compensationError = failure
+        await this.failGenerationTransition(`Incumbent ${previous.releaseId} restoration failed: ${failure}`)
+        this.logger("release generation compensation restoration failed", {
+          activationError: transition.activationError,
+          error: failure,
+          releaseId: previous.releaseId
+        })
+        throw new Error(`incumbent ${previous.releaseId} restoration failed: ${failure}`, {cause: error})
+      }
+      this.activeRelease = previous
+      transition.compensationError = undefined
+      this.logger("release generation compensation incumbent restored", {releaseId: previous.releaseId})
+    }
+
+    const result = /** @type {Record<string, JsonValue>} */ ({
+      activeReleaseId: previous.releaseId,
+      activationError: transition.activationError,
+      candidateReleaseId: candidate.releaseId,
+      failedCandidateStatus: candidate.state,
+      previousReleaseId: previous.releaseId,
+      recoveryStatus: "recovered"
+    })
+
+    this.config = previous.config
+    this.generationTransition = undefined
+    try {
+      await this.checkpointGenerationTransition()
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error)
+
+      this.generationTransition = transition
+      transition.compensationError = failure
+      transition.error = `Compensation checkpoint clear failed: ${failure}`
+      transition.journalRevision = (transition.journalRevision ?? 0) + 1
+      transition.updatedAt = new Date().toISOString()
+      await this.publishOwnerState().catch((publishError) => {
+        this.logger("release generation compensation fence republish failed", {
+          error: publishError instanceof Error ? publishError.message : String(publishError),
+          releaseId: candidate.releaseId
+        })
+      })
+      this.logger("release generation compensation checkpoint failed", {error: failure, releaseId: candidate.releaseId})
+      throw new Error(`compensation checkpoint clear failed: ${failure}`, {cause: error})
+    }
+    void this.drainAndPrune(candidate, candidate.config)
+    this.logger("release generation compensation completed", result)
+    return result
+  }
+
+  /**
+   * Authenticated control recovery for one exact failed pre-commit transition.
+   * @param {{acceptRetiredIncumbent?: boolean, previousReleaseId: string, releaseId: string, releasePath: string, revision: string}} identity - Exact transition fence.
+   * @returns {Promise<Record<string, JsonValue>>} Structured recovery result.
+   */
+  async recoverGenerationTransition(identity) {
+    const transition = this.generationTransition
+
+    if (!transition) {
+      if (this.activeRelease?.releaseId !== identity.previousReleaseId || this.activeRelease.releaseId === identity.releaseId) {
+        throw new Error("No matching recovered generation transition; the expected incumbent is not authoritative")
+      }
+      return {
+        activeReleaseId: this.activeRelease.releaseId,
+        candidateReleaseId: identity.releaseId,
+        previousReleaseId: identity.previousReleaseId,
+        recoveryStatus: "already_recovered"
+      }
+    }
+    if (transition.previousReleaseId !== identity.previousReleaseId) {
+      throw new Error(`Generation transition previous release is ${transition.previousReleaseId}; refusing stale recovery for ${identity.previousReleaseId}`)
+    }
+    if (transition.phase !== "activating_candidate" && transition.phase !== "retiring_previous" && transition.phase !== "restoring_previous" && transition.phase !== "retiring_failed_candidate" && transition.phase !== "degraded_active") {
+      throw new Error(`Generation transition ${transition.candidateReleaseId} at ${transition.phase} is not a safe failed pre-commit transition`)
+    }
+    if (transition.phase === "degraded_active" && !identity.acceptRetiredIncumbent) {
+      throw new Error("Degraded incumbent authority may only be acknowledged with --accept-retired-incumbent or replaced by a fresh deployment")
+    }
+    const nextConfig = this.configPath ? await loadConfig(this.configPath) : this.config
+
+    this.assertReloadCompatible(nextConfig)
+    this.assertExactGenerationTransition(transition, {
+      config: nextConfig,
+      releaseId: identity.releaseId,
+      releasePath: identity.releasePath,
+      revision: identity.revision
+    })
+    if (this.activeRelease?.releaseId !== transition.previousReleaseId) {
+      throw new Error(`Previous release ${transition.previousReleaseId} is not the authoritative proxy target`)
+    }
+    if (identity.acceptRetiredIncumbent) return await this.acceptRetiredIncumbentTransition(transition)
+    return await this.compensatePreCommitActivationFailure()
+  }
+
+  /**
+   * Stops an exact failed candidate and persists degraded incumbent web authority until cutover.
+   * @param {GenerationTransition} transition - Exact failed transition proved by the caller.
+   * @returns {Promise<Record<string, JsonValue>>} Explicit degraded recovery result.
+   */
+  async acceptRetiredIncumbentTransition(transition) {
+    if (transition.phase !== "retiring_previous" && transition.phase !== "restoring_previous" && transition.phase !== "degraded_active") throw new Error(`Retired-incumbent recovery requires retiring_previous or restoring_previous; transition ${transition.candidateReleaseId} is at ${transition.phase}`)
+    const retirementFailure = transition.phase === "retiring_previous" ? transition.error : transition.compensationError
+
+    if (!terminalRetirementFailure(retirementFailure)) throw new Error("Retired-incumbent recovery requires a recorded restoration failure compatible with terminal retirement")
+    if (!transition.previousReleaseId) throw new Error("Retired-incumbent recovery requires a retained previous release")
+    const candidate = this.releases.get(transition.candidateReleaseId)
+    const previous = this.releases.get(transition.previousReleaseId)
+
+    if (!candidate) throw new Error(`Generation transition candidate ${transition.candidateReleaseId} is not retained`)
+    if (!previous) throw new Error(`Generation transition previous release ${transition.previousReleaseId} is not retained`)
+    if (candidate.releasePath !== transition.candidateReleasePath || candidate.revision !== transition.candidateRevision || ownerConfigDigest(candidate.config) !== transition.configDigest) {
+      throw new Error(`Generation transition candidate ${candidate.releaseId} does not retain its exact path, revision, and config authority`)
+    }
+    const recoverableCandidateStates = transition.phase === "retiring_previous" ? ["starting", "draining", "stopped"] : ["draining", "stopped"]
+
+    if (!recoverableCandidateStates.includes(candidate.state)) throw new Error(`Failed candidate ${candidate.releaseId} must be retiring or retired before accepting a retired incumbent`)
+    if (this.activeRelease !== previous) throw new Error(`Previous release ${previous.releaseId} is not the authoritative proxy target`)
+    const activationConfig = previous.config.processes.find((processConfig) => processConfig.lifecycle.activateCommand !== undefined)
+    const coordinator = activationConfig ? previous.getProcesses(activationConfig.id)[0]?.process : undefined
+    const missingRetiredCoordinator = !coordinator && /^Process .+ is not retained for reactivation$/u.test(retirementFailure ?? "")
+
+    if ((!coordinator && !missingRetiredCoordinator) || (coordinator && coordinator.status().lifecycleRole !== "retired")) throw new Error(`Previous release ${previous.releaseId} does not retain a retired or terminally absent generation coordinator`)
+    if (!releaseOwnsLiveProxyTraffic(previous)) throw new Error(`Previous release ${previous.releaseId} no longer owns live proxy/web traffic`)
+    if (this.activeRelease !== previous || !releaseOwnsLiveProxyTraffic(previous)) throw new Error(`Previous release ${previous.releaseId} lost live proxy/web authority during retired-incumbent recovery`)
+    const result = /** @type {Record<string, JsonValue>} */ ({
+      activeReleaseId: previous.releaseId,
+      candidateReleaseId: candidate.releaseId,
+      failedCandidateStatus: candidate.state,
+      jobsStatus: "degraded",
+      previousReleaseId: previous.releaseId,
+      recoveryStatus: "retired_incumbent_accepted"
+    })
+
+    if (transition.phase === "degraded_active") {
+      if (candidate.state !== "stopped") void this.drainAndPrune(candidate, candidate.config)
+      return result
+    }
+    const previousError = transition.error
+    const previousPhase = transition.phase
+    const previousJournalRevision = transition.journalRevision
+    const previousUpdatedAt = transition.updatedAt
+
+    transition.phase = "degraded_active"
+    transition.error = undefined
+    transition.journalRevision = (transition.journalRevision ?? 0) + 1
+    transition.updatedAt = new Date().toISOString()
+    try {
+      await this.checkpointGenerationTransition()
+    } catch (error) {
+      transition.phase = previousPhase
+      transition.error = previousError
+      transition.journalRevision = previousJournalRevision
+      transition.updatedAt = previousUpdatedAt
+      try {
+        await this.publishOwnerState()
+      } catch (publishError) {
+        throw new AggregateError([error, publishError], "retired-incumbent recovery checkpoint and fence restoration failed", {cause: publishError})
+      }
+      throw new Error(`retired-incumbent recovery checkpoint failed: ${error instanceof Error ? error.message : String(error)}`, {cause: error})
+    }
+    if (candidate.state !== "stopped") void this.drainAndPrune(candidate, candidate.config)
+    this.logger("retired incumbent accepted as jobs-degraded", result)
+    return result
+  }
+
+  /**
    * @param {GenerationTransition} transition - Pending or committed exact transition.
    * @param {{config: import("./config.js").RollbridgeConfig, releaseId: string, releasePath: string, revision: string}} candidate - Requested identity.
    */
   assertExactGenerationTransition(transition, candidate) {
-    if (transition.candidateReleaseId !== candidate.releaseId || transition.candidateReleasePath !== candidate.releasePath || transition.candidateRevision !== candidate.revision || transition.configDigest !== ownerConfigDigest(candidate.config)) {
+    const retainedCandidate = this.releases.get(transition.candidateReleaseId)
+    const retainedAuthorityMatches = transition.phase !== "committed" &&
+      retainedCandidate?.releasePath === transition.candidateReleasePath &&
+      retainedCandidate.revision === transition.candidateRevision &&
+      ownerConfigDigest(retainedCandidate.config) === transition.configDigest
+    const requestedAuthorityMatches = ownerConfigDigest(candidate.config) === transition.configDigest
+
+    if (transition.candidateReleaseId !== candidate.releaseId || transition.candidateReleasePath !== candidate.releasePath || transition.candidateRevision !== candidate.revision || (!requestedAuthorityMatches && !retainedAuthorityMatches)) {
       throw new Error(`Release generation transition for ${transition.candidateReleaseId} is unresolved at ${transition.phase}; only the exact same release, path, revision, and config authority may resume it`)
     }
   }
@@ -2625,8 +2917,25 @@ export default class RollbridgeDaemon {
     return this.proxyPort
   }
 
-  /** @returns {DaemonStatus} Status payload. */
-  status() {
+  /**
+   * @overload
+   * @returns {DaemonStatus} Full status payload.
+   */
+  /**
+   * @overload
+   * @param {{includeLogs: false}} options - Log-free status response options.
+   * @returns {DaemonStatusWithoutLogs} Log-free status payload.
+   */
+  /**
+   * @overload
+   * @param {{includeLogs: boolean}} options - Status response options.
+   * @returns {DaemonStatus | DaemonStatusWithoutLogs} Status payload.
+   */
+  /**
+   * @param {{includeLogs?: boolean}} [options] - Status response options.
+   * @returns {DaemonStatus | DaemonStatusWithoutLogs} Status payload.
+   */
+  status({includeLogs = true} = {}) {
     // Re-check liveness and prune the dead permanently, so the list self-clears as the operator
     // stops the leftovers (e.g. via `rollbridge recover`). Pruning (not just filtering) matters:
     // a cleared orphan must not reappear if the OS later recycles its pid for an unrelated process.
@@ -2636,7 +2945,7 @@ export default class RollbridgeDaemon {
     const singletonOwnerReleaseIds = new Set(this.singletonReleaseIds.values())
     const transitionReleaseIds = this.generationTransitionReleaseIds()
 
-    return {
+    const status = {
       activeReleaseId: this.activeRelease ? this.activeRelease.releaseId : null,
       application: this.config.application,
       bootstrap: this.bootstrap ? {...this.bootstrap} : undefined,
@@ -2667,6 +2976,8 @@ export default class RollbridgeDaemon {
         process: processInstance.status()
       }))
     }
+
+    return includeLogs ? status : withoutStatusProcessLogs(status)
   }
 }
 
@@ -2676,6 +2987,100 @@ export default class RollbridgeDaemon {
  */
 export function ownerConfigDigest(config) {
   return crypto.createHash("sha256").update(JSON.stringify(config)).digest("hex")
+}
+
+/**
+ * Removes captured output from a live status response without changing any other status field.
+ * @param {DaemonStatus} status - Full status payload.
+ * @returns {DaemonStatusWithoutLogs} Log-free status payload.
+ */
+function withoutStatusProcessLogs(status) {
+  return {
+    ...status,
+    releases: status.releases.map((release) => ({
+      ...release,
+      processes: release.processes.map(withoutProcessLogs)
+    })),
+    services: status.services.map(({process, ...service}) => ({
+      ...service,
+      process: withoutProcessLogs(process)
+    })),
+    singletons: status.singletons.map(({process, ...singleton}) => ({
+      ...singleton,
+      process: withoutProcessLogs(process)
+    }))
+  }
+}
+
+/**
+ * @param {import("./managed-process.js").ManagedProcessStatus} processStatus - Full managed-process status.
+ * @returns {ManagedProcessStatusWithoutLogs} Status without captured process output.
+ */
+function withoutProcessLogs(processStatus) {
+  const {logs: _logs, ...withoutLogs} = processStatus
+
+  return withoutLogs
+}
+
+/**
+ * @param {JsonValue} value - Optional status request field.
+ * @returns {boolean} Whether captured process output is included.
+ */
+function statusIncludeLogs(value) {
+  if (value === undefined) return true
+  if (typeof value !== "boolean") throw new Error("includeLogs must be a boolean")
+
+  return value
+}
+
+/**
+ * @param {PrivateOwnerState} transfer - Authenticated private incumbent state.
+ * @param {GenerationTransition} transition - Unresolved generation transition.
+ * @param {string} replacementConfigDigest - Proposed replacement authority.
+ * @returns {boolean} Whether an existing exact config authority admits replacement.
+ */
+export function ownerReplacementTransitionAuthorityMatches(transfer, transition, replacementConfigDigest) {
+  const retainedRelease = transfer.snapshot.releases.find((release) =>
+    release.releaseId === transition.candidateReleaseId &&
+    release.releasePath === transition.candidateReleasePath &&
+    release.revision === transition.candidateRevision)
+  const retainedConfig = transfer.releaseConfigs?.[transition.candidateReleaseId]
+  const retainedDigest = retainedRelease && retainedConfig ? ownerConfigDigest(retainedConfig) : undefined
+
+  return transition.configDigest === replacementConfigDigest ||
+    transition.configDigest === ownerConfigDigest(transfer.config) ||
+    transition.configDigest === retainedDigest
+}
+
+/**
+ * @param {string | undefined} failure - Recorded incumbent restoration failure.
+ * @returns {boolean} Whether the diagnostic can represent terminal external retirement.
+ */
+function terminalRetirementFailure(failure) {
+  return typeof failure === "string" && (
+    /^Cannot activate .+ generation from retired$/iu.test(failure) ||
+    /^activate command exited non-zero with status \d+$/u.test(failure) ||
+    /^Process .+ is not retained for reactivation$/u.test(failure) ||
+    /^Release .+ retirement quiescence failed: quiet command exited non-zero with status \d+$/u.test(failure)
+  )
+}
+
+/**
+ * @param {ReleaseGroup} release - Expected authoritative release.
+ * @returns {boolean} Whether every configured proxy process is live.
+ */
+function releaseOwnsLiveProxyTraffic(release) {
+  const proxiedConfigs = release.config.processes.filter((processConfig) => processConfig.policy === "proxied")
+
+  return proxiedConfigs.length > 0 && proxiedConfigs.every((processConfig) => {
+    const instances = release.getProcesses(processConfig.id)
+
+    return instances.length === processConfig.replicas && instances.every(({process}) => {
+      const {pid, state} = process.status()
+
+      return pid !== undefined && state === "running"
+    })
+  })
 }
 
 /**

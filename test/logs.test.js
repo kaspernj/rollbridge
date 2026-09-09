@@ -93,6 +93,13 @@ test("logs CLI prints captured output per managed process", async () => {
     assert.ok(web, "expected a web entry in the JSON output")
     assert.match(web.source, /release v1 \(active\)/)
     assert.ok(Array.isArray(web.logs))
+
+    lines.length = 0
+    await runCli(["node", "rollbridge", "status", "--no-logs", "-c", path.join(root, "rollbridge.js")])
+
+    const status = JSON.parse(lines.join("\n"))
+
+    assert.equal("logs" in status.releases[0].processes[0], false)
   } finally {
     console.log = originalLog
     await daemon.shutdown()

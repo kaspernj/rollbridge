@@ -41,6 +41,7 @@ export async function runCli(argv) {
     .option("--boot-attestation <digest>", "Opaque bootstrap ownership attestation (requires the complete bootstrap release tuple)")
     .option("--takeover-owner", "Boot and health-check before retiring the current external owner")
     .option("--replace-owner", "Resume a prepared durable owner replacement")
+    .option("--reset-retired-owner", "Reset missing guardian identity from the exact committed bootstrap")
     .addOption(new Option("--guardian-daemon-log-path <path>").hideHelp())
     .addOption(new Option("--guardian-daemon-pid-path <path>").hideHelp())
     .addOption(new Option("--guardian-daemon-start-timeout-ms <ms>").hideHelp())
@@ -88,6 +89,12 @@ export async function runCli(argv) {
       process.once("SIGTERM", () => { void shutdown() })
 
       if (options.takeoverOwner && (!bootstrap || !bootstrap.attestation)) throw new Error("Daemon --takeover-owner requires the complete bootstrap release tuple and --boot-attestation.")
+      if (options.resetRetiredOwner && (!bootstrap || options.takeoverOwner || options.replaceOwner)) throw new Error("Daemon --reset-retired-owner requires the complete bootstrap tuple and cannot be combined with owner takeover/replacement.")
+
+      if (options.resetRetiredOwner) {
+        startupPromise = daemon.resetRetiredOwnerRecovery()
+        await startupPromise
+      }
 
       if (options.replaceOwner) {
         if (bootstrap || options.takeoverOwner) throw new Error("Daemon --replace-owner cannot be combined with bootstrap takeover options.")
@@ -95,7 +102,7 @@ export async function runCli(argv) {
         await startupPromise
       }
 
-      if (!options.takeoverOwner && !options.replaceOwner) {
+      if (!options.takeoverOwner && !options.replaceOwner && !options.resetRetiredOwner) {
         try {
           startupPromise = daemon.start({exposeControl: !bootstrap})
           await startupPromise
@@ -214,6 +221,33 @@ export async function runCli(argv) {
     })
 
   program
+    .command("recover-generation-transition")
+    .description("Recover an exact failed pre-commit generation transition.")
+    .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .requiredOption("--release-path <path>", "Failed candidate release path")
+    .requiredOption("--release-id <id>", "Failed candidate release id")
+    .requiredOption("--revision <sha>", "Failed candidate revision")
+    .requiredOption("--previous-release-id <id>", "Expected authoritative incumbent release id")
+    .option("--accept-retired-incumbent", "Persist terminal restoration as degraded incumbent web authority")
+    .action(async (options) => {
+      const configPath = await resolveConfigPath(options.config)
+      const config = await loadConfig(configPath)
+      const response = await sendControlCommand({
+        command: {
+          acceptRetiredIncumbent: options.acceptRetiredIncumbent === true,
+          command: "recover-generation-transition",
+          previousReleaseId: options.previousReleaseId,
+          releaseId: options.releaseId,
+          releasePath: options.releasePath,
+          revision: options.revision
+        },
+        path: config.control.path
+      })
+
+      console.log(JSON.stringify(response, null, 2))
+    })
+
+  program
     .command("ensure-daemon")
     .description("Start the daemon if the control socket is not already accepting commands.")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
@@ -239,11 +273,12 @@ export async function runCli(argv) {
   program
     .command("status")
     .option("-c, --config <path>", "Config file path (defaults to rollbridge.js)")
+    .option("--no-logs", "Omit captured stdout/stderr from process statuses")
     .action(async (options) => {
       const configPath = await resolveConfigPath(options.config)
       const config = await loadConfig(configPath)
       const response = await sendControlCommand({
-        command: {command: "status"},
+        command: {command: "status", ...(options.logs ? {} : {includeLogs: false})},
         path: config.control.path
       })
 

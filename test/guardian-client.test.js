@@ -20,7 +20,7 @@ test("guardian bootstrap capability is absent from process argv", async () => {
   const fixture = await createGuardian()
 
   try {
-    assert.deepEqual(await fixture.client.capabilities(), {daemonRecovery: 1})
+    assert.deepEqual(await fixture.client.capabilities(), {daemonRecovery: 1, generationReactivation: 1})
     const commandLine = await fs.readFile(`/proc/${fixture.client.pid}/cmdline`, "utf8")
     const environment = await fs.readFile(`/proc/${fixture.client.pid}/environ`, "utf8")
     const status = await fs.readFile(`/proc/${fixture.client.pid}/status`, "utf8")
@@ -67,6 +67,102 @@ test("guardian runs a strict activation lifecycle command for the exact register
     await processInstance.start()
     await processInstance.activateStrict()
     assert.equal(await fs.readFile(activationPath, "utf8"), "activated")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("guardian preserves a custom activation timeout in the registered process definition", async () => {
+  const fixture = await createGuardian()
+  const processInstance = fixture.client.process("candidate-activation-timeout", {
+    ...definition("candidate-activation-timeout"),
+    lifecycle: {activateCommand: "sleep 0.05", activateTimeoutMs: 10, drainTimeoutMs: 0}
+  })
+
+  try {
+    await processInstance.start()
+    await assert.rejects(() => processInstance.activateStrict(), /activate command timed out after 10ms/i)
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("client reactivates a retained process through a guardian without the reactivation command", async () => {
+  const fixture = await createGuardian()
+  const lifecyclePath = path.join(fixture.root, "lifecycle.log")
+  const processInstance = fixture.client.process("compatible-reactivation", {
+    ...definition("compatible-reactivation"),
+    lifecycle: {
+      activateCommand: `printf 'activate\n' >> ${JSON.stringify(lifecyclePath)}`,
+      drainTimeoutMs: 0,
+      quietCommand: `printf 'retire\n' >> ${JSON.stringify(lifecyclePath)}`
+    },
+    shouldRestart: () => true
+  })
+  const request = fixture.client.request.bind(fixture.client)
+
+  fixture.client.request = async command => {
+    if (command.command === "reactivate") throw new Error("Unknown guardian command: reactivate")
+    return await request(command)
+  }
+
+  try {
+    await processInstance.start()
+    await processInstance.activateStrict()
+    const pid = processInstance.status().pid
+
+    await processInstance.quiesceStrict()
+    await processInstance.reactivateStrict()
+
+    assert.equal(processInstance.status().pid, pid)
+    assert.equal(processInstance.status().state, "running")
+    assert.equal(processInstance.status().lifecycleRole, "active")
+    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "activate\nretire\nactivate\n")
+
+    const restarted = once(processInstance, "started")
+
+    assert.ok(pid)
+    process.kill(-pid, "SIGKILL")
+    await restarted
+    assert.notEqual(processInstance.status().pid, pid)
+    assert.equal(processInstance.status().state, "running")
+    assert.equal(processInstance.status().lifecycleRole, "active")
+    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "activate\nretire\nactivate\nactivate\n")
+  } finally {
+    await cleanupGuardian(fixture)
+  }
+})
+
+test("client reverses a worker quiet hook through a pre-reactivation guardian", async () => {
+  const fixture = await createGuardian()
+  const lifecyclePath = path.join(fixture.root, "worker-lifecycle.log")
+  const processInstance = fixture.client.process("compatible-worker-reactivation", {
+    ...definition("compatible-worker-reactivation"),
+    lifecycle: {
+      drainTimeoutMs: 0,
+      quietCommand: `printf 'quiet\n' >> ${JSON.stringify(lifecyclePath)}`,
+      reactivateCommand: `printf 'resume\n' >> ${JSON.stringify(lifecyclePath)}`
+    },
+    shouldRestart: () => true
+  })
+  const request = fixture.client.request.bind(fixture.client)
+
+  fixture.client.request = async command => {
+    if (command.command === "reactivate-with-command") throw new Error("Unknown guardian command: reactivate-with-command")
+    return await request(command)
+  }
+
+  try {
+    await processInstance.start()
+    const pid = processInstance.status().pid
+
+    await processInstance.quiesceStrict()
+    await processInstance.reactivateStrict()
+
+    assert.equal(processInstance.status().pid, pid)
+    assert.equal(processInstance.status().state, "running")
+    assert.equal(processInstance.status().lifecycleRole, "active")
+    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "quiet\nresume\n")
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -1421,6 +1517,14 @@ test("first upgrade migrates a real pre-split guardian without replacing its own
     assert.deepEqual(prepared.ownerState, ownerState)
     assert.deepEqual(await upgraded.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: ownerState.snapshot}), {committed: true})
     await committed
+    assert.equal(restored.status().pid, legacyPid)
+
+    const currentProcess = upgraded.process("release:v2:current-worker", {
+      ...definition("current-worker"),
+      lifecycle: {activateCommand: "sleep 0.05", activateTimeoutMs: 10, drainTimeoutMs: 0}
+    })
+    await currentProcess.start()
+    await assert.rejects(() => currentProcess.activateStrict(), /activate command timed out after 10ms/i)
     assert.equal(restored.status().pid, legacyPid)
     await upgraded.shutdown()
     await upgraded.guardianExit()

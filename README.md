@@ -89,6 +89,7 @@ export default {
       command: "env VELOCIOUS_BACKGROUND_JOBS_PORT={{port}} npx velocious background-jobs-main",
       lifecycle: {
         activateCommand: 'npx velocious background-jobs:activate --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"',
+        activateTimeoutMs: 60000,
         quietCommand: 'npx velocious background-jobs:retire --generation "$ROLLBRIDGE_RELEASE_ID" --socket "$VELOCIOUS_BACKGROUND_JOBS_LIFECYCLE_SOCKET"'
       },
       port: {from: 7331, to: 7399}
@@ -188,7 +189,8 @@ generation-scoped and resumable; failures remain visible and block unrelated
 deploys. Post-commit singleton replacement is also journaled and must complete
 before an exact retry reports success. If the active coordinator restarts,
 Rollbridge restores its active role with the same bounded, generation-scoped
-activation command before reporting it running. Omit `activateCommand` to
+activation command before reporting it running. Set `activateTimeoutMs` when the
+activation acknowledgement can exceed its 30-second default. Omit `activateCommand` to
 preserve the existing hook-free ordering.
 
 See [`docs/workers.md`](docs/workers.md) for the full release-generation
@@ -574,6 +576,7 @@ Inspect state:
 
 ```bash
 rollbridge status --config rollbridge.js
+rollbridge status --no-logs --config rollbridge.js
 ```
 
 `status` reports each managed process's `state`, `pid`, recent `logs`, last
@@ -584,6 +587,10 @@ and why it last started (`lastStartReason`: `deploy`, `crash`, `manual`, or
 `rollbridge events`. For memory-supervised processes it also reports current
 `rssBytes`, `memoryRestarts`, `lastMemoryRestartAt`, and `children` (the sampled
 process tree — each group member's `pid`, `command`, and `rssBytes`).
+
+For machine lifecycle attestations that do not need captured process output,
+pass `--no-logs`. It returns the same status projection while omitting only each
+release, service, and singleton process's `logs` array.
 
 Print the recent captured stdout/stderr per process (a one-shot snapshot of the
 retained `outputLines`, not a live stream):

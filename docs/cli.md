@@ -207,6 +207,20 @@ instruction; see [Config reloads](config.md#config-reloads).
 - `--ensure-daemon` — start the daemon first if it isn't running (honors the
   same `--daemon-*` options as `ensure-daemon`).
 
+## `recover-generation-transition`
+
+`rollbridge recover-generation-transition --release-path <path> --release-id <id>
+--revision <sha> --previous-release-id <id> [--config <path>]
+[--accept-retired-incumbent]`
+
+By default, restores the incumbent before clearing an exact failed transition.
+`--accept-retired-incumbent` instead requires an exact `restoring_previous`
+journal, terminal restoration failure, retired candidate, retired incumbent
+coordinator, and live incumbent proxy processes. It safely stops the failed
+candidate and persists a `degraded_active` fence without reactivating either jobs
+generation, reporting `jobsStatus: "degraded"`. Incumbent web survives owner
+recovery, and a fresh normal deployment replaces the fence through normal cutover.
+
 ## `rollback`
 
 ```
@@ -239,7 +253,7 @@ stays safe.
 ## `status`
 
 ```
-rollbridge status [--config <path>]
+rollbridge status [--config <path>] [--no-logs]
 ```
 
 Prints the daemon status JSON: the active release id, the proxy address, and —
@@ -249,6 +263,12 @@ per release, service, and singleton process — its `state`, `pid`, automatic
 Memory-supervised processes also report `rssBytes`, `memoryRestarts`,
 `lastMemoryRestartAt`, and `children` (the process tree: each group member's
 `pid`, `command`, and `rssBytes`).
+
+`--no-logs` omits only the captured `logs` array from release, service, and
+singleton process statuses. Use it for bounded machine-readable lifecycle
+attestations that do not need process output. The equivalent control request is
+`{"command":"status","includeLogs":false}`; omitted `includeLogs` continues to
+return the complete status payload.
 
 `daemonRuntime` identifies the immutable Rollbridge runtime serving the proxy:
 its runtime `format`, package `version`, content `digest`, and absolute `path`.

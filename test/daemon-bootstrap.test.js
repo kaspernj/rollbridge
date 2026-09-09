@@ -23,43 +23,39 @@ const secondAttestation = `sha256:${"b".repeat(64)}`
 
 /** @typedef {{data?: Record<string, import("../src/json.js").JsonValue>, message?: string}} StructuredRecord */
 
-test("daemon bootstrap requires complete, safe, absolute inputs before binding listeners", async (t) => {
-  const cases = [
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1"], message: /must be provided together/},
-    {args: ["--config", "relative/config.js", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123"], message: /--config must be an absolute path/},
-    {args: ["--config", "CONFIG", "--release-path", "relative/release", "--release-id", "v1", "--revision", "abc123"], message: /--release-path must be an absolute path/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE_UNNORMALIZED", "--release-id", "v1", "--revision", "abc123"], message: /--release-path must be normalized/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE_MISSING", "--release-id", "v1", "--revision", "abc123"], message: /--release-path is not accessible/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "unsafe id", "--revision", "abc123"], message: /--release-id/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "unsafe revision"], message: /--revision/},
-    {args: ["--config", "CONFIG", "--boot-attestation", firstAttestation], message: /accepted only with/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha256:${"A".repeat(64)}`], message: /--boot-attestation/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha512:${"a".repeat(64)}`], message: /--boot-attestation/},
-    {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha256:${"a".repeat(63)}`], message: /--boot-attestation/}
-  ]
+const invalidBootstrapCases = [
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1"], message: /must be provided together/},
+  {args: ["--config", "relative/config.js", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123"], message: /--config must be an absolute path/},
+  {args: ["--config", "CONFIG", "--release-path", "relative/release", "--release-id", "v1", "--revision", "abc123"], message: /--release-path must be an absolute path/},
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE_UNNORMALIZED", "--release-id", "v1", "--revision", "abc123"], message: /--release-path must be normalized/},
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE_MISSING", "--release-id", "v1", "--revision", "abc123"], message: /--release-path is not accessible/},
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "unsafe id", "--revision", "abc123"], message: /--release-id/},
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "unsafe revision"], message: /--revision/},
+  {args: ["--config", "CONFIG", "--boot-attestation", firstAttestation], message: /accepted only with/},
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha256:${"A".repeat(64)}`], message: /--boot-attestation/},
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha512:${"a".repeat(64)}`], message: /--boot-attestation/},
+  {args: ["--config", "CONFIG", "--release-path", "RELEASE", "--release-id", "v1", "--revision", "abc123", "--boot-attestation", `sha256:${"a".repeat(63)}`], message: /--boot-attestation/}
+]
 
-  for (const testCase of cases) {
-    await t.test(testCase.message.source, async () => {
-      const fixture = await createFixture()
-      const args = testCase.args.map((arg) => {
-        if (arg === "CONFIG") return fixture.configPath
-        if (arg === "RELEASE") return fixture.root
-        if (arg === "RELEASE_UNNORMALIZED") return `${fixture.root}/child/..`
-        if (arg === "RELEASE_MISSING") return path.join(fixture.root, "missing")
-        return arg
-      })
+test.each(invalidBootstrapCases)("daemon bootstrap rejects invalid startup arguments (%#)", async (/** @type {{args: string[], message: RegExp}} */ testCase) => {
+  const fixture = await createFixture()
+  const args = testCase.args.map((arg) => {
+    if (arg === "CONFIG") return fixture.configPath
+    if (arg === "RELEASE") return fixture.root
+    if (arg === "RELEASE_UNNORMALIZED") return `${fixture.root}/child/..`
+    if (arg === "RELEASE_MISSING") return path.join(fixture.root, "missing")
+    return arg
+  })
 
-      try {
-        const result = await runDaemon(args)
+  try {
+    const result = await runDaemon(args)
 
-        assert.notEqual(result.code, 0)
-        assert.match(result.stderr, testCase.message)
-        await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
-        await assert.rejects(() => fs.stat(fixture.startedPath), {code: "ENOENT"})
-      } finally {
-        await fs.rm(fixture.root, {force: true, recursive: true})
-      }
-    })
+    assert.notEqual(result.code, 0)
+    assert.match(result.stderr, testCase.message)
+    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+    await assert.rejects(() => fs.stat(fixture.startedPath), {code: "ENOENT"})
+  } finally {
+    await fs.rm(fixture.root, {force: true, recursive: true})
   }
 })
 

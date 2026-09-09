@@ -182,18 +182,20 @@ test("validateConfig defaults lifecycle, accepts hooks, and rejects bad values",
   })
 
   // Omitted → no commands, zero drain.
-  assert.deepEqual(validateLifecycle(undefined).config.processes[0].lifecycle, {drainTimeoutMs: 0})
+  assert.deepEqual(validateLifecycle(undefined).config.processes[0].lifecycle, {activateTimeoutMs: 30000, drainTimeoutMs: 0})
 
-  const custom = validateLifecycle({drainTimeoutMs: 30000, quietCommand: "kill -TSTP $ROLLBRIDGE_PID", stopCommand: "kill -TERM $ROLLBRIDGE_PID"})
+  const custom = validateLifecycle({activateTimeoutMs: 60000, drainTimeoutMs: 30000, quietCommand: "kill -TSTP $ROLLBRIDGE_PID", stopCommand: "kill -TERM $ROLLBRIDGE_PID"})
 
   assert.deepEqual(custom.issues, [])
   assert.equal(custom.config.processes[0].lifecycle.quietCommand, "kill -TSTP $ROLLBRIDGE_PID")
   assert.equal(custom.config.processes[0].lifecycle.stopCommand, "kill -TERM $ROLLBRIDGE_PID")
+  assert.equal(custom.config.processes[0].lifecycle.activateTimeoutMs, 60000)
   assert.equal(custom.config.processes[0].lifecycle.drainTimeoutMs, 30000)
 
-  const invalid = validateLifecycle({drainTimeoutMs: -1, quietCommand: 5})
+  const invalid = validateLifecycle({activateTimeoutMs: 0, drainTimeoutMs: -1, quietCommand: 5})
   const messages = invalid.issues.map((issue) => issue.message)
 
+  assert.ok(messages.includes("processes[0].lifecycle.activateTimeoutMs must be a positive number"), JSON.stringify(messages))
   assert.ok(messages.includes("processes[0].lifecycle.drainTimeoutMs must be a non-negative number"), JSON.stringify(messages))
   assert.ok(messages.includes("processes[0].lifecycle.quietCommand must be a string"), JSON.stringify(messages))
 
@@ -252,6 +254,24 @@ test("validateConfig accepts one durable handoff activation lifecycle and reject
     {...base.processes[1], id: "jobs-secondary", port: {from: 18200, to: 18299}}
   ]})
   assert.ok(duplicate.issues.some((issue) => /at most one lifecycle\.activateCommand/.test(issue.message)))
+
+  const worker = {
+    command: "run worker",
+    id: "worker",
+    lifecycle: {quietCommand: "worker quiet", reactivateCommand: "worker resume"},
+    nonBlockingDrain: true,
+    policy: "companion"
+  }
+  const pairedWorker = validateConfig({...base, processes: [...base.processes, worker]})
+
+  assert.deepEqual(pairedWorker.issues, [])
+  assert.equal(pairedWorker.config.processes[2].lifecycle.reactivateCommand, "worker resume")
+
+  const unpairedWorker = validateConfig({...base, processes: [...base.processes, {...worker, lifecycle: {quietCommand: "worker quiet"}}]})
+  assert.ok(unpairedWorker.issues.some((issue) => /quietCommand requires lifecycle\.reactivateCommand/.test(issue.message)))
+
+  const unsupportedPlacement = validateConfig({...base, processes: [...base.processes, {...worker, nonBlockingDrain: false}]})
+  assert.ok(unsupportedPlacement.issues.some((issue) => /reactivateCommand.*nonBlockingDrain companion/.test(issue.message)))
 })
 
 test("validateConfig accepts indefinite graceful stop windows", () => {
