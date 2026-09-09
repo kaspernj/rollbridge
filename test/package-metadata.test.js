@@ -1,11 +1,10 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {execFile} from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {promisify} from "node:util"
 
@@ -17,21 +16,21 @@ const execFileAsync = promisify(execFile)
 test("package.json declares publish metadata", async () => {
   const pkg = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf8"))
 
-  assert.equal(pkg.name, "rollbridge")
-  assert.equal(pkg.license, "MIT")
-  assert.equal(pkg.homepage, "https://github.com/kaspernj/rollbridge#readme")
-  assert.equal(pkg.bugs.url, "https://github.com/kaspernj/rollbridge/issues")
-  assert.equal(pkg.repository.type, "git")
-  assert.match(pkg.repository.url, /github\.com\/kaspernj\/rollbridge/)
-  assert.ok(typeof pkg.author === "string" && pkg.author.length > 0)
-  assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.length > 0)
+  expect(pkg.name).toBe("rollbridge")
+  expect(pkg.license).toBe("MIT")
+  expect(pkg.homepage).toBe("https://github.com/kaspernj/rollbridge#readme")
+  expect(pkg.bugs.url).toBe("https://github.com/kaspernj/rollbridge/issues")
+  expect(pkg.repository.type).toBe("git")
+  expect(pkg.repository.url).toMatch(/github\.com\/kaspernj\/rollbridge/)
+  expect(typeof pkg.author === "string" && pkg.author.length > 0).toBeTruthy()
+  expect(Array.isArray(pkg.keywords) && pkg.keywords.length > 0).toBeTruthy()
 })
 
 test("a LICENSE file matching the declared license exists", async () => {
   const license = await fs.readFile(path.join(repoRoot, "LICENSE"), "utf8")
 
-  assert.match(license, /MIT License/)
-  assert.match(license, /Copyright \(c\) \d{4} kaspernj/)
+  expect(license).toMatch(/MIT License/)
+  expect(license).toMatch(/Copyright \(c\) \d{4} kaspernj/)
 })
 
 test("package manifest excludes unexpected operational and coverage files", async () => {
@@ -61,16 +60,16 @@ test("package manifest excludes unexpected operational and coverage files", asyn
     const packageOutput = JSON.parse(stdout)
     const packageArchive = Array.isArray(packageOutput) ? packageOutput[0] : Object.values(packageOutput)[0]
 
-    assert.ok(packageArchive && Array.isArray(packageArchive.files))
+    if (!(packageArchive && Array.isArray(packageArchive.files))) throw new Error("Expected package archive file list")
     /** @type {Array<{path: string}>} */
     const packageFiles = packageArchive.files
     const packagePaths = packageFiles.map((file) => file.path)
 
     for (const requiredPath of ["LICENSE", "README.md", "bin/rollbridge", "package.json", "src/cli.js", "src/daemon-runtime.js"]) {
-      assert.ok(packagePaths.includes(requiredPath), `expected package to include ${requiredPath}`)
+      expect({value: Boolean(packagePaths.includes(requiredPath)), context: `expected package to include ${requiredPath}`}).toMatchObject({value: true})
     }
-    assert.ok(!packagePaths.some((packagePath) => packagePath === "tmp" || packagePath.startsWith("tmp/")))
-    assert.ok(!packagePaths.some((packagePath) => packagePath === "coverage" || packagePath.startsWith("coverage/")))
+    expect(!packagePaths.some((packagePath) => packagePath === "tmp" || packagePath.startsWith("tmp/"))).toBeTruthy()
+    expect(!packagePaths.some((packagePath) => packagePath === "coverage" || packagePath.startsWith("coverage/"))).toBeTruthy()
   } finally {
     await fs.rm(fixtureRoot, {force: true, recursive: true})
   }

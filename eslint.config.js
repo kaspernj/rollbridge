@@ -81,6 +81,14 @@ export default defineConfig([
       "no-unused-vars": ["error", {argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_"}]
     }
   },
+  {
+    files: ["test/**/*.js"],
+    rules: {
+      "no-restricted-imports": ["error", {
+        patterns: [{group: ["node:test", "node:test/*", "test", "node:assert", "node:assert/*", "assert", "assert/*"], message: "Use @velocious/testing declarations and expect matchers."}]
+      }]
+    }
+  },
   jsdoc({
     config: "flat/recommended",
     files: ["**/*.{js,mjs,cjs}", "**/bin/rollbridge"],

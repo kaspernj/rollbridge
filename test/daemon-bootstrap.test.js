@@ -1,13 +1,12 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {sendControlCommand} from "../src/control-client.js"
 import {isProcessAlive, liveProcesses, readState, writeState} from "../src/state-store.js"
@@ -50,10 +49,10 @@ test.each(invalidBootstrapCases)("daemon bootstrap rejects invalid startup argum
   try {
     const result = await runDaemon(args)
 
-    assert.notEqual(result.code, 0)
-    assert.match(result.stderr, testCase.message)
-    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
-    await assert.rejects(() => fs.stat(fixture.startedPath), {code: "ENOENT"})
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toMatch(testCase.message)
+    await expect(fs.stat(fixture.socketPath)).rejects.toMatchObject({code: "ENOENT"})
+    await expect(fs.stat(fixture.startedPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -68,19 +67,19 @@ test("daemon bootstrap activates the exact release through the foreground daemon
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
     const activeRelease = assertRelease(status, "release-42")
 
-    assert.equal(activeRelease.releasePath, fixture.root)
-    assert.equal(activeRelease.revision, "abc123")
-    assert.deepEqual(status.bootstrap, {
+    expect(activeRelease.releasePath).toBe(fixture.root)
+    expect(activeRelease.revision).toBe("abc123")
+    expect(status.bootstrap).toEqual({
       attestation: firstAttestation,
       releaseId: "release-42",
       releasePath: fixture.root,
       revision: "abc123"
     })
-    assert.ok(status.proxy && typeof status.proxy === "object" && !Array.isArray(status.proxy) && typeof status.proxy.port === "number")
-    assert.equal((await fetch(`http://127.0.0.1:${status.proxy.port}/release`).then((response) => response.text())).trim(), "release-42")
+    if (!(status.proxy && typeof status.proxy === "object" && !Array.isArray(status.proxy) && typeof status.proxy.port === "number")) throw new Error("Expected proxy status with a numeric port")
+    expect((await fetch(`http://127.0.0.1:${status.proxy.port}/release`).then((response) => response.text())).trim()).toBe("release-42")
 
     child.kill("SIGTERM")
-    assert.equal((await once(child, "exit"))[0], 0)
+    expect((await once(child, "exit"))[0]).toBe(0)
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL")
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -108,21 +107,23 @@ test("failed takeover bootstrap preserves the previously accepted owner", async 
       "--takeover-owner"
     ])
 
-    assert.notEqual(result.code, 0)
+    expect(result.code).not.toBe(0)
     const records = parseStructuredOutput(result.output)
     const failure = records.find((record) => record.message === "bootstrap activation failed")
     const candidatePid = Number(await fs.readFile(fixture.startedPath, "utf8"))
 
-    assert.match(String(failure?.data?.error), /Health check failed/)
-    assert.match(String(failure?.data?.stack), /Error: Health check failed/)
-    assert.equal(isProcessAlive(candidatePid), false, "the failed candidate process must be stopped")
+    expect(String(failure?.data?.error)).toMatch(/Health check failed/)
+    expect(String(failure?.data?.stack)).toMatch(/Error: Health check failed/)
+    // The failed candidate process must be stopped.
+    expect(isProcessAlive(candidatePid)).toBe(false)
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
-    assert.equal(status.activeReleaseId, "accepted")
-    assert.ok(status.bootstrap && typeof status.bootstrap === "object" && !Array.isArray(status.bootstrap))
-    assert.equal(status.bootstrap.attestation, firstAttestation)
+    expect(status.activeReleaseId).toBe("accepted")
+    if (!(status.bootstrap && typeof status.bootstrap === "object" && !Array.isArray(status.bootstrap))) throw new Error("Expected bootstrap status")
+    expect(status.bootstrap.attestation).toBe(firstAttestation)
     const priorState = await readState(fixture.statePath)
 
-    assert.ok(priorState && typeof priorState === "object" && !Array.isArray(priorState) && priorState.activeReleaseId === "accepted", "candidate cleanup must preserve the prior owner's state")
+    // Candidate cleanup must preserve the prior owner's state.
+    expect(priorState && typeof priorState === "object" && !Array.isArray(priorState) && priorState.activeReleaseId === "accepted").toBeTruthy()
   } finally {
     accepted.kill("SIGTERM")
     if (accepted.exitCode === null) await once(accepted, "exit")
@@ -137,20 +138,20 @@ test("daemon bootstrap does not expose control deploys until activation complete
 
   try {
     await started
-    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+    await expect(fs.stat(fixture.socketPath)).rejects.toMatchObject({code: "ENOENT"})
 
     await fs.writeFile(fixture.healthGatePath, "ready\n")
     await waitForLog(child, "control socket listening")
 
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
 
-    assert.equal(status.activeReleaseId, "bootstrap-release")
-    assert.ok(Array.isArray(status.releases))
-    assert.equal(status.releases.length, 1)
+    expect(status.activeReleaseId).toBe("bootstrap-release")
+    if (!Array.isArray(status.releases)) throw new Error("Expected release statuses")
+    expect(status.releases.length).toBe(1)
     assertRelease(status, "bootstrap-release")
 
     child.kill("SIGTERM")
-    assert.equal((await once(child, "exit"))[0], 0)
+    expect((await once(child, "exit"))[0]).toBe(0)
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL")
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -165,12 +166,12 @@ test("plain daemon startup remains listener-only with no active release", async 
     await waitForLog(child, "control socket listening")
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
 
-    assert.equal(status.activeReleaseId, null)
-    assert.deepEqual(status.releases, [])
-    assert.equal(status.bootstrap, undefined)
+    expect(status.activeReleaseId).toBe(null)
+    expect(status.releases).toEqual([])
+    expect(status.bootstrap).toBe(undefined)
 
     child.kill("SIGTERM")
-    assert.equal((await once(child, "exit"))[0], 0)
+    expect((await once(child, "exit"))[0]).toBe(0)
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL")
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -183,10 +184,10 @@ test("ensure-daemon rejects boot attestation instead of inheriting foreground id
   try {
     const result = await runRollbridge(["ensure-daemon", "--config", fixture.configPath, "--boot-attestation", firstAttestation])
 
-    assert.notEqual(result.code, 0)
-    assert.match(result.stderr, /unknown option '--boot-attestation'/)
-    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
-    await assert.rejects(() => fs.stat(fixture.startedPath), {code: "ENOENT"})
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toMatch(/unknown option '--boot-attestation'/)
+    await expect(fs.stat(fixture.socketPath)).rejects.toMatchObject({code: "ENOENT"})
+    await expect(fs.stat(fixture.startedPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -204,15 +205,15 @@ test("otherwise identical foreground boots remain distinguishable by attestation
       await waitForLog(child, "control socket listening")
       const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
 
-      assert.equal(status.activeReleaseId, "same-release")
-      assert.ok(status.bootstrap && typeof status.bootstrap === "object" && !Array.isArray(status.bootstrap))
+      expect(status.activeReleaseId).toBe("same-release")
+      if (!(status.bootstrap && typeof status.bootstrap === "object" && !Array.isArray(status.bootstrap))) throw new Error("Expected bootstrap status")
       attestations.push(status.bootstrap.attestation)
 
       child.kill("SIGTERM")
-      assert.equal((await once(child, "exit"))[0], 0)
+      expect((await once(child, "exit"))[0]).toBe(0)
     }
 
-    assert.deepEqual(attestations, [firstAttestation, secondAttestation])
+    expect(attestations).toEqual([firstAttestation, secondAttestation])
   } finally {
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -229,10 +230,10 @@ test("SIGTERM during bootstrap activation follows the daemon shutdown path", asy
 
     const [code, signal] = await once(child, "exit")
 
-    assert.equal(code, 0)
-    assert.equal(signal, null)
-    assert.equal(await fs.readFile(fixture.stoppedPath, "utf8"), String(managedPid))
-    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+    expect(code).toBe(0)
+    expect(signal).toBe(null)
+    expect(await fs.readFile(fixture.stoppedPath, "utf8")).toBe(String(managedPid))
+    await expect(fs.stat(fixture.socketPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -257,12 +258,12 @@ test("SIGTERM during multi-process bootstrap owns every process started after sh
     const records = output.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
     const recordedPids = new Set(records.filter((record) => record.message === "process started").map((record) => record.data?.pid))
 
-    assert.equal(code, 0)
-    assert.equal(signal, null)
-    assert.notEqual(shutdownIndex, -1)
-    assert.ok(startedAfterShutdown.length > 0, `fixture must start a later bootstrap process after triggering shutdown: ${JSON.stringify(events)}`)
-    assert.deepEqual(startedAfterShutdown.filter((event) => !recordedPids.has(event.pid)), [])
-    for (const event of startedAfterShutdown) assert.equal(isProcessAlive(event.pid), false, `expected process ${event.pid} to be stopped before daemon exit`)
+    expect(code).toBe(0)
+    expect(signal).toBe(null)
+    expect(shutdownIndex).not.toBe(-1)
+    expect({value: Boolean(startedAfterShutdown.length > 0), context: `fixture must start a later bootstrap process after triggering shutdown: ${JSON.stringify(events)}`}).toMatchObject({value: true})
+    expect(startedAfterShutdown.filter((event) => !recordedPids.has(event.pid))).toEqual([])
+    for (const event of startedAfterShutdown) expect({value: isProcessAlive(event.pid), context: `expected process ${event.pid} to be stopped before daemon exit`}).toMatchObject({value: false})
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
 
@@ -293,13 +294,13 @@ test("failed ordinary bootstrap completely shuts down attempt-owned resources an
     const records = parseStructuredOutput(result.output)
     const failure = records.find((record) => record.message === "bootstrap activation failed")
 
-    assert.notEqual(result.code, 0)
-    assert.equal(failure?.data?.releaseId, "ordinary-failure")
-    assert.equal(failure?.data?.status, "error")
-    assert.match(String(failure?.data?.error), /listen (?:EACCES|ENOENT)/)
-    assert.match(String(failure?.data?.stack), /Error: listen (?:EACCES|ENOENT)/)
+    expect(result.code).not.toBe(0)
+    expect(failure?.data?.releaseId).toBe("ordinary-failure")
+    expect(failure?.data?.status).toBe("error")
+    expect(String(failure?.data?.error)).toMatch(/listen (?:EACCES|ENOENT)/)
+    expect(String(failure?.data?.stack)).toMatch(/Error: listen (?:EACCES|ENOENT)/)
     await assertAttemptResourcesStopped(fixture, records)
-    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+    await expect(fs.stat(fixture.socketPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await killAttemptProcesses(fixture.lifecyclePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -321,13 +322,13 @@ test("failed takeover retirement completely shuts down and exits non-zero instea
     const records = parseStructuredOutput(result.output)
     const failure = records.find((record) => record.message === "bootstrap activation failed")
 
-    assert.notEqual(result.code, 0)
-    assert.equal(failure?.data?.releaseId, "orphaned-candidate")
-    assert.equal(failure?.data?.status, "error")
-    assert.match(String(failure?.data?.error), /connect ENOENT/)
-    assert.match(String(failure?.data?.stack), /Error: connect ENOENT/)
+    expect(result.code).not.toBe(0)
+    expect(failure?.data?.releaseId).toBe("orphaned-candidate")
+    expect(failure?.data?.status).toBe("error")
+    expect(String(failure?.data?.error)).toMatch(/connect ENOENT/)
+    expect(String(failure?.data?.stack)).toMatch(/Error: connect ENOENT/)
     await assertAttemptResourcesStopped(fixture, records)
-    await assert.rejects(() => fs.stat(fixture.socketPath), {code: "ENOENT"})
+    await expect(fs.stat(fixture.socketPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await killAttemptProcesses(fixture.lifecyclePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -352,13 +353,13 @@ test("daemon bootstrap reports but does not kill a live process from statePath",
     await waitForLog(child, "control socket listening")
     const status = await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})
 
-    assert.ok(leftover.pid !== undefined && isProcessAlive(leftover.pid))
-    assert.deepEqual(status.orphans, [{id: "worker", pid: leftover.pid, releaseId: "previous"}])
+    expect(leftover.pid !== undefined && isProcessAlive(leftover.pid)).toBeTruthy()
+    expect(status.orphans).toEqual([{id: "worker", pid: leftover.pid, releaseId: "previous"}])
 
     child.kill("SIGTERM")
     await once(child, "exit")
 
-    assert.deepEqual(liveProcesses(await readState(fixture.statePath)), [{id: "worker", pid: leftover.pid, releaseId: "previous"}])
+    expect(liveProcesses(await readState(fixture.statePath))).toEqual([{id: "worker", pid: leftover.pid, releaseId: "previous"}])
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL")
     leftover.kill("SIGKILL")
@@ -386,8 +387,8 @@ test("failed daemon bootstrap preserves prior live process records in statePath"
       "--revision", "bad123"
     ])
 
-    assert.notEqual(result.code, 0)
-    assert.deepEqual(liveProcesses(await readState(fixture.statePath)), [{id: "worker", pid: leftover.pid, releaseId: "previous"}])
+    expect(result.code).not.toBe(0)
+    expect(liveProcesses(await readState(fixture.statePath))).toEqual([{id: "worker", pid: leftover.pid, releaseId: "previous"}])
   } finally {
     leftover.kill("SIGKILL")
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -442,7 +443,7 @@ async function createFixture({attemptOwnedProcesses = false, fixedPorts = false,
     const fifo = spawn("mkfifo", [gatePath])
     const [code] = await once(fifo, "exit")
 
-    assert.equal(code, 0)
+    expect(code).toBe(0)
   }
 
   await fs.writeFile(configPath, `${setup}module.exports = ${JSON.stringify(config, null, 2)}\n`)
@@ -576,11 +577,11 @@ async function assertAttemptResourcesStopped(fixture, records) {
   const managedStarts = new Set(records.filter((record) => record.message === "process started").map((record) => record.data?.processId))
   const managedExits = new Set(records.filter((record) => record.message === "process exited").map((record) => record.data?.processId))
 
-  assert.deepEqual(managedStarts, expectedProcessIds)
-  assert.deepEqual(managedExits, expectedProcessIds)
+  expect(managedStarts).toEqual(expectedProcessIds)
+  expect(managedExits).toEqual(expectedProcessIds)
   for (const event of started) {
-    assert.equal(stoppedPids.has(event.pid), true, `${event.processId} must receive graceful shutdown`)
-    assert.equal(isProcessAlive(Number(event.pid)), false, `${event.processId} pid ${event.pid} must be gone before daemon exit`)
+    expect({value: stoppedPids.has(event.pid), context: `${event.processId} must receive graceful shutdown`}).toMatchObject({value: true})
+    expect({value: isProcessAlive(Number(event.pid)), context: `${event.processId} pid ${event.pid} must be gone before daemon exit`}).toMatchObject({value: false})
   }
 
   await assertPortAvailable(fixture.processPort)
@@ -672,10 +673,10 @@ async function waitForLog(child, message) {
  * @returns {Record<string, import("../src/json.js").JsonValue>} Matching release status.
  */
 function assertRelease(status, releaseId) {
-  assert.ok(Array.isArray(status.releases))
+  if (!Array.isArray(status.releases)) throw new Error("Expected release statuses")
   const release = status.releases.find((candidate) => candidate && typeof candidate === "object" && "releaseId" in candidate && candidate.releaseId === releaseId)
 
-  assert.ok(release && typeof release === "object" && !Array.isArray(release))
+  if (!(release && typeof release === "object" && !Array.isArray(release))) throw new Error(`Release ${releaseId} should be present`)
   return release
 }
 })

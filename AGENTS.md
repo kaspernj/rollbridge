@@ -61,6 +61,11 @@ external-supervisor migration path, not that atomic handoff.
 
 ## Validation and publication
 
+All tests use `@velocious/testing` declarations, hooks, and `expect` matchers.
+Do not import `node:test` or `node:assert`, or add assertion compatibility wrappers.
+Run every changed test file locally with `npx --no-install velocious-test test/<name>.test.js`
+and require it to pass before committing or pushing; lint or CI is not a substitute.
+
 The project is ESM JavaScript with JSDoc type checking. Package scripts are the
 source of truth: `npm run typecheck`, `npm run lint`, `npm test`, and the combined
 `npm run all-checks`. Run focused checks for the files changed; documentation-only

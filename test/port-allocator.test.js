@@ -1,8 +1,7 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import net from "node:net"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {findAvailablePort} from "../src/port-allocator.js"
 
 describe("port-allocator", () => {
@@ -42,18 +41,13 @@ test("findAvailablePort reports reserved and in-use counts when a range is exhau
   const range = {from: reservedPort, to: port}
 
   try {
-    await assert.rejects(
-      () => findAvailablePort({host, range, usedPorts: new Set([reservedPort])}),
-      (error) => {
-        assert.ok(error instanceof Error)
-        assert.match(error.message, new RegExp(`No available ports in range ${reservedPort}-${port}`))
-        assert.match(error.message, /2 ports on 127\.0\.0\.1/)
-        assert.match(error.message, /1 reserved by this deploy/)
-        assert.match(error.message, /1 already in use/)
+    const allocation = findAvailablePort({host, range, usedPorts: new Set([reservedPort])})
 
-        return true
-      }
-    )
+    await expect(allocation).rejects.toBeInstanceOf(Error)
+    await expect(allocation).rejects.toMatchObject({message: expect.stringMatching(new RegExp(`No available ports in range ${reservedPort}-${port}`))})
+    await expect(allocation).rejects.toMatchObject({message: expect.stringMatching(/2 ports on 127\.0\.0\.1/)})
+    await expect(allocation).rejects.toMatchObject({message: expect.stringMatching(/1 reserved by this deploy/)})
+    await expect(allocation).rejects.toMatchObject({message: expect.stringMatching(/1 already in use/)})
   } finally {
     await closeServer(server)
   }
@@ -69,9 +63,9 @@ test("findAvailablePort skips the occupied port and records the allocated one", 
   try {
     const allocated = await findAvailablePort({host, range: {from, to}, usedPorts})
 
-    assert.notEqual(allocated, port)
-    assert.ok(allocated >= from && allocated <= to)
-    assert.ok(usedPorts.has(allocated))
+    expect(allocated).not.toBe(port)
+    expect(allocated >= from && allocated <= to).toBeTruthy()
+    expect(usedPorts.has(allocated)).toBeTruthy()
   } finally {
     await closeServer(server)
   }

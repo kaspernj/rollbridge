@@ -1,13 +1,12 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {sendControlCommand} from "../src/control-client.js"
@@ -26,7 +25,7 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
   const stoppingPath = path.join(root, "stopping")
   const gate = spawn("mkfifo", [gatePath])
 
-  assert.equal((await once(gate, "exit"))[0], 0)
+  expect((await once(gate, "exit"))[0]).toBe(0)
 
   const config = buildConfig(socketPath, {
     companion: {
@@ -54,7 +53,7 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
 
     const workerPid = daemon.activeRelease?.getProcess("worker")?.pid
 
-    assert.equal(typeof workerPid, "number")
+    expect(typeof workerPid).toBe("number")
 
     const stopping = waitForFile(stoppingPath)
     let shutdownResolved = false
@@ -87,23 +86,28 @@ test("shutdown response waits for endpoint and owned-process cleanup before imme
 
     const response = await shutdown
 
-    assert.equal(shutdownResolved, true)
-    assert.equal(resolvedDuringStop, false, "shutdown must not acknowledge while an owned process is still stopping")
-    assert.equal(oldEndpointAccepted, false, "the targeted endpoint must stop accepting new commands before cleanup")
-    assert.equal(processAliveDuringStop, true, "the fixture must hold shutdown while its owned process is alive")
-    assert.equal(idleTargetClosedDuringStop, true, "an idle accepted client must be closed when the targeted endpoint retires")
-    assert.equal(idleUnrelatedClosedDuringStop, false, "an unrelated daemon's accepted clients must remain untouched")
-    assert.deepEqual(response, {message: "shutdown", status: "success"})
-    await assert.rejects(() => fs.stat(socketPath), {code: "ENOENT"})
-    assert.equal(isProcessAlive(/** @type {number} */ (workerPid)), false)
+    expect(shutdownResolved).toBe(true)
+    // Shutdown must not acknowledge while an owned process is still stopping.
+    expect(resolvedDuringStop).toBe(false)
+    // The targeted endpoint must stop accepting new commands before cleanup.
+    expect(oldEndpointAccepted).toBe(false)
+    // The fixture must hold shutdown while its owned process is alive.
+    expect(processAliveDuringStop).toBe(true)
+    // An idle accepted client must be closed when the targeted endpoint retires.
+    expect(idleTargetClosedDuringStop).toBe(true)
+    // An unrelated daemon's accepted clients must remain untouched.
+    expect(idleUnrelatedClosedDuringStop).toBe(false)
+    expect(response).toEqual({message: "shutdown", status: "success"})
+    await expect(fs.stat(socketPath)).rejects.toMatchObject({code: "ENOENT"})
+    expect(isProcessAlive(/** @type {number} */ (workerPid))).toBe(false)
 
     // A different daemon remains reachable; shutdown is scoped to the targeted control endpoint.
-    assert.equal((await sendControlCommand({command: {command: "status"}, path: unrelatedSocketPath})).application, "shutdown-unrelated")
+    expect((await sendControlCommand({command: {command: "status"}, path: unrelatedSocketPath})).application).toBe("shutdown-unrelated")
 
     // Replacement starts immediately, with no polling or retry between truthful ACK and bind.
     replacement = new RollbridgeDaemon({config, logger: () => {}})
     await replacement.start()
-    assert.equal((await sendControlCommand({command: {command: "status"}, path: socketPath})).application, "shutdown-target")
+    expect((await sendControlCommand({command: {command: "status"}, path: socketPath})).application).toBe("shutdown-target")
   } finally {
     if (!gateReleased) {
       await fs.writeFile(gatePath, "continue\n").catch(() => {})
@@ -138,8 +142,8 @@ test("shutdown keeps daemon services alive until release-owned dependents stop",
     const release = daemon.activeRelease
     const coordinator = daemon.services.get("coordinator")
 
-    assert.ok(release)
-    assert.ok(coordinator)
+    if (!release) throw new Error("Missing required fixture: release")
+    if (!coordinator) throw new Error("Missing required fixture: coordinator")
 
     const originalReleaseStop = release.stop.bind(release)
     const originalCoordinatorStop = coordinator.stop.bind(coordinator)
@@ -163,7 +167,8 @@ test("shutdown keeps daemon services alive until release-owned dependents stop",
     releaseWorker()
     await shutdown
 
-    assert.equal(serviceStoppedWhileWorkerWasDraining, false, "a worker must retain access to daemon services throughout its drain")
+    // A worker must retain access to daemon services throughout its drain.
+    expect(serviceStoppedWhileWorkerWasDraining).toBe(false)
   } finally {
     releaseWorker()
     await daemon.shutdown()
@@ -177,7 +182,7 @@ test("external-owner retirement releases listeners before a long-draining compan
   const gatePath = path.join(root, "retire.fifo")
   const stoppingPath = path.join(root, "stopping")
   const gate = spawn("mkfifo", [gatePath])
-  assert.equal((await once(gate, "exit"))[0], 0)
+  expect((await once(gate, "exit"))[0]).toBe(0)
   const config = buildConfig(socketPath, {companion: {
     command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`,
     id: "worker",
@@ -192,14 +197,16 @@ test("external-owner retirement releases listeners before a long-draining compan
     await daemon.deploy({releaseId: "old", releasePath: root, revision: "old"})
     const retirement = sendControlCommand({command: {attestation: `sha256:${"a".repeat(64)}`, command: "retire-owner"}, path: socketPath})
     const response = await retirement
-    assert.deepEqual(response, {message: "owner retired", status: "success"})
-    assert.equal(await fs.readFile(stoppingPath, "utf8"), "stopping", "old worker must stop accepting work before listener takeover")
+    expect(response).toEqual({message: "owner retired", status: "success"})
+    // Old worker must stop accepting work before listener takeover.
+    expect(await fs.readFile(stoppingPath, "utf8")).toBe("stopping")
 
     replacement = new RollbridgeDaemon({config, logger: () => {}})
     await replacement.start({reportOrphans: false})
-    assert.equal((await sendControlCommand({command: {command: "status"}, path: socketPath})).application, "shutdown-target")
-    assert.deepEqual(replacement.status().orphans, [], "intentional retired companions are not replacement orphans")
-    assert.equal(daemon.status().releases[0].processes[0].state, "quiesced")
+    expect((await sendControlCommand({command: {command: "status"}, path: socketPath})).application).toBe("shutdown-target")
+    // Intentional retired companions are not replacement orphans.
+    expect(replacement.status().orphans).toEqual([])
+    expect(daemon.status().releases[0].processes[0].state).toBe("quiesced")
   } finally {
     await fs.writeFile(gatePath, "done\n").catch(() => {})
     if (replacement) await replacement.shutdown()
@@ -229,13 +236,14 @@ test("a retired owner cannot clear replacement state during late shutdown", asyn
 
     const replacementState = /** @type {{activeReleaseId: string} | undefined} */ (await readState(statePath))
 
-    assert.equal(replacementState?.activeReleaseId, "replacement")
+    expect(replacementState?.activeReleaseId).toBe("replacement")
 
     await retired.shutdown()
 
     const stateAfterRetiredShutdown = /** @type {{activeReleaseId: string} | undefined} */ (await readState(statePath))
 
-    assert.equal(stateAfterRetiredShutdown?.activeReleaseId, "replacement", "late shutdown of the retired owner must preserve replacement state")
+    // Late shutdown of the retired owner must preserve replacement state.
+    expect(stateAfterRetiredShutdown?.activeReleaseId).toBe("replacement")
   } finally {
     if (replacement) await replacement.shutdown()
     await retired.shutdown()
@@ -258,19 +266,17 @@ test("control socket unlink failure is reported only after owned cleanup complet
     const webPid = daemon.activeRelease?.getProcess("web")?.pid
     const proxyPort = daemon.getProxyPort()
 
-    assert.equal(typeof webPid, "number")
-    assert.equal(typeof proxyPort, "number")
+    expect(typeof webPid).toBe("number")
+    expect(typeof proxyPort).toBe("number")
 
     daemon.removeControlSocket = async () => { throw new Error("injected unlink failure") }
 
-    await assert.rejects(
-      () => sendControlCommand({command: {command: "shutdown"}, path: socketPath}),
-      /control socket unlink failed: injected unlink failure/
-    )
+    await expect(sendControlCommand({command: {command: "shutdown"}, path: socketPath})).rejects.toThrow(/control socket unlink failed: injected unlink failure/)
 
-    assert.equal(isProcessAlive(/** @type {number} */ (webPid)), false, "unlink failure must not strand an owned process")
-    await assert.rejects(() => fetch(`http://127.0.0.1:${proxyPort}/ping`))
-    await assert.rejects(() => fs.stat(statePath), {code: "ENOENT"})
+    // Unlink failure must not strand an owned process.
+    expect(isProcessAlive(/** @type {number} */ (webPid))).toBe(false)
+    await expect(fetch(`http://127.0.0.1:${proxyPort}/ping`)).rejects.toThrow()
+    await expect(fs.stat(statePath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -291,8 +297,8 @@ test("direct shutdown closes idle accepted clients and converges", async () => {
     await daemon.shutdown()
     await idleClosed
 
-    assert.equal(idle.destroyed, true)
-    await assert.rejects(() => fs.stat(socketPath), {code: "ENOENT"})
+    expect(idle.destroyed).toBe(true)
+    await expect(fs.stat(socketPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     idle?.destroy()
     await fs.rm(root, {force: true, recursive: true})
@@ -315,11 +321,8 @@ test("shutdown reports cleanup failure and still retires the targeted endpoint",
   try {
     await daemon.start()
 
-    await assert.rejects(
-      () => sendControlCommand({command: {command: "shutdown"}, path: socketPath}),
-      /directory|EISDIR/i
-    )
-    await assert.rejects(() => fs.stat(socketPath), {code: "ENOENT"})
+    await expect(sendControlCommand({command: {command: "shutdown"}, path: socketPath})).rejects.toThrow(/directory|EISDIR/i)
+    await expect(fs.stat(socketPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -338,16 +341,13 @@ test("shutdown does not turn an owned-resource stop rejection into success", asy
 
     const release = daemon.activeRelease
 
-    assert.ok(release)
+    if (!release) throw new Error("Missing required fixture: release")
     const originalStop = release.stop.bind(release)
 
     restoreStop = originalStop
     release.stop = async () => { throw new Error("owned release stop failed") }
 
-    await assert.rejects(
-      () => sendControlCommand({command: {command: "shutdown"}, path: socketPath}),
-      /Shutdown failed to stop 1 owned resource/
-    )
+    await expect(sendControlCommand({command: {command: "shutdown"}, path: socketPath})).rejects.toThrow(/Shutdown failed to stop 1 owned resource/)
   } finally {
     if (restoreStop) await restoreStop()
     await fs.rm(root, {force: true, recursive: true})
@@ -359,10 +359,7 @@ test("shutdown of an already-stopped endpoint fails explicitly", async () => {
   const socketPath = path.join(root, "missing.sock")
 
   try {
-    await assert.rejects(
-      () => sendControlCommand({command: {command: "shutdown"}, path: socketPath}),
-      (error) => Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT")
-    )
+    await expect(sendControlCommand({command: {command: "shutdown"}, path: socketPath})).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }

@@ -1,11 +1,10 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import {afterAll, beforeAll, describe, test} from "@velocious/testing"
+import {afterAll, beforeAll, describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
@@ -73,47 +72,47 @@ async function sendRawControlLine(rawLine) {
 test("malformed JSON returns an error response without crashing the daemon", async () => {
   const response = await sendRawControlLine("this is not json")
 
-  assert.equal(response.status, "error")
-  assert.match(String(response.error), /JSON/)
+  expect(response.status).toBe("error")
+  expect(String(response.error)).toMatch(/JSON/)
 
   // The daemon stays up and still answers valid commands afterwards.
   const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-  assert.equal(status.application, "rollbridge-control-test")
+  expect(status.application).toBe("rollbridge-control-test")
 })
 
 test("non-object JSON is rejected as an invalid control command", async () => {
   const response = await sendRawControlLine("123")
 
-  assert.equal(response.status, "error")
-  assert.equal(response.error, "Control command must be an object")
+  expect(response.status).toBe("error")
+  expect(response.error).toBe("Control command must be an object")
 })
 
 test("an unknown control command returns a clear error", async () => {
   const response = await sendRawControlLine(JSON.stringify({command: "bogus"}))
 
-  assert.equal(response.status, "error")
-  assert.equal(response.error, "Unknown command: bogus")
+  expect(response.status).toBe("error")
+  expect(response.error).toBe("Unknown command: bogus")
 })
 
 test("a known command missing a required field returns a field error", async () => {
   const response = await sendRawControlLine(JSON.stringify({command: "deploy"}))
 
-  assert.equal(response.status, "error")
-  assert.equal(response.error, "releasePath is required")
+  expect(response.status).toBe("error")
+  expect(response.error).toBe("releasePath is required")
 })
 test("status can omit process logs without changing the default status payload", async () => {
-  assert.ok(daemon)
+  if (!daemon) throw new Error("Missing required fixture: daemon")
   await daemon.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
 
   const full = /** @type {import("../src/daemon.js").DaemonStatus} */ (await sendControlCommand({command: {command: "status"}, path: socketPath}))
   const compact = /** @type {import("../src/daemon.js").DaemonStatusWithoutLogs} */ (await sendControlCommand({command: {command: "status", includeLogs: false}, path: socketPath}))
   const invalid = await sendRawControlLine(JSON.stringify({command: "status", includeLogs: "false"}))
 
-  assert.ok(full.releases[0]?.processes.every((processStatus) => Array.isArray(processStatus.logs)))
-  assert.ok(full.services.every(({process: processStatus}) => Array.isArray(processStatus.logs)))
-  assert.ok(full.singletons.every(({process: processStatus}) => Array.isArray(processStatus.logs)))
-  assert.deepEqual(statusWithoutProcessUptimes(compact), statusWithoutProcessUptimes({
+  expect(full.releases[0]?.processes.every((processStatus) => Array.isArray(processStatus.logs))).toBeTruthy()
+  expect(full.services.every(({process: processStatus}) => Array.isArray(processStatus.logs))).toBeTruthy()
+  expect(full.singletons.every(({process: processStatus}) => Array.isArray(processStatus.logs))).toBeTruthy()
+  expect(statusWithoutProcessUptimes(compact)).toEqual(statusWithoutProcessUptimes({
     ...full,
     releases: full.releases.map((release) => ({
       ...release,
@@ -128,8 +127,8 @@ test("status can omit process logs without changing the default status payload",
       process: (({logs: _logs, ...processStatus}) => processStatus)(process)
     }))
   }))
-  assert.equal(invalid.status, "error")
-  assert.equal(invalid.error, "includeLogs must be a boolean")
+  expect(invalid.status).toBe("error")
+  expect(invalid.error).toBe("includeLogs must be a boolean")
 })
 
 /**

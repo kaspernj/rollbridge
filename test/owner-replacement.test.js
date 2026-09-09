@@ -1,13 +1,12 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {normalizeConfig} from "../src/config.js"
 import {openControlSession, sendControlCommand} from "../src/control-client.js"
@@ -45,7 +44,7 @@ test("partial owner-replacement guardian crosses the authenticated legacy bridge
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
-    assert.ok(owner.pid)
+    if (!owner.pid) throw new Error("Missing required fixture: owner.pid")
     await fs.writeFile(daemonPidPath, `${owner.pid}\n`)
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
     const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
@@ -72,15 +71,16 @@ test("partial owner-replacement guardian crosses the authenticated legacy bridge
     const ownerExit = once(owner, "exit")
     const ensured = await runEnsureDaemon({configPath, daemonPidPath, logPath: path.join(root, "candidate.log"), packagePath, runtimePath})
 
-    assert.equal(ensured.code, 0, `${ensured.stderr}\n${await fs.readFile(path.join(root, "candidate.log"), "utf8")}`)
-    assert.deepEqual(await ownerExit, [null, "SIGKILL"], "the exact authenticated incumbent boundary is crossed once")
+    expect({value: ensured.code, context: `${ensured.stderr}\n${await fs.readFile(path.join(root, "candidate.log"), "utf8")}`}).toMatchObject({value: 0})
+    // The exact authenticated incumbent boundary is crossed once.
+    expect(await ownerExit).toEqual([null, "SIGKILL"])
     await retainedClosed
     const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(status.activeReleaseId, "v1")
-    assert.equal(releaseProcessPid(status, "v1", "worker"), workerPid)
-    assert.equal(releaseProcessPid(status, "v1", "web"), webPid)
-    assert.deepEqual(status.ownerTransition, {
+    expect(status.activeReleaseId).toBe("v1")
+    expect(releaseProcessPid(status, "v1", "worker")).toBe(workerPid)
+    expect(releaseProcessPid(status, "v1", "web")).toBe(webPid)
+    expect(status.ownerTransition).toEqual({
       disruptive: true,
       mode: "legacy-first-upgrade",
       reason: "retained guardian and daemon lacked atomic replacement protocol"
@@ -134,7 +134,7 @@ test("partial guardian replacement remains fenced through coordinator reconstruc
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
-    assert.ok(owner.pid)
+    if (!owner.pid) throw new Error("Missing required fixture: owner.pid")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
     const state = JSON.parse(await fs.readFile(statePath, "utf8"))
 
@@ -162,7 +162,7 @@ test("partial guardian replacement remains fenced through coordinator reconstruc
     replacementPromise = replacement.replaceIncompatibleOwner()
     void replacementPromise.catch(() => {})
     await restoreStarted.promise
-    assert.equal(JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath, partialSocketPath)
+    expect(JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath).toBe(partialSocketPath)
 
     let mutationError
 
@@ -188,12 +188,12 @@ test("partial guardian replacement remains fenced through coordinator reconstruc
     contender.disconnect()
     contender = undefined
     continueRestore.resolve(undefined)
-    await assert.rejects(replacementPromise, /injected reconstruction stop after fence audit/)
+    await expect(replacementPromise).rejects.toThrow(/injected reconstruction stop after fence audit/)
     replacementPromise = undefined
-    assert.match(mutationError instanceof Error ? mutationError.message : "", /fenced while an owner replacement is prepared/)
-    assert.match(contenderError instanceof Error ? contenderError.message : "", /another owner replacement candidate is already prepared/i)
-    assert.notEqual(JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath, `${statePath}.split3-guardian.sock`)
-    assert.equal((await sendControlCommand({command: {command: "status"}, path: socketPath})).daemonPid, owner.pid)
+    expect(mutationError instanceof Error ? mutationError.message : "").toMatch(/fenced while an owner replacement is prepared/)
+    expect(contenderError instanceof Error ? contenderError.message : "").toMatch(/another owner replacement candidate is already prepared/i)
+    expect(JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath).not.toBe(`${statePath}.split3-guardian.sock`)
+    expect((await sendControlCommand({command: {command: "status"}, path: socketPath})).daemonPid).toBe(owner.pid)
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
 
     await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
@@ -245,7 +245,7 @@ test("partial guardian replacement persists the coordinator only after ownership
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
-    assert.ok(owner.pid)
+    if (!owner.pid) throw new Error("Missing required fixture: owner.pid")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
     const state = JSON.parse(await fs.readFile(statePath, "utf8"))
 
@@ -283,11 +283,8 @@ test("partial guardian replacement persists the coordinator only after ownership
     replacementPromise = replacement.replaceIncompatibleOwner()
     void replacementPromise.catch(() => {})
     await ownershipConfirmationStarted.promise
-    assert.notEqual(
-      JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath,
-      `${statePath}.split3-guardian.sock`,
-      "durable state must not name the coordinator before its legacy ownership claim is confirmed"
-    )
+    // Durable state must not name the coordinator before its legacy ownership claim is confirmed.
+    expect(JSON.parse(await fs.readFile(statePath, "utf8")).recovery.guardian.socketPath).not.toBe(`${statePath}.split3-guardian.sock`)
     continueOwnershipConfirmation.resolve(undefined)
     await replacementPromise
     replacementPromise = undefined
@@ -327,7 +324,7 @@ test("partial guardian replacement persists the coordinator only after ownership
   }
 })
 
-test("failed partial upgrade resumes an incumbent retired release drain", {timeout: 5000}, async () => {
+test("failed partial upgrade resumes an incumbent retired release drain", {timeoutMs: 5000}, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-partial-drain-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "state.json")
@@ -347,7 +344,7 @@ test("failed partial upgrade resumes an incumbent retired release drain", {timeo
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
-    assert.ok(owner.pid)
+    if (!owner.pid) throw new Error("Missing required fixture: owner.pid")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: socketPath})
     const v1Status = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const proxyPort = /** @type {{port?: number}} */ (v1Status.proxy).port
@@ -357,7 +354,7 @@ test("failed partial upgrade resumes an incumbent retired release drain", {timeo
     await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath})
     const draining = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(releaseState(draining, "v1"), "draining")
+    expect(releaseState(draining, "v1")).toBe("draining")
     const state = JSON.parse(await fs.readFile(statePath, "utf8"))
 
     backendGuardianIdentity = {...state.recovery.guardian}
@@ -377,15 +374,15 @@ test("failed partial upgrade resumes an incumbent retired release drain", {timeo
     })
 
     candidate = replacement
-    await assert.rejects(() => replacement.replaceIncompatibleOwner(), /provenance mismatch/)
-    assert.equal(owner.exitCode, null)
-    assert.equal(owner.signalCode, null)
+    await expect(replacement.replaceIncompatibleOwner()).rejects.toThrow(/provenance mismatch/)
+    expect(owner.exitCode).toBe(null)
+    expect(owner.signalCode).toBe(null)
     const releaseDrained = waitForLog(owner, "release drained")
 
     retainedConnection.destroy()
     await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
     await releaseDrained
-    assert.equal(releaseState(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1"), "stopped")
+    expect(releaseState(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1")).toBe("stopped")
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
 
     await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
@@ -427,7 +424,7 @@ test.each(["malformed-capability", "wrong-pid", "wrong-provenance"])("partial gu
         await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
         owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
         await waitForLog(owner, "control socket listening")
-        assert.ok(owner.pid)
+        if (!owner.pid) throw new Error("Missing required fixture: owner.pid")
         await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
         const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
         const processPids = [releaseProcessPid(before, "v1", "worker"), releaseProcessPid(before, "v1", "web")]
@@ -465,14 +462,14 @@ test.each(["malformed-capability", "wrong-pid", "wrong-provenance"])("partial gu
             ? /does not own socket|does not match the retained guardian command and socket/
             : /provenance mismatch/
 
-        await assert.rejects(() => replacement.replaceIncompatibleOwner(), expected)
-        assert.equal(owner.exitCode, null)
-        assert.equal(owner.signalCode, null)
-        assert.equal(retainedClosed, false)
-        assert.equal(retainedConnection.destroyed, false)
-        for (const pid of processPids) assert.doesNotThrow(() => process.kill(pid, 0))
-        assert.equal(releaseProcessPid(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1", "worker"), processPids[0])
-        await assert.rejects(fs.access(`${statePath}.split3-guardian.sock`), {code: "ENOENT"})
+        await expect(replacement.replaceIncompatibleOwner()).rejects.toThrow(expected)
+        expect(owner.exitCode).toBe(null)
+        expect(owner.signalCode).toBe(null)
+        expect(retainedClosed).toBe(false)
+        expect(retainedConnection.destroyed).toBe(false)
+        for (const pid of processPids) await expect(() => process.kill(pid, 0)).not.toThrow()
+        expect(releaseProcessPid(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1", "worker")).toBe(processPids[0])
+        await expect(fs.access(`${statePath}.split3-guardian.sock`)).rejects.toMatchObject({code: "ENOENT"})
 
         const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
 
@@ -513,7 +510,7 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, proxyPort, statePath}))
     owner = spawn(process.execPath, [legacyDaemonPath, "daemon", "--config", path.basename(configPath)], {cwd: root, stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
-    assert.ok(owner.pid)
+    if (!owner.pid) throw new Error("Missing required fixture: owner.pid")
     await fs.writeFile(daemonPidPath, `${owner.pid}\n`)
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: socketPath})
     const legacyStatus = await sendControlCommand({command: {command: "status"}, path: socketPath})
@@ -525,20 +522,22 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: true, proxyPort, statePath}))
     const mismatchedUpgrade = await runEnsureDaemon({configPath, daemonPidPath, logPath: path.join(root, "mismatch.log"), packagePath: firstPackagePath, runtimePath})
 
-    assert.equal(mismatchedUpgrade.code, 1)
-    assert.match(await fs.readFile(path.join(root, "mismatch.log"), "utf8"), /legacy guardian bridge requires the incumbent config identity unchanged/)
-    assert.equal(interruptedConnection.destroyed, false, "config mismatch must leave the legacy listener serving")
-    assert.equal(releaseProcessPid(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1", "worker"), legacyWorkerPid)
+    expect(mismatchedUpgrade.code).toBe(1)
+    expect(await fs.readFile(path.join(root, "mismatch.log"), "utf8")).toMatch(/legacy guardian bridge requires the incumbent config identity unchanged/)
+    // Config mismatch must leave the legacy listener serving.
+    expect(interruptedConnection.destroyed).toBe(false)
+    expect(releaseProcessPid(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1", "worker")).toBe(legacyWorkerPid)
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, proxyPort, statePath}))
     blockedUpgradeGuardian = net.createServer()
 
     await listenUnix(blockedUpgradeGuardian, `${statePath}.split3-guardian.sock`)
     const blockedUpgrade = await runEnsureDaemon({configPath, daemonPidPath, logPath: path.join(root, "blocked.log"), packagePath: firstPackagePath, runtimePath})
 
-    assert.equal(blockedUpgrade.code, 1)
-    assert.match(await fs.readFile(path.join(root, "blocked.log"), "utf8"), /Legacy upgrade guardian socket .* already exists; refusing legacy upgrade/)
-    assert.equal(interruptedConnection.destroyed, false, "candidate preparation failure must leave the legacy listener serving")
-    assert.equal(releaseProcessPid(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1", "worker"), legacyWorkerPid)
+    expect(blockedUpgrade.code).toBe(1)
+    expect(await fs.readFile(path.join(root, "blocked.log"), "utf8")).toMatch(/Legacy upgrade guardian socket .* already exists; refusing legacy upgrade/)
+    // Candidate preparation failure must leave the legacy listener serving.
+    expect(interruptedConnection.destroyed).toBe(false)
+    expect(releaseProcessPid(await sendControlCommand({command: {command: "status"}, path: socketPath}), "v1", "worker")).toBe(legacyWorkerPid)
     await closeServer(blockedUpgradeGuardian)
     const firstUpgrade = await run(process.execPath, [
       path.join(firstPackagePath, "bin", "rollbridge"), "ensure-daemon", "--config", configPath,
@@ -546,8 +545,8 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
       "--daemon-pid-path", daemonPidPath, "--daemon-start-timeout-ms", "3000"
     ])
 
-    assert.equal(firstUpgrade.code, 0, `${firstUpgrade.stderr}\n${await fs.readFile(path.join(root, "first.log"), "utf8")}`)
-    assert.deepEqual(JSON.parse(firstUpgrade.stdout).ownerTransition, {
+    expect({value: firstUpgrade.code, context: `${firstUpgrade.stderr}\n${await fs.readFile(path.join(root, "first.log"), "utf8")}`}).toMatchObject({value: 0})
+    expect(JSON.parse(firstUpgrade.stdout).ownerTransition).toEqual({
       disruptive: true,
       mode: "legacy-first-upgrade",
       reason: "retained guardian and daemon lacked atomic replacement protocol"
@@ -555,13 +554,13 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
     await interrupted
     const bridged = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.deepEqual(bridged.ownerTransition, {
+    expect(bridged.ownerTransition).toEqual({
       disruptive: true,
       mode: "legacy-first-upgrade",
       reason: "retained guardian and daemon lacked atomic replacement protocol"
     })
-    assert.equal(releaseProcessPid(bridged, "v1", "worker"), legacyWorkerPid)
-    assert.equal(bridged.activeReleaseId, "v1")
+    expect(releaseProcessPid(bridged, "v1", "worker")).toBe(legacyWorkerPid)
+    expect(bridged.activeReleaseId).toBe("v1")
 
     retainedConnection = await openWebSocket(proxyPort)
     let retainedConnectionClosed = false
@@ -574,13 +573,14 @@ test("first pre-split package upgrade is explicitly disruptive and later replace
       "--daemon-pid-path", daemonPidPath, "--daemon-start-timeout-ms", "3000"
     ])
 
-    assert.equal(secondUpgrade.code, 0, `${secondUpgrade.stderr}\n${await fs.readFile(path.join(root, "second.log"), "utf8")}`)
+    expect({value: secondUpgrade.code, context: `${secondUpgrade.stderr}\n${await fs.readFile(path.join(root, "second.log"), "utf8")}`}).toMatchObject({value: 0})
     currentControlPath = nextSocketPath
-    assert.equal(retainedConnectionClosed, false, "protocol-capable replacement must retain established proxy connections")
+    // Protocol-capable replacement must retain established proxy connections.
+    expect(retainedConnectionClosed).toBe(false)
     const replaced = await sendControlCommand({command: {command: "status"}, path: nextSocketPath})
 
-    assert.equal(releaseProcessPid(replaced, "v1", "worker"), legacyWorkerPid)
-    assert.equal(replaced.activeReleaseId, "v1")
+    expect(releaseProcessPid(replaced, "v1", "worker")).toBe(legacyWorkerPid)
+    expect(replaced.activeReleaseId).toBe("v1")
     retainedConnection.resetAndDestroy()
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: nextSocketPath})
     await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
@@ -628,7 +628,7 @@ test("replacement-capable guardian without daemon recovery aborts before handoff
     await writeConfig(configPath, config({controlPath: socketPath, extraCompanion: false, statePath}))
     owner = spawn(process.execPath, [path.join(intermediatePackagePath, "bin", "rollbridge"), "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
-    assert.ok(owner.pid)
+    if (!owner.pid) throw new Error("Missing required fixture: owner.pid")
     await fs.writeFile(daemonPidPath, `${owner.pid}\n`)
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: socketPath})
     const active = await sendControlCommand({command: {command: "status"}, path: socketPath})
@@ -639,13 +639,14 @@ test("replacement-capable guardian without daemon recovery aborts before handoff
     const workerPid = releaseProcessPid(before, "v1", "worker")
     const replacement = await runEnsureDaemon({configPath, daemonPidPath, logPath: daemonLogPath, packagePath: repoRoot, runtimePath})
 
-    assert.equal(replacement.code, 1)
-    assert.match(await fs.readFile(daemonLogPath, "utf8"), /persistent Rollbridge guardian predates daemon recovery/)
+    expect(replacement.code).toBe(1)
+    expect(await fs.readFile(daemonLogPath, "utf8")).toMatch(/persistent Rollbridge guardian predates daemon recovery/)
     await waitForFile(abortedPath)
     const preserved = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(preserved.daemonPid, before.daemonPid, "capability rejection must leave the incumbent daemon serving")
-    assert.equal(releaseProcessPid(preserved, "v1", "worker"), workerPid)
+    // Capability rejection must leave the incumbent daemon serving.
+    expect(preserved.daemonPid).toBe(before.daemonPid)
+    expect(releaseProcessPid(preserved, "v1", "worker")).toBe(workerPid)
     retainedConnection.destroy()
     retainedConnection = undefined
     await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
@@ -683,17 +684,18 @@ test("ensure-daemon owns and reports the exact candidate exit before readiness",
     ])
     candidate = JSON.parse(await fs.readFile(evidencePath, "utf8"))
 
-    assert.equal(candidate.ppid, ensured.pid, "the recorded process must be the candidate spawned by this exact ensuring CLI")
-    assert.notEqual(candidate.pid, ensured.pid)
-    assert.deepEqual(candidate.argv.slice(2), [
+    // The recorded process must be the candidate spawned by this exact ensuring CLI.
+    expect(candidate.ppid).toBe(ensured.pid)
+    expect(candidate.pid).not.toBe(ensured.pid)
+    expect(candidate.argv.slice(2)).toEqual([
       "daemon", "--config", configPath,
       "--guardian-daemon-log-path", path.join(root, "daemon.log"),
       "--guardian-daemon-pid-path", path.join(root, "daemon.pid"),
       "--guardian-daemon-start-timeout-ms", "3000"
     ])
-    assert.equal(ensured.code, 1)
-    assert.match(ensured.stderr, new RegExp(`Rollbridge daemon candidate ${candidate.pid} exited before readiness \\(code 47, signal none\\)`))
-    assert.doesNotMatch(ensured.stderr, /did not become ready within/)
+    expect(ensured.code).toBe(1)
+    expect(ensured.stderr).toMatch(new RegExp(`Rollbridge daemon candidate ${candidate.pid} exited before readiness \\(code 47, signal none\\)`))
+    expect(ensured.stderr).not.toMatch(/did not become ready within/)
     await waitForProcessExit(candidate.descendantPid)
   } finally {
     if (candidate?.descendantPid) {
@@ -704,8 +706,8 @@ test("ensure-daemon owns and reports the exact candidate exit before readiness",
 })
 
 test("legacy disruptive bridge rejects non-protocol guardian failures exactly", () => {
-  assert.equal(isLegacyGuardianPrepareDiagnostic("Guardian prepare-owner-replacement requires a process key"), true)
-  assert.equal(isLegacyGuardianPrepareDiagnostic("Unknown guardian command: prepare-owner-replacement"), true)
+  expect(isLegacyGuardianPrepareDiagnostic("Guardian prepare-owner-replacement requires a process key")).toBe(true)
+  expect(isLegacyGuardianPrepareDiagnostic("Unknown guardian command: prepare-owner-replacement")).toBe(true)
   for (const diagnostic of [
     "Unknown guardian command: deploy",
     "Unknown guardian command: prepare-owner-replacement ",
@@ -714,7 +716,7 @@ test("legacy disruptive bridge rejects non-protocol guardian failures exactly", 
     "Process guardian connection closed while awaiting prepare-owner-replacement",
     "Guardian owner authority mismatch",
     "Malformed guardian response"
-  ]) assert.equal(isLegacyGuardianPrepareDiagnostic(diagnostic), false, diagnostic)
+  ]) expect({value: isLegacyGuardianPrepareDiagnostic(diagnostic), context: diagnostic}).toMatchObject({value: false})
 })
 
 test("ensure-daemon atomically replaces incompatible config, socket, and package authority", async () => {
@@ -751,26 +753,26 @@ test("ensure-daemon atomically replaces incompatible config, socket, and package
 
     const daemonLog = await fs.readFile(path.join(root, "daemon.log"), "utf8")
 
-    assert.equal(ensured.code, 0, `${ensured.stderr}\n${daemonLog}`)
+    expect({value: ensured.code, context: `${ensured.stderr}\n${daemonLog}`}).toMatchObject({value: 0})
     const transferred = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
     const newRuntime = /** @type {{digest: string, path: string}} */ (transferred.daemonRuntime)
 
-    assert.equal(transferred.activeReleaseId, "v1")
-    assert.deepEqual(transferred.releaseReferences, [{releaseId: "v1", releasePath: v1Path}])
-    assert.equal(releaseProcessPid(transferred, "v1", "worker"), workerPid)
-    assert.notEqual(newRuntime.digest, oldRuntime.digest)
-    assert.equal(path.dirname(newRuntime.path), runtimePath)
+    expect(transferred.activeReleaseId).toBe("v1")
+    expect(transferred.releaseReferences).toEqual([{releaseId: "v1", releasePath: v1Path}])
+    expect(releaseProcessPid(transferred, "v1", "worker")).toBe(workerPid)
+    expect(newRuntime.digest).not.toBe(oldRuntime.digest)
+    expect(path.dirname(newRuntime.path)).toBe(runtimePath)
 
     await fs.rm(packagePath, {force: true, recursive: true})
     await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: newSocketPath})
     const deployed = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
 
-    assert.equal(deployed.activeReleaseId, "v2")
-    assert.deepEqual(deployed.releaseReferences, [
+    expect(deployed.activeReleaseId).toBe("v2")
+    expect(deployed.releaseReferences).toEqual([
       {releaseId: "v1", releasePath: v1Path},
       {releaseId: "v2", releasePath: v2Path}
     ])
-    assert.equal(releaseProcessPid(deployed, "v1", "worker"), workerPid)
+    expect(releaseProcessPid(deployed, "v1", "worker")).toBe(workerPid)
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
     await Promise.all([
@@ -814,12 +816,12 @@ test("cross-version replacement fails closed without dropping a retained WebSock
     const processState = retiredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))
     const proxyPort = /** @type {{port?: number}} */ (retired.proxy).port
 
-    assert.deepEqual(processState?.map(({state}) => state), ["running", "running"])
+    expect(processState?.map(({state}) => state)).toEqual(["running", "running"])
     if (typeof proxyPort !== "number") throw new Error("Retained owner proxy is missing its port")
     retainedConnection = await openWebSocket(proxyPort)
     retainedConnection.once("close", () => { retainedConnectionClosed = true })
     await fs.rm(socketPath)
-    await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
+    await expect(fs.access(socketPath)).rejects.toMatchObject({code: "ENOENT"})
     const state = JSON.parse(await fs.readFile(statePath, "utf8"))
     const guardianSocketPath = state.recovery.guardian.socketPath
     const expectedProcessKey = "release:v1:worker"
@@ -873,7 +875,7 @@ test("cross-version replacement fails closed without dropping a retained WebSock
 
     const incumbentPid = owner.pid
 
-    assert.ok(incumbentPid)
+    if (!incumbentPid) throw new Error("Missing required fixture: incumbentPid")
     const candidate = new RollbridgeDaemon({
       config: normalizeConfig(config({controlPath: socketPath, extraCompanion: false, statePath})),
       configPath,
@@ -881,27 +883,26 @@ test("cross-version replacement fails closed without dropping a retained WebSock
       logger: () => {}
     })
     replacement = candidate
-    await assert.rejects(
-      () => candidate.replaceIncompatibleOwner(),
-      /cannot safely complete atomic owner replacement through the older retained guardian while the incumbent control socket is absent; incumbent owner and connections were preserved/i
-    )
-    assert.equal(committedProcessKey, expectedProcessKey)
-    assert.equal(owner.exitCode, null)
-    assert.equal(owner.signalCode, null)
-    assert.doesNotThrow(() => process.kill(incumbentPid, 0))
-    assert.equal(retainedConnectionClosed, false, "failed compatibility handoff must leave retained connections serving")
-    assert.equal(retainedConnection.destroyed, false, "failed compatibility handoff must preserve the incumbent listener")
+    await expect(candidate.replaceIncompatibleOwner()).rejects.toThrow(/cannot safely complete atomic owner replacement through the older retained guardian while the incumbent control socket is absent; incumbent owner and connections were preserved/i)
+    expect(committedProcessKey).toBe(expectedProcessKey)
+    expect(owner.exitCode).toBe(null)
+    expect(owner.signalCode).toBe(null)
+    await expect(() => process.kill(incumbentPid, 0)).not.toThrow()
+    // Failed compatibility handoff must leave retained connections serving.
+    expect(retainedConnectionClosed).toBe(false)
+    // Failed compatibility handoff must preserve the incumbent listener.
+    expect(retainedConnection.destroyed).toBe(false)
     for (const {pid} of processState || []) {
       if (typeof pid !== "number") throw new Error("Retained process is missing its PID")
-      assert.doesNotThrow(() => process.kill(pid, 0))
+      await expect(() => process.kill(pid, 0)).not.toThrow()
     }
     transactionAudit = new GuardianClient(state.recovery.guardian)
     await transactionAudit.connect()
     const transactionStatus = /** @type {{committedReplacementId: string | null, ownerClaimed: boolean, retirementPending?: boolean}} */ (await transactionAudit.replacementStatus())
 
-    assert.equal(transactionStatus.committedReplacementId, null)
-    assert.equal(transactionStatus.ownerClaimed, true)
-    assert.equal(transactionStatus.retirementPending, false)
+    expect(transactionStatus.committedReplacementId).toBe(null)
+    expect(transactionStatus.ownerClaimed).toBe(true)
+    expect(transactionStatus.retirementPending).toBe(false)
   } finally {
     if (replacement?.controlCommandsReady) {
       await Promise.all([
@@ -962,8 +963,8 @@ test("cross-version replacement preserves committed-owner proof until commit the
     await owner.deploy({releaseId: "v1", releasePath, revision: "v1"})
     const ownerProcess = owner.guardian?.processes.values().next().value
 
-    assert.ok(owner.guardian)
-    assert.ok(ownerProcess)
+    if (!owner.guardian) throw new Error("Missing required fixture: owner.guardian")
+    if (!ownerProcess) throw new Error("Missing required fixture: ownerProcess")
     await owner.guardian.request({
       command: "register",
       definition: ownerProcess.definition,
@@ -975,7 +976,7 @@ test("cross-version replacement preserves committed-owner proof until commit the
     const expectedProcessKeys = new Set(running.releases[0]?.processes.map(({id}) => `release:v1:${id}`))
     const runningProxyPort = /** @type {{port?: number}} */ (running.proxy).port
 
-    assert.deepEqual(processState?.map(({state}) => state), ["running", "running"])
+    expect(processState?.map(({state}) => state)).toEqual(["running", "running"])
     if (typeof runningProxyPort !== "number") throw new Error("Retained owner proxy is missing its port")
     retainedConnection = await openWebSocket(runningProxyPort)
     retainedConnection.once("close", () => { retainedConnectionClosed = true })
@@ -1030,8 +1031,8 @@ test("cross-version replacement preserves committed-owner proof until commit the
     state.recovery.guardian.socketPath = compatibilitySocketPath
     await fs.writeFile(statePath, `${JSON.stringify(state)}\n`)
 
-    assert.equal((await owner.guardian?.replacementStatus())?.ownerClaimed, true)
-    await assert.rejects(fs.access(socketPath), {code: "ENOENT"})
+    expect((await owner.guardian?.replacementStatus())?.ownerClaimed).toBe(true)
+    await expect(fs.access(socketPath)).rejects.toMatchObject({code: "ENOENT"})
 
     replacement = new RollbridgeDaemon({
       config: daemonConfig,
@@ -1057,21 +1058,26 @@ test("cross-version replacement preserves committed-owner proof until commit the
     const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const recoveredReleases = /** @type {{connectionCount: number, connections: {http: number, websocket: number}, processes: {id: string, pid?: number, state: string}[], releaseId: string, state: string}[]} */ (recovered.releases)
 
-    assert.equal(owner.ownerRetired, true, "committed incumbent must observe retirement without a public control socket")
-    assert.equal(owner.proxyServer?.listening, false, "committed incumbent must stop accepting stale proxy traffic")
-    assert.equal(recovered.activeReleaseId, "v1")
-    assert.equal(committedProcessKey, committedOwnerProcessKey)
-    assert.equal(recoveredKeysAtCommit?.has(committedOwnerProcessKey), false)
-    assert.deepEqual(candidateRecoveredKeys, expectedProcessKeys)
-    assert.equal([...replacement.guardian?.processes.keys() || []][0], candidateProcessKey)
-    assert.equal(retainedConnectionClosed, false, "successful compatibility handoff must preserve retained connections")
-    assert.equal(retainedConnection.destroyed, false, "successful compatibility handoff must leave the retained listener serving")
-    assert.deepEqual(recoveredReleases[0]?.connections, {http: 0, websocket: 1}, "candidate must inherit exact live incumbent connection counts")
-    assert.deepEqual(recovered.releaseReferences, [{releaseId: "v1", releasePath}])
-    assert.deepEqual(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state})), processState)
+    // Committed incumbent must observe retirement without a public control socket.
+    expect(owner.ownerRetired).toBe(true)
+    // Committed incumbent must stop accepting stale proxy traffic.
+    expect(owner.proxyServer?.listening).toBe(false)
+    expect(recovered.activeReleaseId).toBe("v1")
+    expect(committedProcessKey).toBe(committedOwnerProcessKey)
+    expect(recoveredKeysAtCommit?.has(committedOwnerProcessKey)).toBe(false)
+    expect(candidateRecoveredKeys).toEqual(expectedProcessKeys)
+    expect([...replacement.guardian?.processes.keys() || []][0]).toBe(candidateProcessKey)
+    // Successful compatibility handoff must preserve retained connections.
+    expect(retainedConnectionClosed).toBe(false)
+    // Successful compatibility handoff must leave the retained listener serving.
+    expect(retainedConnection.destroyed).toBe(false)
+    // Candidate must inherit exact live incumbent connection counts.
+    expect(recoveredReleases[0]?.connections).toEqual({http: 0, websocket: 1})
+    expect(recovered.releaseReferences).toEqual([{releaseId: "v1", releasePath}])
+    expect(recoveredReleases[0]?.processes.map(({id, pid, state}) => ({id, pid, state}))).toEqual(processState)
     for (const {pid} of processState || []) {
       if (typeof pid !== "number") throw new Error("Retained process is missing its PID")
-      assert.doesNotThrow(() => process.kill(pid, 0))
+      await expect(() => process.kill(pid, 0)).not.toThrow()
     }
     secondRetainedConnection = await openWebSocket(runningProxyPort)
     intermediate = replacement
@@ -1085,18 +1091,21 @@ test("cross-version replacement preserves committed-owner proof until commit the
     await replacement.replaceIncompatibleOwner()
     const repeatedHandoff = /** @type {{connections: {http: number, websocket: number}, releaseId: string}[]} */ ((await sendControlCommand({command: {command: "status"}, path: socketPath})).releases)
 
-    assert.deepEqual(repeatedHandoff[0]?.connections, {http: 0, websocket: 2}, "successive control-less owners must aggregate each physical listener source")
+    // Successive control-less owners must aggregate each physical listener source.
+    expect(repeatedHandoff[0]?.connections).toEqual({http: 0, websocket: 2})
     await replacement.deploy({releaseId: "v2", releasePath: nextReleasePath, revision: "v2"})
     const draining = /** @type {{connectionCount: number, releaseId: string, state: string}[]} */ ((await sendControlCommand({command: {command: "status"}, path: socketPath})).releases)
     const retainedRelease = draining.find(({releaseId}) => releaseId === "v1")
 
-    assert.equal(retainedRelease?.state, "draining")
-    assert.equal(retainedRelease?.connectionCount, 2, "candidate must not stop the retained upstream while retired WebSockets are live")
+    expect(retainedRelease?.state).toBe("draining")
+    // Candidate must not stop the retained upstream while retired WebSockets are live.
+    expect(retainedRelease?.connectionCount).toBe(2)
     // Send a masked empty WebSocket close frame so both retained proxy legs drain.
     retainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
     if (owner.proxyClosePromise) await owner.proxyClosePromise
     if (!retainedConnectionClosed) await once(retainedConnection, "close")
-    assert.equal(retainedConnectionClosed, true, "retired incumbent must finish after its retained connections drain")
+    // Retired incumbent must finish after its retained connections drain.
+    expect(retainedConnectionClosed).toBe(true)
     const oneSourceDeadline = Date.now() + 3000
     let oneRetained
 
@@ -1107,8 +1116,9 @@ test("cross-version replacement preserves committed-owner proof until commit the
       await new Promise((resolve) => setTimeout(resolve, 10))
     }
 
-    assert.equal(oneRetained?.connectionCount, 1, "one retired listener source must not clear another source's live connection")
-    assert.equal(oneRetained?.processes.find(({id}) => id === "web")?.state, "running")
+    // One retired listener source must not clear another source's live connection.
+    expect(oneRetained?.connectionCount).toBe(1)
+    expect(oneRetained?.processes.find(({id}) => id === "web")?.state).toBe("running")
     secondRetainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
     if (intermediate.proxyClosePromise) await intermediate.proxyClosePromise
     const stopDeadline = Date.now() + 3000
@@ -1121,7 +1131,8 @@ test("cross-version replacement preserves committed-owner proof until commit the
       retainedWebStopped = !retained || retained.processes.find(({id}) => id === "web")?.state === "stopped"
       if (!retainedWebStopped) await new Promise((resolve) => setTimeout(resolve, 25))
     }
-    assert.equal(retainedWebStopped, true, "retained upstream must stop after the incumbent reports its final connection drain")
+    // Retained upstream must stop after the incumbent reports its final connection drain.
+    expect(retainedWebStopped).toBe(true)
   } finally {
     if (retainedGuardianSocketPath) {
       const cleanupState = JSON.parse(await fs.readFile(statePath, "utf8"))
@@ -1180,9 +1191,9 @@ test("replacement refuses to overwrite an unrelated live final control socket an
       "--daemon-pid-path", path.join(root, "daemon.pid"), "--daemon-start-timeout-ms", "1500"
     ])
 
-    assert.notEqual(replacement.code, 0)
-    assert.match(await fs.readFile(path.join(root, "daemon.log"), "utf8"), /final control socket.*already answers another live process/)
-    assert.equal((await sendControlCommand({command: {command: "status"}, path: oldSocketPath})).activeReleaseId, "v1")
+    expect(replacement.code).not.toBe(0)
+    expect(await fs.readFile(path.join(root, "daemon.log"), "utf8")).toMatch(/final control socket.*already answers another live process/)
+    expect((await sendControlCommand({command: {command: "status"}, path: oldSocketPath})).activeReleaseId).toBe("v1")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
     await fs.writeFile(path.join(root, "v1", "worker.fifo"), "drained\n")
@@ -1227,8 +1238,8 @@ test("a committed replacement crash converges from stale public state", async ()
     await waitForLog(recovered, "control socket listening")
     const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
 
-    assert.equal(status.activeReleaseId, "v1")
-    assert.deepEqual(status.releaseReferences, [{releaseId: "v1", releasePath}])
+    expect(status.activeReleaseId).toBe("v1")
+    expect(status.releaseReferences).toEqual([{releaseId: "v1", releasePath}])
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
     await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
     await shutdown
@@ -1264,11 +1275,11 @@ test("replacement transfers an unchanged fixed proxy listener without reusePort"
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     const output = await collectUntilExitOrLog(candidate, "owner replacement committed")
 
-    assert.equal(output.message, "owner replacement committed", output.output)
+    expect({value: output.message, context: output.output}).toMatchObject({value: "owner replacement committed"})
     const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
     const proxy = /** @type {{port: number}} */ (status.proxy)
 
-    assert.equal(proxy.port, proxyPort)
+    expect(proxy.port).toBe(proxyPort)
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
     await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
     await shutdown
@@ -1299,7 +1310,7 @@ test("direct retired-listener drain updates reach a recovered committed owner", 
     retainedConnection = await openWebSocket(proxyPort)
     candidate = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
     await candidate.replaceIncompatibleOwner()
-    assert.equal(candidate.status().releases[0]?.connectionCount, 1)
+    expect(candidate.status().releases[0]?.connectionCount).toBe(1)
 
     candidate.incumbentListenerControl?.close()
     await candidate.closeServer(candidate.controlServer)
@@ -1307,7 +1318,7 @@ test("direct retired-listener drain updates reach a recovered committed owner", 
     candidate.guardian?.disconnect()
     recovered = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
     await recovered.start({exposeControl: false})
-    assert.equal(recovered.status().releases[0]?.connectionCount, 1)
+    expect(recovered.status().releases[0]?.connectionCount).toBe(1)
 
     retainedConnection.write(Buffer.from([0x88, 0x80, 0, 0, 0, 0]))
     if (owner.proxyClosePromise) await owner.proxyClosePromise
@@ -1316,7 +1327,7 @@ test("direct retired-listener drain updates reach a recovered committed owner", 
     while (Date.now() < deadline && recovered.status().releases[0]?.connectionCount !== 0) {
       await new Promise((resolve) => setTimeout(resolve, 10))
     }
-    assert.equal(recovered.status().releases[0]?.connectionCount, 0)
+    expect(recovered.status().releases[0]?.connectionCount).toBe(0)
   } finally {
     retainedConnection?.destroy()
     await candidate?.closeServer(candidate.controlServer)
@@ -1335,7 +1346,7 @@ test("direct retired-listener drain updates reach a recovered committed owner", 
   }
 })
 
-test("direct listener publication failure rejects the committed replacement", {timeout: 5000}, async () => {
+test("direct listener publication failure rejects the committed replacement", {timeoutMs: 5000}, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-owner-replacement-direct-listener-failure-"))
   const socketPath = path.join(root, "rollbridge.sock")
   const statePath = path.join(root, "state.json")
@@ -1353,10 +1364,7 @@ test("direct listener publication failure rejects the committed replacement", {t
     const replacement = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
 
     candidate = replacement
-    await assert.rejects(
-      () => replacement.replaceIncompatibleOwner(),
-      /Retired listener disconnected before publishing complete connection state/
-    )
+    await expect(replacement.replaceIncompatibleOwner()).rejects.toThrow(/Retired listener disconnected before publishing complete connection state/)
   } finally {
     await candidate?.closeServer(candidate.controlServer)
     await candidate?.closeServer(candidate.proxyServer)
@@ -1391,7 +1399,7 @@ test("control-less fixed-proxy bind failure preserves incumbent authority", asyn
 
     candidate = replacement
     replacement.startProxy = async () => { throw new Error("injected fixed proxy bind failure") }
-    await assert.rejects(() => replacement.replaceIncompatibleOwner(), /injected fixed proxy bind failure/)
+    await expect(replacement.replaceIncompatibleOwner()).rejects.toThrow(/injected fixed proxy bind failure/)
     const deadline = Date.now() + 3000
 
     while (Date.now() < deadline) {
@@ -1404,9 +1412,10 @@ test("control-less fixed-proxy bind failure preserves incumbent authority", asyn
       }
     }
 
-    assert.ok(resumedConnection, "incumbent proxy must resume after candidate bind failure")
-    assert.equal(owner.ownerRetired, false)
-    assert.deepEqual(await owner.guardian?.replacementStatus(), {
+    // Incumbent proxy must resume after candidate bind failure.
+    expect(resumedConnection).toBeTruthy()
+    expect(owner.ownerRetired).toBe(false)
+    expect(await owner.guardian?.replacementStatus()).toEqual({
       committedReplacementId: null,
       ownerClaimed: true,
       retirementFailed: false,
@@ -1456,15 +1465,15 @@ test("owner recovery finalizes a completed control-less listener handoff after c
         throw new Error("injected candidate exit before listener finalization")
       }
     }
-    await assert.rejects(() => replacement.replaceIncompatibleOwner(), /injected candidate exit before listener finalization/)
+    await expect(replacement.replaceIncompatibleOwner()).rejects.toThrow(/injected candidate exit before listener finalization/)
     await replacement.closeServer(replacement.controlServer)
     await replacement.closeServer(replacement.proxyServer)
 
     recovered = new RollbridgeDaemon({config: daemonConfig, logger: () => {}})
     await recovered.start({exposeControl: false})
 
-    assert.equal(recovered.getProxyPort(), proxyPort)
-    assert.equal((await recovered.guardian?.replacementStatus())?.retirementPending, false)
+    expect(recovered.getProxyPort()).toBe(proxyPort)
+    expect((await recovered.guardian?.replacementStatus())?.retirementPending).toBe(false)
   } finally {
     await candidate?.closeServer(candidate.controlServer)
     await candidate?.closeServer(candidate.proxyServer)
@@ -1516,8 +1525,8 @@ test("control-less retirement clears an active source but omits a stopped releas
     await daemon.yieldControlLessOwnerListeners("replacement")
     await daemon.completeControlLessOwnerRetirement("replacement")
 
-    assert.deepEqual(published, [{releaseId: "active", sourceId: daemon.listenerSourceId}])
-    assert.equal(disconnected, true)
+    expect(published).toEqual([{releaseId: "active", sourceId: daemon.listenerSourceId}])
+    expect(disconnected).toBe(true)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -1541,7 +1550,7 @@ test("owner replacement preserves committed generation metadata without firing l
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath, revision: "v1"}, path: oldSocketPath})
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\n")
+    expect(await fs.readFile(lifecycleLogPath, "utf8")).toBe("activate:v1\n")
 
     await writeConfig(configPath, config({activationLogPath: lifecycleLogPath, controlPath: newSocketPath, extraCompanion: true, statePath}))
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
@@ -1550,10 +1559,11 @@ test("owner replacement preserves committed generation metadata without firing l
     const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
     const generationTransition = status.generationTransition
 
-    assert.equal(status.activeReleaseId, "v1")
-    assert.ok(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))
-    assert.equal(generationTransition.phase, "committed")
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\n", "owner replacement must not reactivate an already committed generation")
+    expect(status.activeReleaseId).toBe("v1")
+    if (!(generationTransition && typeof generationTransition === "object" && !Array.isArray(generationTransition))) throw new Error("Expected generation transition status")
+    expect(generationTransition.phase).toBe("committed")
+    // Owner replacement must not reactivate an already committed generation.
+    expect(await fs.readFile(lifecycleLogPath, "utf8")).toBe("activate:v1\n")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
     await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
@@ -1592,23 +1602,24 @@ test("owner replacement excludes stopped retained releases from reserved process
     const activeWorkerPid = releaseProcessPid(before, "v2", "worker")
     const retained = /** @type {{releaseId: string, state: string}[]} */ (before.releases)
 
-    assert.equal(retained.find(({releaseId}) => releaseId === "v1")?.state, "stopped")
+    expect(retained.find(({releaseId}) => releaseId === "v1")?.state).toBe("stopped")
     const persisted = JSON.parse(await fs.readFile(statePath, "utf8"))
     const guardian = new GuardianClient(persisted.recovery.guardian)
 
     await guardian.connect()
-    assert.ok((await guardian.inventory()).some(({key}) => key === "release:v1:worker"), "stopped release registration remains in authenticated guardian inventory")
+    // Stopped release registration remains in authenticated guardian inventory.
+    expect((await guardian.inventory()).some(({key}) => key === "release:v1:worker")).toBe(true)
     guardian.disconnect()
     await writeConfig(configPath, config({controlPath: newSocketPath, extraCompanion: true, statePath}))
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     const output = await collectUntilExitOrLog(candidate, "owner replacement committed")
 
-    assert.equal(output.message, "owner replacement committed", output.output)
+    expect({value: output.message, context: output.output}).toMatchObject({value: "owner replacement committed"})
     const recovered = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
 
-    assert.equal(recovered.activeReleaseId, "v2")
-    assert.equal(releaseProcessPid(recovered, "v2", "worker"), activeWorkerPid)
-    assert.equal(/** @type {{releaseId: string}[]} */ (recovered.releases).some(({releaseId}) => releaseId === "v1"), false)
+    expect(recovered.activeReleaseId).toBe("v2")
+    expect(releaseProcessPid(recovered, "v2", "worker")).toBe(activeWorkerPid)
+    expect(/** @type {{releaseId: string}[]} */ (recovered.releases).some(({releaseId}) => releaseId === "v1")).toBe(false)
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
 
     await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n")
@@ -1620,7 +1631,7 @@ test("owner replacement excludes stopped retained releases from reserved process
   }
 })
 
-test("pruned release connection completion closes the incumbent listener session", () => {
+test("pruned release connection completion closes the incumbent listener session", async () => {
   const daemon = new RollbridgeDaemon({
     config: normalizeConfig(config({controlPath: "/unused/control.sock", extraCompanion: false, statePath: "/unused/state.json"})),
     logger: () => {}
@@ -1635,16 +1646,13 @@ test("pruned release connection completion closes the incumbent listener session
   daemon.incumbentListenerControl = controlSession
   daemon.handleIncumbentListenerEvent({connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session)
 
-  assert.equal(closeCount, 1)
-  assert.equal(daemon.incumbentListenerControl, undefined)
+  expect(closeCount).toBe(1)
+  expect(daemon.incumbentListenerControl).toBe(undefined)
 
   daemon.incumbentListenerControl = controlSession
-  assert.throws(
-    () => daemon.handleIncumbentListenerEvent({connections: {http: 1, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session),
-    /unknown release pruned/
-  )
-  assert.equal(closeCount, 1)
-  assert.equal(daemon.incumbentListenerControl, session)
+  await expect(() => daemon.handleIncumbentListenerEvent({connections: {http: 1, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session)).toThrow(/unknown release pruned/)
+  expect(closeCount).toBe(1)
+  expect(daemon.incumbentListenerControl).toBe(session)
 })
 
 test("same-authority owner replacement preserves completed activation compensation without replaying hooks", async () => {
@@ -1674,16 +1682,17 @@ test("same-authority owner replacement preserves completed activation compensati
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
-    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath}), /activate command exited non-zero/)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
+    await expect(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath})).rejects.toThrow(/activate command exited non-zero/)
+    expect(await fs.readFile(lifecycleLogPath, "utf8")).toBe("activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
 
     await writeConfig(configPath, failedConfig(oldSocketPath, false))
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(candidate, "owner replacement committed")
     const status = await sendControlCommand({command: {command: "status"}, path: oldSocketPath})
-    assert.equal(status.activeReleaseId, "v1")
-    assert.equal(status.generationTransition, undefined)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n", "replacement must not replay completed compensation hooks")
+    expect(status.activeReleaseId).toBe("v1")
+    expect(status.generationTransition).toBe(undefined)
+    // Replacement must not replay completed compensation hooks.
+    expect(await fs.readFile(lifecycleLogPath, "utf8")).toBe("activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: oldSocketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -1723,18 +1732,18 @@ test("config-changing owner replacement proceeds after activation compensation c
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: oldSocketPath})
-    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath}), /activate command exited non-zero/)
+    await expect(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: oldSocketPath})).rejects.toThrow(/activate command exited non-zero/)
     await writeConfig(configPath, failedConfig(newSocketPath, true))
 
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     const result = await collectUntilExitOrLog(candidate, "owner replacement committed")
 
-    assert.equal(result.message, "owner replacement committed", result.output)
+    expect({value: result.message, context: result.output}).toMatchObject({value: "owner replacement committed"})
     const status = await sendControlCommand({command: {command: "status"}, path: newSocketPath})
 
-    assert.equal(status.activeReleaseId, "v1")
-    assert.equal(status.generationTransition, undefined)
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
+    expect(status.activeReleaseId).toBe("v1")
+    expect(status.generationTransition).toBe(undefined)
+    expect(await fs.readFile(lifecycleLogPath, "utf8")).toBe("activate:v1\nretire:v1\nretire:v2\nactivate:v1\n")
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: newSocketPath})
 
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -1773,9 +1782,9 @@ test("owner replacement admits only the unresolved transition's exact retained c
     ownerConfigDigest(replacementConfig)
   )
 
-  assert.equal(admitted(exactConfig), true)
-  assert.equal(admitted(unrelatedConfig), false)
-  assert.equal(admitted(exactConfig, "/srv/releases/wrong"), false)
+  expect(admitted(exactConfig)).toBe(true)
+  expect(admitted(unrelatedConfig)).toBe(false)
+  expect(admitted(exactConfig, "/srv/releases/wrong")).toBe(false)
 })
 
 test("owner replacement preserves accepted degraded incumbent web authority", async () => {
@@ -1811,11 +1820,11 @@ test("owner replacement preserves accepted degraded incumbent web authority", as
     owner = spawn(process.execPath, [binPath, "daemon", "--config", configPath], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(owner, "control socket listening")
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: socketPath})
-    await assert.rejects(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath}), /pre-commit compensation failed.*status 26/i)
+    await expect(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath})).rejects.toThrow(/pre-commit compensation failed.*status 26/i)
     const before = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const webPid = releaseProcessPid(before, "v1", "web")
 
-    assert.equal(/** @type {{releaseId: string, state: string}[]} */ (before.releases).find(({releaseId}) => releaseId === "v2")?.state, "draining")
+    expect(/** @type {{releaseId: string, state: string}[]} */ (before.releases).find(({releaseId}) => releaseId === "v2")?.state).toBe("draining")
     const recovery = await sendControlCommand({command: {
       acceptRetiredIncumbent: true,
       command: "recover-generation-transition",
@@ -1824,23 +1833,23 @@ test("owner replacement preserves accepted degraded incumbent web authority", as
       releasePath: v2Path,
       revision: "v2"
     }, path: socketPath})
+    await waitForReleaseState(socketPath, "v2", "stopped")
     const accepted = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(recovery.jobsStatus, "degraded")
-    assert.equal(/** @type {{releaseId: string, state: string}[]} */ (accepted.releases).find(({releaseId}) => releaseId === "v2")?.state, "stopped")
-    assert.equal(/** @type {{phase?: string}} */ (accepted.generationTransition).phase, "degraded_active")
+    expect(recovery.jobsStatus).toBe("degraded")
+    expect(/** @type {{releaseId: string, state: string}[]} */ (accepted.releases).find(({releaseId}) => releaseId === "v2")?.state).toBe("stopped")
+    expect(/** @type {{phase?: string}} */ (accepted.generationTransition).phase).toBe("degraded_active")
     replacement = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     await waitForLog(replacement, "owner replacement committed")
-    await new Promise((resolve) => setTimeout(resolve, 250))
     const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
     const response = await fetch(`http://127.0.0.1:${proxyPort}/release`)
 
-    assert.equal(recovered.activeReleaseId, "v1")
-    assert.equal(/** @type {{phase?: string}} */ (recovered.generationTransition).phase, "degraded_active")
-    assert.equal(releaseProcessPid(recovered, "v1", "web"), webPid)
-    assert.equal(response.status, 200)
-    assert.equal((await response.text()).trim(), "v1")
-    assert.equal(await fs.readFile(lifecycleLogPath, "utf8"), "activate:v1\nretire:v1\nretire:v2\n")
+    expect(recovered.activeReleaseId).toBe("v1")
+    expect(/** @type {{phase?: string}} */ (recovered.generationTransition).phase).toBe("degraded_active")
+    expect(releaseProcessPid(recovered, "v1", "web")).toBe(webPid)
+    expect(response.status).toBe(200)
+    expect((await response.text()).trim()).toBe("v1")
+    expect(await fs.readFile(lifecycleLogPath, "utf8")).toBe("activate:v1\nretire:v1\nretire:v2\n")
   } finally {
     for (const child of [owner, replacement]) if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
     await stopGuardian(statePath)
@@ -1869,8 +1878,8 @@ test("replacement publishes an unchanged control path only after incumbent retir
     candidate = spawn(process.execPath, [binPath, "daemon", "--config", configPath, "--replace-owner"], {stdio: ["ignore", "pipe", "pipe"]})
     const output = await collectUntilExitOrLog(candidate, "owner replacement committed")
 
-    assert.equal(output.message, "owner replacement committed", output.output)
-    assert.equal((await sendControlCommand({command: {command: "status"}, path: socketPath})).activeReleaseId, "v1")
+    expect({value: output.message, context: output.output}).toMatchObject({value: "owner replacement committed"})
+    expect((await sendControlCommand({command: {command: "status"}, path: socketPath})).activeReleaseId).toBe("v1")
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: socketPath})
     await fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")
     await shutdown
@@ -1906,24 +1915,21 @@ test("prepared replacement fences incumbent mutations until abort", async () => 
     await transactionClient.connect()
     const prepared = await transactionClient.prepareOwnerReplacement(authority, {...authority, configDigest: "candidate-authority"})
 
-    await assert.rejects(
-      sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath})
-        .then((response) => {
-          v2Started = true
-          return response
-        }),
-      /replacement.*prepared|mutation.*fenced/i
-    )
+    await expect(sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath})
+      .then((response) => {
+        v2Started = true
+        return response
+      })).rejects.toThrow(/replacement.*prepared|mutation.*fenced/i)
     const retained = await sendControlCommand({command: {command: "status"}, path: socketPath})
-    assert.equal(retained.activeReleaseId, "v1")
-    assert.deepEqual(retained.releaseReferences, [{releaseId: "v1", releasePath: v1Path}])
+    expect(retained.activeReleaseId).toBe("v1")
+    expect(retained.releaseReferences).toEqual([{releaseId: "v1", releasePath: v1Path}])
     await transactionClient.abortOwnerReplacement(prepared.replacementId)
     await sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: socketPath})
     v2Started = true
     const afterAbort = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(afterAbort.activeReleaseId, "v2")
-    assert.deepEqual(afterAbort.releaseReferences, [
+    expect(afterAbort.activeReleaseId).toBe("v2")
+    expect(afterAbort.releaseReferences).toEqual([
       {releaseId: "v1", releasePath: v1Path},
       {releaseId: "v2", releasePath: v2Path}
     ])
@@ -2006,8 +2012,8 @@ async function prepareCandidatePackage(destination, options = {}) {
     const sessionMarker = "    this.socket.write(`${JSON.stringify(command)}\\n`)\n    return await response\n"
     const sessionInjection = "    this.socket.write(`${JSON.stringify(command)}\\n`)\n    const result = await response\n    if (command.command === \"commit-owner-replacement\") throw new Error(\"injected lost commit response\")\n    return result\n"
 
-    assert.ok(source.includes(marker))
-    assert.ok(source.includes(sessionMarker))
+    expect(source.includes(marker)).toBeTruthy()
+    expect(source.includes(sessionMarker)).toBeTruthy()
     await fs.writeFile(clientPath, source.replace(marker, injected).replace(sessionMarker, sessionInjection))
   }
 }
@@ -2031,15 +2037,15 @@ async function removeDaemonRecoveryCapability(packagePath, {abortedPath, prepare
 
 `
 
-  assert.ok(source.includes(capability))
-  assert.ok(source.includes(incumbentAbortNotification))
+  expect(source.includes(capability)).toBeTruthy()
+  expect(source.includes(incumbentAbortNotification)).toBeTruthy()
   await fs.writeFile(guardianPath, source.replace(capability, legacyCapability))
   const daemonSource = await fs.readFile(daemonPath, "utf8")
   const preparedHandler = "    this.guardian.onEvent(\"replacement-prepared\", () => {\n      for (const release of this.releases.values()) release.pauseDrainForOwnerHandoff()\n"
   const abortedHandler = "    this.guardian.onEvent(\"replacement-aborted\", () => {\n"
 
-  assert.ok(daemonSource.includes(preparedHandler))
-  assert.ok(daemonSource.includes(abortedHandler))
+  expect(daemonSource.includes(preparedHandler)).toBeTruthy()
+  expect(daemonSource.includes(abortedHandler)).toBeTruthy()
   await fs.writeFile(daemonPath, daemonSource
     .replace(preparedHandler, `${preparedHandler}      void fs.writeFile(${JSON.stringify(preparedPath)}, "paused\\n")\n`)
     .replace(abortedHandler, `${abortedHandler}      void fs.writeFile(${JSON.stringify(abortedPath)}, "aborted\\n")\n`))
@@ -2106,7 +2112,7 @@ async function startPartialGuardian({backendPath, mode, socketPath, token}) {
     })
   })
   if (child.connected) await once(child, "disconnect")
-  assert.ok(child.pid)
+  if (!child.pid) throw new Error("Missing required fixture: child.pid")
   return child
 }
 
@@ -2136,7 +2142,7 @@ async function closeServer(server) {
  */
 async function makeFifo(fifoPath) {
   const child = spawn("mkfifo", [fifoPath])
-  assert.equal((await once(child, "exit"))[0], 0)
+  expect((await once(child, "exit"))[0]).toBe(0)
 }
 
 /**
@@ -2222,7 +2228,7 @@ async function run(command, args) {
   child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk })
   child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
   const [code] = await once(child, "exit")
-  assert.ok(child.pid)
+  if (!child.pid) throw new Error("Missing required fixture: child.pid")
   return {code, pid: child.pid, stderr, stdout}
 }
 
@@ -2232,8 +2238,8 @@ async function run(command, args) {
  * @returns {Promise<void>} Resolves after the matching log event.
  */
 async function waitForLog(child, message) {
-  assert.ok(child.stdout)
-  assert.ok(child.stderr)
+  if (!child.stdout) throw new Error("Missing required fixture: child.stdout")
+  if (!child.stderr) throw new Error("Missing required fixture: child.stderr")
   child.stdout.setEncoding("utf8")
   child.stderr.setEncoding("utf8")
   await new Promise((resolve, reject) => {
@@ -2268,8 +2274,8 @@ async function waitForLog(child, message) {
  * @returns {Promise<{message?: string, output: string}>} Exit output or matched message.
  */
 async function collectUntilExitOrLog(child, message) {
-  assert.ok(child.stdout)
-  assert.ok(child.stderr)
+  if (!child.stdout) throw new Error("Missing required fixture: child.stdout")
+  if (!child.stderr) throw new Error("Missing required fixture: child.stderr")
   const stdout = child.stdout
   const stderr = child.stderr
 
@@ -2323,7 +2329,7 @@ async function openWebSocket(port) {
   ].join("\r\n"))
   const [response] = await once(socket, "data")
 
-  assert.match(String(response), /^HTTP\/1\.1 101 /)
+  expect(String(response)).toMatch(/^HTTP\/1\.1 101 /)
   return socket
 }
 

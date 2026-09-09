@@ -1,12 +1,11 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
 import {recoverOrphans} from "../src/recover.js"
@@ -70,7 +69,7 @@ test("recover requires a configured statePath", async () => {
   try {
     const result = await recoverOrphans({config: buildConfig(dir), force: true})
 
-    assert.ok("error" in result && /statePath/.test(result.error))
+    expect("error" in result && /statePath/.test(result.error)).toBeTruthy()
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -86,14 +85,16 @@ test("recover lists orphans without stopping them unless forced", async () => {
 
     const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: false})
 
-    assert.ok(!("error" in result))
-    assert.equal(result.forced, false)
-    assert.equal(result.cleared, false)
-    assert.deepEqual(result.remaining, [])
-    assert.equal(result.orphans.length, 1)
-    assert.equal(result.orphans[0].pid, orphan.pid)
-    assert.ok(orphan.pid !== undefined && isProcessAlive(orphan.pid), "the orphan must not be stopped by a dry run")
-    assert.ok(await readState(statePath), "a dry run must not clear the state file")
+    if ("error" in result) throw new Error(`Recovery failed: ${result.error}`)
+    expect(result.forced).toBe(false)
+    expect(result.cleared).toBe(false)
+    expect(result.remaining).toEqual([])
+    expect(result.orphans.length).toBe(1)
+    expect(result.orphans[0].pid).toBe(orphan.pid)
+    // The orphan must not be stopped by a dry run.
+    expect(orphan.pid !== undefined && isProcessAlive(orphan.pid)).toBeTruthy()
+    // A dry run must not clear the state file.
+    expect(await readState(statePath)).toBeTruthy()
   } finally {
     orphan.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
@@ -110,12 +111,13 @@ test("recover --force stops orphan process groups and clears the state file", as
 
     const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: true})
 
-    assert.ok(!("error" in result))
-    assert.equal(result.forced, true)
-    assert.equal(result.cleared, true)
-    assert.deepEqual(result.remaining, [])
+    if ("error" in result) throw new Error(`Recovery failed: ${result.error}`)
+    expect(result.forced).toBe(true)
+    expect(result.cleared).toBe(true)
+    expect(result.remaining).toEqual([])
     await waitFor(() => orphan.pid === undefined || !isProcessAlive(orphan.pid))
-    assert.equal(await readState(statePath), undefined, "the state file is cleared after a forced recovery")
+    // The state file is cleared after a forced recovery.
+    expect(await readState(statePath)).toBe(undefined)
   } finally {
     orphan.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
@@ -134,12 +136,14 @@ test("recover --force keeps the state file when an orphan cannot be stopped", as
     // reports it is still alive.
     const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: true, stopGroup: async () => false})
 
-    assert.ok(!("error" in result))
-    assert.equal(result.forced, true)
-    assert.equal(result.cleared, false, "the state file is kept when an orphan survives")
-    assert.equal(result.remaining.length, 1)
-    assert.equal(result.remaining[0].pid, orphan.pid)
-    assert.ok(await readState(statePath), "the state file must remain so the operator can retry")
+    if ("error" in result) throw new Error(`Recovery failed: ${result.error}`)
+    expect(result.forced).toBe(true)
+    // The state file is kept when an orphan survives.
+    expect(result.cleared).toBe(false)
+    expect(result.remaining.length).toBe(1)
+    expect(result.remaining[0].pid).toBe(orphan.pid)
+    // The state file must remain so the operator can retry.
+    expect(await readState(statePath)).toBeTruthy()
   } finally {
     orphan.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
@@ -156,7 +160,7 @@ test("recover refuses while a daemon is running", async () => {
   try {
     const result = await recoverOrphans({config, force: true})
 
-    assert.ok("error" in result && /is using/.test(result.error))
+    expect("error" in result && /is using/.test(result.error)).toBeTruthy()
   } finally {
     await daemon.shutdown()
     await fs.rm(dir, {force: true, recursive: true})

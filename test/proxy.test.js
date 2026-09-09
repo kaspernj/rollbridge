@@ -1,10 +1,9 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import RollbridgeDaemon from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
@@ -54,11 +53,11 @@ async function proxyFetch(daemon, pathName) {
 function webPid(daemon, releaseId) {
   const release = daemon.status().releases.find((candidate) => candidate.releaseId === releaseId)
 
-  assert.ok(release, `Release ${releaseId} should be present`)
+  if (!release) throw new Error(`Release ${releaseId} should be present`)
 
   const web = release.processes.find((candidate) => candidate.id === "web")
 
-  assert.ok(web && typeof web.pid === "number", "web process should report a pid")
+  if (!(web && typeof web.pid === "number")) throw new Error("web process should report a pid")
 
   return web.pid
 }
@@ -86,7 +85,7 @@ test("proxy returns 502 while the active release web process is down", async () 
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
-    assert.equal((await proxyFetch(daemon, "/release")).status, 200)
+    expect((await proxyFetch(daemon, "/release")).status).toBe(200)
 
     // Kill the web process group so the active release exits unexpectedly; restart is held off for 60s.
     process.kill(-webPid(daemon, "v1"), "SIGKILL")
@@ -99,7 +98,7 @@ test("proxy returns 502 while the active release web process is down", async () 
       return lastStatus === 502
     })
 
-    assert.equal(lastStatus, 502)
+    expect(lastStatus).toBe(502)
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})
@@ -114,7 +113,7 @@ test("proxy recovers once the crashed web process restarts", async () => {
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: root, revision: "v1"})
-    assert.equal((await proxyFetch(daemon, "/release")).status, 200)
+    expect((await proxyFetch(daemon, "/release")).status).toBe(200)
 
     process.kill(-webPid(daemon, "v1"), "SIGKILL")
 
@@ -122,7 +121,7 @@ test("proxy recovers once the crashed web process restarts", async () => {
     // observing the outage, then confirm the restart brings the proxy back to 200.
     await waitFor(async () => (await proxyFetch(daemon, "/release")).status === 502)
     await waitFor(async () => (await proxyFetch(daemon, "/release")).status === 200)
-    assert.equal((await proxyFetch(daemon, "/release")).status, 200)
+    expect((await proxyFetch(daemon, "/release")).status).toBe(200)
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})

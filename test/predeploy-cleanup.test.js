@@ -1,12 +1,11 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {normalizeConfig} from "../src/config.js"
 import {isProcessAlive} from "../src/state-store.js"
 import {predeployCleanup} from "../src/predeploy-cleanup.js"
@@ -41,11 +40,11 @@ test("predeploy cleanup stops configured legacy process when no daemon is active
   try {
     const result = await predeployCleanup({config: buildConfig(dir, marker)})
 
-    assert.equal(result.action, "no-daemon-cleaned")
-    assert.equal(result.recoveredOrphans, 0)
-    assert.equal(result.legacyProcesses.length, 1)
-    assert.equal(result.legacyProcesses[0].pid, legacy.pid)
-    assert.ok(legacy.pid === undefined || !isProcessAlive(legacy.pid))
+    expect(result.action).toBe("no-daemon-cleaned")
+    expect(result.recoveredOrphans).toBe(0)
+    expect(result.legacyProcesses.length).toBe(1)
+    expect(result.legacyProcesses[0].pid).toBe(legacy.pid)
+    expect(legacy.pid === undefined || !isProcessAlive(legacy.pid)).toBeTruthy()
   } finally {
     legacy.kill("SIGKILL")
     await fs.rm(dir, {force: true, recursive: true})
@@ -76,7 +75,7 @@ test("predeploy cleanup leaves legacy processes alone when daemon already has an
       })
     })
 
-    assert.deepEqual(result, {
+    expect(result).toEqual({
       action: "daemon-active",
       legacyProcesses: [],
       recoveredOrphans: 0
@@ -125,8 +124,8 @@ test("predeploy cleanup stops an active daemon when the proxy config changed", a
       }
     })
 
-    assert.equal(result.action, "daemon-stopped")
-    assert.deepEqual(commands.map((command) => command.command), ["status", "shutdown"])
+    expect(result.action).toBe("daemon-stopped")
+    expect(commands.map((command) => command.command)).toEqual(["status", "shutdown"])
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }

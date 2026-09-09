@@ -1,10 +1,9 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {loadConfig, resolveConfigPath} from "../src/config.js"
 import {runCli} from "../src/cli.js"
 
@@ -36,7 +35,7 @@ test("resolveConfigPath returns an explicit path unchanged", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-cfgpath-"))
 
   try {
-    assert.equal(await resolveConfigPath("/somewhere/custom.js", dir), "/somewhere/custom.js")
+    expect(await resolveConfigPath("/somewhere/custom.js", dir)).toBe("/somewhere/custom.js")
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -48,7 +47,7 @@ test("resolveConfigPath resolves rollbridge.js in the working directory", async 
   try {
     await writeConfigModule(dir)
 
-    assert.equal(await resolveConfigPath(undefined, dir), path.join(dir, "rollbridge.js"))
+    expect(await resolveConfigPath(undefined, dir)).toBe(path.join(dir, "rollbridge.js"))
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -58,10 +57,7 @@ test("resolveConfigPath throws an actionable error when no default config exists
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-cfgpath-"))
 
   try {
-    await assert.rejects(
-      () => resolveConfigPath(undefined, dir),
-      /No config file found.*rollbridge\.js/
-    )
+    await expect(resolveConfigPath(undefined, dir)).rejects.toThrow(/No config file found.*rollbridge\.js/)
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -72,11 +68,11 @@ test("loadConfig reloads a changed CommonJS module", async () => {
   const configPath = await writeConfigModule(dir)
 
   try {
-    assert.equal((await loadConfig(configPath)).application, "demo")
+    expect((await loadConfig(configPath)).application).toBe("demo")
 
     await fs.writeFile(configPath, `module.exports = ${JSON.stringify({...validConfig, application: "updated"}, null, 2)}\n`)
 
-    assert.equal((await loadConfig(configPath)).application, "updated")
+    expect((await loadConfig(configPath)).application).toBe("updated")
   } finally {
     await fs.rm(dir, {force: true, recursive: true})
   }
@@ -103,6 +99,6 @@ test("validate CLI command resolves the default config when --config is omitted"
     await fs.rm(dir, {force: true, recursive: true})
   }
 
-assert.match(lines.join("\n"), /rollbridge\.js is valid: 1 process, proxy on 127\.0\.0\.1:8182\./)
+  expect(lines.join("\n")).toMatch(/rollbridge\.js is valid: 1 process, proxy on 127\.0\.0\.1:8182\./)
 })
 })

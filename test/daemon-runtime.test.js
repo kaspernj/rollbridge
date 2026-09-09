@@ -1,10 +1,9 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {prepareDaemonRuntime} from "../src/daemon-runtime.js"
 
 describe("daemon-runtime", () => {
@@ -21,13 +20,13 @@ test("concurrent runtime preparation converges on one validated content-addresse
       prepareDaemonRuntime(root)
     ])
 
-    assert.deepEqual(identities, [identities[0], identities[0], identities[0]])
-    assert.match(identities[0].digest, /^[a-f0-9]{64}$/)
-    assert.equal(path.dirname(identities[0].path), root)
-    assert.equal(JSON.parse(await fs.readFile(path.join(identities[0].path, "runtime.json"), "utf8")).digest, identities[0].digest)
+    expect(identities).toEqual([identities[0], identities[0], identities[0]])
+    expect(identities[0].digest).toMatch(/^[a-f0-9]{64}$/)
+    expect(path.dirname(identities[0].path)).toBe(root)
+    expect(JSON.parse(await fs.readFile(path.join(identities[0].path, "runtime.json"), "utf8")).digest).toBe(identities[0].digest)
 
     const entries = (await fs.readdir(root)).filter((entry) => entry.startsWith(".prepare-"))
-    assert.deepEqual(entries, [])
+    expect(entries).toEqual([])
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -40,7 +39,7 @@ test("preparation fails closed when an existing content-addressed snapshot is co
     const identity = await prepareDaemonRuntime(root)
 
     await fs.writeFile(path.join(identity.path, "src", "daemon.js"), "corrupt\n")
-    await assert.rejects(() => prepareDaemonRuntime(root), /runtime validation failed/)
+    await expect(prepareDaemonRuntime(root)).rejects.toThrow(/runtime validation failed/)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -55,11 +54,11 @@ posixPermissionsTest("runtime preparation rejects a symlinked or shared-writable
   try {
     await fs.mkdir(target)
     await fs.symlink(target, symlink, "dir")
-    await assert.rejects(() => prepareDaemonRuntime(symlink), /must be a real directory/)
+    await expect(prepareDaemonRuntime(symlink)).rejects.toThrow(/must be a real directory/)
 
     await fs.mkdir(shared, {mode: 0o777})
     await fs.chmod(shared, 0o777)
-    await assert.rejects(() => prepareDaemonRuntime(shared), /must not be writable by group or other users/)
+    await expect(prepareDaemonRuntime(shared)).rejects.toThrow(/must not be writable by group or other users/)
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -73,10 +72,7 @@ posixPermissionsTest("runtime preparation rejects a private leaf beneath a repla
     await fs.chmod(unsafeAncestor, 0o777)
     await fs.mkdir(privateLeaf, {mode: 0o700})
 
-    await assert.rejects(
-      () => prepareDaemonRuntime(privateLeaf),
-      /ancestor must be sticky or not writable by group or other users/
-    )
+    await expect(prepareDaemonRuntime(privateLeaf)).rejects.toThrow(/ancestor must be sticky or not writable by group or other users/)
   } finally {
     await fs.chmod(unsafeAncestor, 0o700)
     await fs.rm(unsafeAncestor, {force: true, recursive: true})

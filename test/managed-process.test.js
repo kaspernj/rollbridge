@@ -1,10 +1,9 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import ManagedProcess from "../src/managed-process.js"
 
@@ -53,9 +52,9 @@ test("retains and reports only the configured number of recent output lines", ()
 
   const {logs} = managed.status()
 
-  assert.equal(logs.length, 3)
-  assert.deepEqual(logs.map((entry) => entry.line), ["c", "d", "e"])
-  assert.equal(logs[0].stream, "stdout")
+  expect(logs.length).toBe(3)
+  expect(logs.map((entry) => entry.line)).toEqual(["c", "d", "e"])
+  expect(logs[0].stream).toBe("stdout")
 })
 
 test("keeps every output line when fewer than the retention limit are produced", () => {
@@ -65,17 +64,17 @@ test("keeps every output line when fewer than the retention limit are produced",
 
   const {logs} = managed.status()
 
-  assert.deepEqual(logs.map((entry) => entry.line), ["one", "two"])
+  expect(logs.map((entry) => entry.line)).toEqual(["one", "two"])
 })
 
 test("reassembles output lines split across stream chunks", () => {
   const managed = buildProcess(50)
 
   managed.appendLog("stdout", "8191:x")
-  assert.deepEqual(managed.status().logs, [])
+  expect(managed.status().logs).toEqual([])
 
   managed.appendLog("stdout", "xx\n")
-  assert.deepEqual(managed.status().logs.map((entry) => entry.line), ["8191:xxx"])
+  expect(managed.status().logs.map((entry) => entry.line)).toEqual(["8191:xxx"])
 })
 
 test("bounds an output fragment that never terminates", () => {
@@ -84,8 +83,8 @@ test("bounds an output fragment that never terminates", () => {
 
   managed.appendLog("stdout", fragment)
 
-  assert.equal(managed.status().logs.length, 15)
-  assert.equal(managed.outputBuffers.stdout.length, 64 * 1024)
+  expect(managed.status().logs.length).toBe(15)
+  expect(managed.outputBuffers.stdout.length).toBe(64 * 1024)
 })
 
 test("emits each output line after retaining it", () => {
@@ -97,7 +96,7 @@ test("emits each output line after retaining it", () => {
   })
   managed.appendLog("stdout", "ready\n")
 
-  assert.deepEqual(observed, {
+  expect(observed).toEqual({
     entry: managed.status().logs[0],
     retained: managed.status().logs
   })
@@ -106,10 +105,10 @@ test("emits each output line after retaining it", () => {
 test("reports zeroed restart and uptime fields before the process starts", () => {
   const status = buildProcess(50).status()
 
-  assert.equal(status.restarts, 0)
-  assert.equal(status.startedAt, undefined)
-  assert.equal(status.uptimeMs, undefined)
-  assert.equal(status.state, "stopped")
+  expect(status.restarts).toBe(0)
+  expect(status.startedAt).toBe(undefined)
+  expect(status.uptimeMs).toBe(undefined)
+  expect(status.state).toBe("stopped")
 })
 
 test("counts automatic restarts and reports startedAt and uptime while running", async () => {
@@ -130,15 +129,15 @@ test("counts automatic restarts and reports startedAt and uptime while running",
 
     const initial = managed.status()
 
-    assert.equal(initial.restarts, 0)
-    assert.equal(initial.state, "running")
-    assert.equal(typeof initial.startedAt, "string")
-    assert.ok(typeof initial.uptimeMs === "number" && initial.uptimeMs >= 0)
+    expect(initial.restarts).toBe(0)
+    expect(initial.state).toBe("running")
+    expect(typeof initial.startedAt).toBe("string")
+    expect(typeof initial.uptimeMs === "number" && initial.uptimeMs >= 0).toBeTruthy()
 
     // The fixture exits non-zero ~40ms after each start, so it keeps auto-restarting.
     await waitFor(() => managed.status().restarts >= 2)
 
-    assert.ok(managed.status().restarts >= 2)
+    expect(managed.status().restarts >= 2).toBeTruthy()
   } finally {
     await managed.stop()
   }
@@ -164,7 +163,7 @@ test("a queued auto-restart timer is unref'd so it can't keep the process alive"
     // ref'd timer would respawn forever and block process exit, so the queued timer must be unref'd.
     await waitFor(() => managed.restartTimer !== undefined)
 
-    assert.equal(managed.restartTimer?.hasRef(), false)
+    expect(managed.restartTimer?.hasRef()).toBe(false)
   } finally {
     await managed.stop()
   }
@@ -196,12 +195,12 @@ test("records the start reason, marking crash auto-restarts", async () => {
   try {
     await managed.start()
 
-    assert.equal(managed.status().lastStartReason, "deploy")
+    expect(managed.status().lastStartReason).toBe("deploy")
 
     // The fixture crashes ~40ms after each start, so it auto-restarts with reason "crash".
     await waitFor(() => managed.status().restarts >= 1)
 
-    assert.equal(managed.status().lastStartReason, "crash")
+    expect(managed.status().lastStartReason).toBe("crash")
   } finally {
     await managed.stop()
   }
@@ -214,7 +213,7 @@ test("records the manual start reason", async () => {
   try {
     await managed.start("manual")
 
-    assert.equal(managed.status().lastStartReason, "manual")
+    expect(managed.status().lastStartReason).toBe("manual")
   } finally {
     await managed.stop()
   }
@@ -234,8 +233,8 @@ test("a later stop cancels a start queued behind an in-flight stop", async () =>
   finishStop()
   await Promise.all([queuedStart, finalStop])
   try {
-    assert.equal(managed.status().pid, undefined)
-    assert.equal(managed.status().state, "stopped")
+    expect(managed.status().pid).toBe(undefined)
+    expect(managed.status().state).toBe("stopped")
   } finally {
     await managed.stop()
   }
@@ -255,8 +254,8 @@ test("does not record a start reason when the spawn fails", async () => {
   })
 
   // The cwd does not exist, so the spawn fails before the process ever runs.
-  await assert.rejects(() => managed.start("manual"))
-  assert.equal(managed.status().lastStartReason, undefined)
+  await expect(managed.start("manual")).rejects.toThrow()
+  expect(managed.status().lastStartReason).toBe(undefined)
 })
 
 /**
@@ -300,9 +299,9 @@ test("runs quiet and drain lifecycle hooks before stopping", async () => {
     await managed.start()
     await managed.stop()
 
-    assert.equal(managed.status().state, "stopped")
+    expect(managed.status().state).toBe("stopped")
     // quietCommand ran, then drainCommand, then the worker was stopped via stopSignal.
-    assert.deepEqual(fs.readFileSync(logPath, "utf8").trim().split("\n"), ["quiet", "drain"])
+    expect(fs.readFileSync(logPath, "utf8").trim().split("\n")).toEqual(["quiet", "drain"])
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
@@ -340,10 +339,10 @@ test("a configured stopCommand is used instead of the stop signal", async () => 
     await managed.start()
     await managed.stop()
 
-    assert.equal(managed.status().state, "stopped")
-    assert.deepEqual(fs.readFileSync(logPath, "utf8").trim().split("\n"), ["stop"])
+    expect(managed.status().state).toBe("stopped")
+    expect(fs.readFileSync(logPath, "utf8").trim().split("\n")).toEqual(["stop"])
     // The stop signal is replaced by the stop command (only a SIGKILL fallback may be sent).
-    assert.ok(!signals.includes("SIGTERM"), `expected no stopSignal, got ${signals.join(",")}`)
+    expect({value: Boolean(!signals.includes("SIGTERM")), context: `expected no stopSignal, got ${signals.join(",")}`}).toMatchObject({value: true})
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
@@ -378,7 +377,7 @@ test("stopCommand receives the retained process group id after the shell exits",
 
     await managed.stop()
 
-    assert.equal(fs.readFileSync(pidPath, "utf8").trim(), String(pgid))
+    expect(fs.readFileSync(pidPath, "utf8").trim()).toBe(String(pgid))
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
@@ -406,8 +405,8 @@ test("a failing lifecycle hook is logged but does not fail the stop", async () =
     await managed.start()
     await managed.stop()
 
-    assert.equal(managed.status().state, "stopped")
-    assert.ok(messages.includes("quiet command exited non-zero"), `expected a non-zero hook log, got ${messages.join(",")}`)
+    expect(managed.status().state).toBe("stopped")
+    expect({value: Boolean(messages.includes("quiet command exited non-zero")), context: `expected a non-zero hook log, got ${messages.join(",")}`}).toMatchObject({value: true})
   } finally {
     await managed.stop()
   }
@@ -435,9 +434,9 @@ test("a hanging lifecycle hook is bounded so stop still completes", async () => 
 
     await managed.stop()
 
-    assert.equal(managed.status().state, "stopped")
+    expect(managed.status().state).toBe("stopped")
     // The hung quietCommand is killed at stopTimeoutMs rather than blocking stop indefinitely.
-    assert.ok(Date.now() - startedAt < 5000, "stop should not wait for the hung hook")
+    expect(Date.now() - startedAt < 5000).toBe(true)
   } finally {
     await managed.stop()
   }
@@ -451,7 +450,7 @@ test("activateStrict runs the configured activation command once per call and re
     await managed.start()
     const pid = managed.pid
 
-    assert.ok(pid)
+    expect(pid).toBeTruthy()
     managed.lifecycle = {activateCommand: "jobs activate", activateTimeoutMs: 60000, drainTimeoutMs: 0}
     managed.runHook = async (command, timeoutMs, label, hookPid) => {
       commands.push({command, label, pid: hookPid, timeoutMs})
@@ -459,10 +458,10 @@ test("activateStrict runs the configured activation command once per call and re
     }
 
     await managed.activateStrict()
-    assert.deepEqual(commands, [{command: "jobs activate", label: "activate command", pid, timeoutMs: 60000}])
+    expect(commands).toEqual([{command: "jobs activate", label: "activate command", pid, timeoutMs: 60000}])
 
     managed.runHook = async () => new Error("activation rejected")
-    await assert.rejects(() => managed.activateStrict(), /activation rejected/)
+    await expect(managed.activateStrict()).rejects.toThrow(/activation rejected/)
   } finally {
     await managed.stop()
   }
@@ -484,8 +483,8 @@ test("activateStrict rejects when the activated process is replaced while its ho
       return undefined
     }
 
-    await assert.rejects(() => managed.activateStrict(), /exited before activation completed/)
-    assert.equal(managed.lifecycleRole, "candidate")
+    await expect(managed.activateStrict()).rejects.toThrow(/exited before activation completed/)
+    expect(managed.lifecycleRole).toBe("candidate")
   } finally {
     managed.child = child
     managed.pid = pid
@@ -503,8 +502,8 @@ test("activateStrict rejects an activation request when its process is not runni
     return undefined
   }
 
-  await assert.rejects(() => managed.activateStrict(), /is not running for activation/)
-  assert.equal(hookRan, false)
+  await expect(managed.activateStrict()).rejects.toThrow(/is not running for activation/)
+  expect(hookRan).toBe(false)
 })
 
 test("reactivateStrict restores a retained quiesced process only after activation succeeds", async () => {
@@ -521,14 +520,14 @@ test("reactivateStrict restores a retained quiesced process only after activatio
   try {
     await managed.start()
     await managed.quiesceStrict()
-    await assert.rejects(() => managed.reactivateStrict(), /restoration rejected/)
-    assert.equal(managed.status().state, "quiesced")
-    assert.equal(managed.status().lifecycleRole, "retired")
+    await expect(managed.reactivateStrict()).rejects.toThrow(/restoration rejected/)
+    expect(managed.status().state).toBe("quiesced")
+    expect(managed.status().lifecycleRole).toBe("retired")
 
     await managed.reactivateStrict()
-    assert.equal(managed.status().state, "running")
-    assert.equal(managed.status().lifecycleRole, "active")
-    assert.deepEqual(hooks, ["quiet command", "activate command", "activate command"])
+    expect(managed.status().state).toBe("running")
+    expect(managed.status().lifecycleRole).toBe("active")
+    expect(hooks).toEqual(["quiet command", "activate command", "activate command"])
   } finally {
     await managed.stop()
   }
@@ -545,15 +544,15 @@ test("reactivateStrict retries a failed active-role startup against the retained
   }
 
   try {
-    await assert.rejects(() => managed.start("deploy", "active"), /startup activation raced readiness/)
+    await expect(managed.start("deploy", "active")).rejects.toThrow(/startup activation raced readiness/)
     const failed = managed.status()
 
-    assert.equal(failed.state, "failed")
-    assert.ok(failed.pid)
+    expect(failed.state).toBe("failed")
+    expect(failed.pid).toBeTruthy()
     await managed.reactivateStrict()
-    assert.equal(managed.status().state, "running")
-    assert.equal(managed.status().lifecycleRole, "active")
-    assert.equal(managed.status().pid, failed.pid)
+    expect(managed.status().state).toBe("running")
+    expect(managed.status().lifecycleRole).toBe("active")
+    expect(managed.status().pid).toBe(failed.pid)
   } finally {
     await managed.stop()
   }
@@ -581,19 +580,22 @@ test("quiesce waits for active-role restoration before retiring a restarted proc
     }
     return undefined
   }
-  const start = assert.rejects(() => managed.start("crash", "active"), /quiesced before lifecycle role active was restored/)
+  const start = (async () => {
+    await expect(managed.start("crash", "active")).rejects.toThrow(/quiesced before lifecycle role active was restored/)
+  })()
 
   try {
     await activationStarted
     const quiesce = managed.quiesceStrict()
 
     await Promise.resolve()
-    assert.deepEqual(hooks, ["activate:start"], "retirement must not race ahead of role restoration")
+    // Retirement must not race ahead of role restoration.
+    expect(hooks).toEqual(["activate:start"])
     allowActivation()
     await Promise.all([start, quiesce])
-    assert.deepEqual(hooks, ["activate:start", "activate:end", "quiet"])
-    assert.equal(managed.status().state, "quiesced")
-    assert.equal(managed.lifecycleRole, "retired")
+    expect(hooks).toEqual(["activate:start", "activate:end", "quiet"])
+    expect(managed.status().state).toBe("quiesced")
+    expect(managed.lifecycleRole).toBe("retired")
   } finally {
     allowActivation()
     await start.catch(() => {})
@@ -632,8 +634,8 @@ test("sends the configured stopSignal as the graceful stop signal", async () => 
     await managed.stop()
 
     // The graceful stop reaches the ready descendant and its shell leader without SIGKILL.
-    assert.deepEqual(signals, ["SIGINT", "SIGINT"])
-    assert.equal(managed.status().state, "stopped")
+    expect(signals).toEqual(["SIGINT", "SIGINT"])
+    expect(managed.status().state).toBe("stopped")
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
@@ -666,8 +668,8 @@ test("indefinite stop waits for the process to exit without SIGKILL", async () =
     await managed.start()
     await managed.stop()
 
-    assert.equal(managed.status().state, "stopped")
-    assert.deepEqual(signals, ["SIGTERM", "SIGTERM"])
+    expect(managed.status().state).toBe("stopped")
+    expect(signals).toEqual(["SIGTERM", "SIGTERM"])
   } finally {
     await managed.stop()
   }
@@ -706,9 +708,9 @@ test("stop waits for process group descendants after the detached shell exits", 
 
     const elapsedMs = Date.now() - startedAt
 
-    assert.ok(elapsedMs >= 250, `stop resolved after only ${elapsedMs}ms`)
-    assert.ok(elapsedMs < 1500, `stop took ${elapsedMs}ms`)
-    assert.equal(fs.readFileSync(latePath, "utf8"), "late")
+    expect({value: Boolean(elapsedMs >= 250), context: `stop resolved after only ${elapsedMs}ms`}).toMatchObject({value: true})
+    expect({value: Boolean(elapsedMs < 1500), context: `stop took ${elapsedMs}ms`}).toMatchObject({value: true})
+    expect(fs.readFileSync(latePath, "utf8")).toBe("late")
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
@@ -744,7 +746,7 @@ test("stop does not return while a gracefully stopped descendant remains unreape
 
     await managed.stop()
 
-    assert.throws(() => process.kill(childPid, 0), {code: "ESRCH"})
+    await expect(Promise.resolve().then(() => process.kill(childPid, 0))).rejects.toMatchObject({code: "ESRCH"})
   } finally {
     await managed.stop()
     fs.rmSync(dir, {force: true, recursive: true})
@@ -775,7 +777,7 @@ test("descendant reaping and leader shutdown share one graceful deadline", async
   try {
     await managed.stop({timeoutMs: 150})
 
-    assert.deepEqual(calls.slice(0, 2), [
+    expect(calls.slice(0, 2)).toEqual([
       {deadline: 1150, signal: "SIGTERM"},
       {deadline: 1150}
     ])
@@ -791,9 +793,9 @@ test("a memory restart respawns and is counted when the supervisor still wants t
     await managed.start()
     await managed.restartForMemory()
 
-    assert.equal(managed.status().state, "running")
-    assert.equal(managed.memoryRestarts, 1)
-    assert.equal(managed.status().lastStartReason, "memory")
+    expect(managed.status().state).toBe("running")
+    expect(managed.memoryRestarts).toBe(1)
+    expect(managed.status().lastStartReason).toBe("memory")
   } finally {
     await managed.stop()
   }
@@ -805,14 +807,14 @@ test("a memory restart does not respawn when shouldRestart is false", async () =
 
   try {
     await managed.start()
-    assert.equal(managed.status().state, "running")
+    expect(managed.status().state).toBe("running")
 
     // The supervisor (e.g. daemon shutdown or a draining release) no longer wants it running.
     allowRestart = false
     await managed.restartForMemory()
 
-    assert.equal(managed.status().state, "stopped")
-    assert.equal(managed.memoryRestarts, 0)
+    expect(managed.status().state).toBe("stopped")
+    expect(managed.memoryRestarts).toBe(0)
   } finally {
     await managed.stop()
   }
@@ -828,8 +830,8 @@ test("does not auto-restart when the restart policy is disabled (maxRestarts: 0)
     await waitFor(() => managed.status().state === "failed")
     await new Promise((resolve) => setTimeout(resolve, 100))
 
-    assert.equal(managed.status().restarts, 0)
-    assert.equal(managed.status().state, "failed")
+    expect(managed.status().restarts).toBe(0)
+    expect(managed.status().state).toBe("failed")
   } finally {
     await managed.stop()
   }
@@ -849,9 +851,9 @@ test("stops auto-restarting once maxRestarts within the window is reached", asyn
     await waitFor(() => managed.status().restarts === 2 && managed.status().state === "failed")
     await new Promise((resolve) => setTimeout(resolve, 100))
 
-    assert.equal(managed.status().restarts, 2)
-    assert.equal(managed.status().state, "failed")
-    assert.deepEqual(events.find((event) => event.message === "restart limit reached")?.data, {
+    expect(managed.status().restarts).toBe(2)
+    expect(managed.status().state).toBe("failed")
+    expect(events.find((event) => event.message === "restart limit reached")?.data).toEqual({
       id: "crasher",
       maxRestarts: 2,
       windowMs: 60000
@@ -865,24 +867,24 @@ test("applies exponential backoff to restart delays, capped by maxDelayMs", () =
   const capped = buildCrasher({backoffFactor: 2, maxDelayMs: 500, maxRestarts: undefined, windowMs: 0})
 
   // restartDelayMs (10) * 2 ** attempt, capped at 500.
-  assert.equal(capped.restartDelayFor(0), 10)
-  assert.equal(capped.restartDelayFor(1), 20)
-  assert.equal(capped.restartDelayFor(2), 40)
-  assert.equal(capped.restartDelayFor(6), 500) // 10 * 64 = 640, capped to 500
-  assert.equal(capped.restartDelayFor(7), 500)
+  expect(capped.restartDelayFor(0)).toBe(10)
+  expect(capped.restartDelayFor(1)).toBe(20)
+  expect(capped.restartDelayFor(2)).toBe(40)
+  expect(capped.restartDelayFor(6)).toBe(500) // 10 * 64 = 640, capped to 500
+  expect(capped.restartDelayFor(7)).toBe(500)
 
   // maxDelayMs: 0 means no cap.
   const uncapped = buildCrasher({backoffFactor: 3, maxDelayMs: 0, maxRestarts: undefined, windowMs: 0})
 
-  assert.equal(uncapped.restartDelayFor(0), 10)
-  assert.equal(uncapped.restartDelayFor(2), 90)
+  expect(uncapped.restartDelayFor(0)).toBe(10)
+  expect(uncapped.restartDelayFor(2)).toBe(90)
 })
 
 test("the unlimited constant-delay fast path still applies maxDelayMs", () => {
   // restartDelayMs (10) above maxDelayMs (5), with no backoff and unlimited restarts.
   const managed = buildCrasher({backoffFactor: 1, maxDelayMs: 5, maxRestarts: undefined, windowMs: 0})
 
-  assert.equal(managed.restartDelayFor(0), 5)
+  expect(managed.restartDelayFor(0)).toBe(5)
 
   /** @type {number | undefined} */
   let queued
@@ -890,6 +892,6 @@ test("the unlimited constant-delay fast path still applies maxDelayMs", () => {
   managed.queueRestart = (delayMs) => { queued = delayMs }
   managed.scheduleRestart()
 
-  assert.equal(queued, 5)
+  expect(queued).toBe(5)
 })
 })

@@ -1,7 +1,6 @@
 // @ts-check
 
-import assert from "node:assert/strict"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {resolveGroupId, resolveUserId} from "../src/system-ids.js"
 
 describe("system-ids", () => {
@@ -9,19 +8,19 @@ describe("system-ids", () => {
 const linuxTest = process.platform === "linux" ? test : test.skip
 
 test("resolves numeric ids and numeric strings as-is", () => {
-  assert.equal(resolveUserId(1000), 1000)
-  assert.equal(resolveUserId("1000"), 1000)
-  assert.equal(resolveGroupId(0), 0)
-  assert.equal(resolveGroupId("42"), 42)
+  expect(resolveUserId(1000)).toBe(1000)
+  expect(resolveUserId("1000")).toBe(1000)
+  expect(resolveGroupId(0)).toBe(0)
+  expect(resolveGroupId("42")).toBe(42)
 })
 
 linuxTest("resolves user and group names to ids", () => {
-  assert.equal(resolveUserId("root"), 0)
-  assert.equal(resolveGroupId("root"), 0)
+  expect(resolveUserId("root")).toBe(0)
+  expect(resolveGroupId("root")).toBe(0)
 })
 
-linuxTest("throws for an unknown user or group name", () => {
-  assert.throws(() => resolveUserId("rollbridge-no-such-user"), /Unknown user "rollbridge-no-such-user"/)
-  assert.throws(() => resolveGroupId("rollbridge-no-such-group"), /Unknown group "rollbridge-no-such-group"/)
+linuxTest("throws for an unknown user or group name", async () => {
+  await expect(() => resolveUserId("rollbridge-no-such-user")).toThrow(/Unknown user "rollbridge-no-such-user"/)
+  await expect(() => resolveGroupId("rollbridge-no-such-group")).toThrow(/Unknown group "rollbridge-no-such-group"/)
 })
 })

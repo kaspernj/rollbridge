@@ -1,10 +1,9 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import RollbridgeDaemon, {releasesToPrune} from "../src/daemon.js"
 import {normalizeConfig} from "../src/config.js"
@@ -25,7 +24,7 @@ test("releasesToPrune keeps the most recent stopped releases and never active or
 
   const remove = releasesToPrune(releases, {keep: 1, maxAgeMs: 0}, Date.parse("2026-05-22T00:00:10.000Z"))
 
-  assert.deepEqual([...remove].sort(), ["v1", "v2"])
+  expect([...remove].sort()).toEqual(["v1", "v2"])
 })
 
 test("releasesToPrune keeps the later-deployed release when stoppedAt ties", () => {
@@ -38,7 +37,7 @@ test("releasesToPrune keeps the later-deployed release when stoppedAt ties", () 
 
   const remove = releasesToPrune(releases, {keep: 1, maxAgeMs: 0}, Date.parse("2026-05-22T00:00:10.000Z"))
 
-  assert.deepEqual(remove, ["v1"])
+  expect(remove).toEqual(["v1"])
 })
 
 test("releasesToPrune prunes stopped releases older than maxAgeMs", () => {
@@ -50,7 +49,7 @@ test("releasesToPrune prunes stopped releases older than maxAgeMs", () => {
 
   const remove = releasesToPrune(releases, {keep: 100, maxAgeMs: 30000}, now)
 
-  assert.deepEqual(remove, ["old"])
+  expect(remove).toEqual(["old"])
 })
 
 test("the daemon prunes stopped releases beyond the retention count across deploys", async () => {
@@ -84,9 +83,9 @@ test("the daemon prunes stopped releases beyond the retention count across deplo
 
     const ids = daemon.status().releases.map((release) => release.releaseId)
 
-    assert.ok(ids.includes("v3"), `active release should be retained, got ${JSON.stringify(ids)}`)
-    assert.ok(!ids.includes("v1"), `oldest stopped release should be pruned, got ${JSON.stringify(ids)}`)
-    assert.ok(ids.length <= 2, `expected at most the active release plus one stopped, got ${JSON.stringify(ids)}`)
+    expect({value: Boolean(ids.includes("v3")), context: `active release should be retained, got ${JSON.stringify(ids)}`}).toMatchObject({value: true})
+    expect({value: Boolean(!ids.includes("v1")), context: `oldest stopped release should be pruned, got ${JSON.stringify(ids)}`}).toMatchObject({value: true})
+    expect({value: Boolean(ids.length <= 2), context: `expected at most the active release plus one stopped, got ${JSON.stringify(ids)}`}).toMatchObject({value: true})
   } finally {
     await daemon.shutdown()
     await fs.rm(root, {force: true, recursive: true})

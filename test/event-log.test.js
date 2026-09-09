@@ -1,7 +1,6 @@
 // @ts-check
 
-import assert from "node:assert/strict"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import EventLog from "../src/event-log.js"
 
 describe("event-log", () => {
@@ -13,9 +12,9 @@ test("records events with a timestamp, message, and data", () => {
 
   const [event] = log.recent()
 
-  assert.equal(event.message, "traffic switched")
-  assert.deepEqual(event.data, {releaseId: "v1"})
-  assert.match(event.at, /^\d{4}-\d{2}-\d{2}T.*Z$/)
+  expect(event.message).toBe("traffic switched")
+  expect(event.data).toEqual({releaseId: "v1"})
+  expect(event.at).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
 })
 
 test("drops the oldest events once the limit is exceeded", () => {
@@ -25,8 +24,8 @@ test("drops the oldest events once the limit is exceeded", () => {
 
   const events = log.recent()
 
-  assert.equal(events.length, 3)
-  assert.deepEqual(events.map((event) => event.data.index), [2, 3, 4])
+  expect(events.length).toBe(3)
+  expect(events.map((event) => event.data.index)).toEqual([2, 3, 4])
 })
 
 test("recent(limit) returns only the most recent events, oldest first", () => {
@@ -34,7 +33,7 @@ test("recent(limit) returns only the most recent events, oldest first", () => {
 
   for (let index = 0; index < 5; index += 1) log.record("tick", {index})
 
-  assert.deepEqual(log.recent(2).map((event) => event.data.index), [3, 4])
+  expect(log.recent(2).map((event) => event.data.index)).toEqual([3, 4])
 })
 
 test("recent returns every event when the limit is omitted or not a positive number", () => {
@@ -42,8 +41,8 @@ test("recent returns every event when the limit is omitted or not a positive num
 
   for (let index = 0; index < 3; index += 1) log.record("tick", {index})
 
-  assert.equal(log.recent().length, 3)
-  assert.equal(log.recent(0).length, 3)
-  assert.equal(log.recent(99).length, 3)
+  expect(log.recent().length).toBe(3)
+  expect(log.recent(0).length).toBe(3)
+  expect(log.recent(99).length).toBe(3)
 })
 })

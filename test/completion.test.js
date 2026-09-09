@@ -1,7 +1,6 @@
 // @ts-check
 
-import assert from "node:assert/strict"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {runCli} from "../src/cli.js"
 
 describe("completion", () => {
@@ -41,30 +40,30 @@ async function capture(argv) {
 test("completion bash prints a sourceable script with commands and option flags", async () => {
   const {code, output} = await capture(["node", "rollbridge", "completion", "bash"])
 
-  assert.notEqual(code, 1)
-  assert.match(output, /complete -F _rollbridge rollbridge/)
-  assert.match(output, /compgen -W "daemon deploy rollback recover-generation-transition ensure-daemon status stop restart shutdown validate doctor logs events predeploy-cleanup recover completion"/)
+  expect(code).not.toBe(1)
+  expect(output).toMatch(/complete -F _rollbridge rollbridge/)
+  expect(output).toMatch(/compgen -W "daemon deploy rollback recover-generation-transition ensure-daemon status stop restart shutdown validate doctor logs events predeploy-cleanup recover completion"/)
   // A command's own options are completed after the command.
-  assert.match(output, /deploy\)\n\s+opts="[^"]*--release-path[^"]*"/)
-  assert.match(output, /recover-generation-transition\)\n\s+opts="--config --release-path --release-id --revision --previous-release-id --accept-retired-incumbent"/)
-  assert.match(output, /ensure-daemon\)\n\s+opts="[^"]*--daemon-runtime-path[^"]*"/)
-  assert.match(output, /restart\)\n\s+opts="[^"]*--policy[^"]*"/)
+  expect(output).toMatch(/deploy\)\n\s+opts="[^"]*--release-path[^"]*"/)
+  expect(output).toMatch(/recover-generation-transition\)\n\s+opts="--config --release-path --release-id --revision --previous-release-id --accept-retired-incumbent"/)
+  expect(output).toMatch(/ensure-daemon\)\n\s+opts="[^"]*--daemon-runtime-path[^"]*"/)
+  expect(output).toMatch(/restart\)\n\s+opts="[^"]*--policy[^"]*"/)
 })
 
 test("completion zsh prints a #compdef script with per-command options", async () => {
   const {output} = await capture(["node", "rollbridge", "completion", "zsh"])
 
-  assert.match(output, /^#compdef rollbridge/)
-  assert.match(output, /compdef _rollbridge rollbridge/)
-  assert.match(output, /commands=\(daemon deploy rollback recover-generation-transition ensure-daemon status stop restart shutdown validate doctor logs events predeploy-cleanup recover completion\)/)
-  assert.match(output, /recover-generation-transition\) compadd -- --config --release-path --release-id --revision --previous-release-id --accept-retired-incumbent/)
-  assert.match(output, /events\) compadd -- [^\n]*--limit/)
+  expect(output).toMatch(/^#compdef rollbridge/)
+  expect(output).toMatch(/compdef _rollbridge rollbridge/)
+  expect(output).toMatch(/commands=\(daemon deploy rollback recover-generation-transition ensure-daemon status stop restart shutdown validate doctor logs events predeploy-cleanup recover completion\)/)
+  expect(output).toMatch(/recover-generation-transition\) compadd -- --config --release-path --release-id --revision --previous-release-id --accept-retired-incumbent/)
+  expect(output).toMatch(/events\) compadd -- [^\n]*--limit/)
 })
 
 test("completion rejects an unsupported shell with a non-zero exit code", async () => {
   const {code, errorOutput} = await capture(["node", "rollbridge", "completion", "fish"])
 
-  assert.equal(code, 1)
-  assert.match(errorOutput, /Unsupported shell "fish"\. Supported shells: bash, zsh\./)
+  expect(code).toBe(1)
+  expect(errorOutput).toMatch(/Unsupported shell "fish"\. Supported shells: bash, zsh\./)
 })
 })

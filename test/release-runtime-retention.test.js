@@ -1,13 +1,12 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import {sendControlCommand} from "../src/control-client.js"
 import GuardianClient from "../src/guardian-client.js"
@@ -65,22 +64,22 @@ test("detached daemon survives deletion of the release-local Rollbridge installa
     const response = await fetch(`http://127.0.0.1:${proxyPort}/deferred-runtime`)
     const runtime = /** @type {{digest: string, format: number, path: string, version: string}} */ (status.daemonRuntime)
 
-    assert.equal(status.activeReleaseId, "B")
-    assert.equal(runtime.format, 1)
-    assert.match(runtime.digest, /^[a-f0-9]{64}$/)
-    assert.equal(path.dirname(runtime.path), runtimePath)
-    assert.ok(!runtime.path.startsWith(releaseA), `runtime must be outside release A: ${runtime.path}`)
-    assert.equal(response.status, 200)
-    assert.equal(await response.text(), "deferred runtime loaded\n")
-    assert.equal(typeof status.daemonPid, "number")
+    expect(status.activeReleaseId).toBe("B")
+    expect(runtime.format).toBe(1)
+    expect(runtime.digest).toMatch(/^[a-f0-9]{64}$/)
+    expect(path.dirname(runtime.path)).toBe(runtimePath)
+    expect({value: Boolean(!runtime.path.startsWith(releaseA)), context: `runtime must be outside release A: ${runtime.path}`}).toMatchObject({value: true})
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe("deferred runtime loaded\n")
+    expect(typeof status.daemonPid).toBe("number")
     const daemonPid = /** @type {number} */ (status.daemonPid)
 
     process.kill(daemonPid, "SIGKILL")
     const recoveredPid = await waitForChangedPid(pidPath, daemonPid)
     const recovered = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(recovered.daemonPid, recoveredPid)
-    assert.equal(recovered.activeReleaseId, "B")
+    expect(recovered.daemonPid).toBe(recoveredPid)
+    expect(recovered.activeReleaseId).toBe("B")
   } finally {
     try {
       await sendControlCommand({command: {command: "shutdown"}, path: socketPath})
@@ -126,7 +125,7 @@ test("ensure-daemon resolves an explicit relative config before changing to its 
     ])
     const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(status.activeReleaseId, "relative-config")
+    expect(status.activeReleaseId).toBe("relative-config")
   } finally {
     await sendControlCommand({command: {command: "shutdown"}, path: socketPath}).catch(() => undefined)
     await stopGuardian(statePath)
@@ -149,15 +148,12 @@ test("runtime preparation failure prevents daemon startup and deploy handoff", a
     await fs.writeFile(invalidRuntimePath, "occupied\n")
     await fs.writeFile(configPath, `export default ${JSON.stringify(basicConfig(socketPath), null, 2)}\n`)
 
-    await assert.rejects(
-      () => runReleaseCli(release, [
+    await expect(runReleaseCli(release, [
         "deploy", "--ensure-daemon", "--config", configPath,
         "--release-path", release, "--release-id", "blocked",
         "--daemon-runtime-path", invalidRuntimePath
-      ]),
-      /EEXIST|not a directory|ENOTDIR/
-    )
-    await assert.rejects(() => fs.stat(socketPath), {code: "ENOENT"})
+      ])).rejects.toThrow(/EEXIST|not a directory|ENOTDIR/)
+    await expect(fs.stat(socketPath)).rejects.toMatchObject({code: "ENOENT"})
   } finally {
     await fs.rm(root, {force: true, recursive: true})
   }
@@ -187,16 +183,13 @@ test("ensure-daemon refuses a responsive legacy daemon before deploy", async () 
       legacyDaemon.listen(socketPath, () => resolve(undefined))
     })
 
-    await assert.rejects(
-      () => runReleaseCli(release, [
+    await expect(runReleaseCli(release, [
         "deploy", "--ensure-daemon", "--config", configPath,
         "--release-path", release, "--release-id", "must-not-deploy",
         "--daemon-runtime-path", path.join(root, "runtime")
-      ]),
-      /legacy or mismatched runtime.*deploy was not sent/s
-    )
+      ])).rejects.toThrow(/legacy or mismatched runtime.*deploy was not sent/s)
 
-    assert.equal(deployReceived, false)
+    expect(deployReceived).toBe(false)
   } finally {
     await new Promise((resolve) => legacyDaemon.close(resolve))
     await fs.rm(root, {force: true, recursive: true})
@@ -232,15 +225,12 @@ test("ensure-daemon refuses a mismatched runtime attestation before deploy", asy
       daemon.listen(socketPath, () => resolve(undefined))
     })
 
-    await assert.rejects(
-      () => runReleaseCli(release, [
+    await expect(runReleaseCli(release, [
         "deploy", "--ensure-daemon", "--config", configPath,
         "--release-path", release, "--release-id", "must-not-deploy",
         "--daemon-runtime-path", path.join(root, "runtime")
-      ]),
-      /legacy or mismatched runtime.*deploy was not sent/s
-    )
-    assert.equal(deployReceived, false)
+      ])).rejects.toThrow(/legacy or mismatched runtime.*deploy was not sent/s)
+    expect(deployReceived).toBe(false)
   } finally {
     await new Promise((resolve) => daemon.close(resolve))
     await fs.rm(root, {force: true, recursive: true})
@@ -273,15 +263,14 @@ test("concurrent startup loser re-attests the winner before sending deploy", asy
       proxy: {drainTimeoutMs: 100, forceStopTimeoutMs: 100, host: "127.0.0.1", port: 0}
     }, null, 2)}\n`)
 
-    const loserRejected = assert.rejects(
-      runReleaseCli(loserRelease, [
+    const loserRejected = (async () => {
+      await expect(runReleaseCli(loserRelease, [
         "deploy", "--ensure-daemon", "--config", configPath,
         "--release-path", loserRelease, "--release-id", "loser",
         "--daemon-log-path", path.join(root, "loser.log"), "--daemon-pid-path", loserPidPath,
         "--daemon-runtime-path", path.join(root, "loser-runtime")
-      ]),
-      /legacy or mismatched runtime.*deploy was not sent/s
-    )
+      ])).rejects.toThrow(/legacy or mismatched runtime.*deploy was not sent/s)
+    })()
 
     await waitForFile(loserPausedPath)
     await runReleaseCli(winnerRelease, [
@@ -294,7 +283,7 @@ test("concurrent startup loser re-attests the winner before sending deploy", asy
     await loserRejected
     const status = await sendControlCommand({command: {command: "status"}, path: socketPath})
 
-    assert.equal(status.activeReleaseId, "winner")
+    expect(status.activeReleaseId).toBe("winner")
   } finally {
     try {
       await sendControlCommand({command: {command: "shutdown"}, path: socketPath})
@@ -345,7 +334,7 @@ async function prepareRelease(releasePath, deferredImport) {
   const marker = "  proxyHttp(request, response) {\n"
   const deferredRoute = `${marker}    if (request.url === "/deferred-runtime") {\n      void import("./deferred-runtime.js")\n        .then(({default: body}) => { response.writeHead(200); response.end(body) })\n        .catch((error) => { response.writeHead(500); response.end(String(error)) })\n      return\n    }\n\n`
 
-  assert.ok(source.includes(marker))
+  expect(source.includes(marker)).toBeTruthy()
   await fs.writeFile(daemonPath, source.replace(marker, deferredRoute))
   await fs.writeFile(path.join(packagePath, "src", "deferred-runtime.js"), "export default \"deferred runtime loaded\\n\"\n")
 }
@@ -362,7 +351,7 @@ async function installStartupPause(releasePath, pausedPath) {
   const marker = "  const candidate = await startDaemonProcess({\n"
   const pause = `  await fsPromises.writeFile(${JSON.stringify(pausedPath)}, "paused\\n")\n  await new Promise((resolve) => setTimeout(resolve, 750))\n\n${marker}`
 
-  assert.ok(source.includes(marker))
+  expect(source.includes(marker)).toBeTruthy()
   await fs.writeFile(cliPath, source.replace(marker, pause))
 }
 

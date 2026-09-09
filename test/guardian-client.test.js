@@ -1,12 +1,11 @@
 // @ts-check
 
-import assert from "node:assert/strict"
 import {spawn} from "node:child_process"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import {describe, test} from "@velocious/testing"
+import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import GuardianClient from "../src/guardian-client.js"
 import {waitForProcessExit} from "./support/process.js"
@@ -20,17 +19,21 @@ test("guardian bootstrap capability is absent from process argv", async () => {
   const fixture = await createGuardian()
 
   try {
-    assert.deepEqual(await fixture.client.capabilities(), {daemonRecovery: 1, generationReactivation: 1})
+    expect(await fixture.client.capabilities()).toEqual({daemonRecovery: 1, generationReactivation: 1})
     const commandLine = await fs.readFile(`/proc/${fixture.client.pid}/cmdline`, "utf8")
     const environment = await fs.readFile(`/proc/${fixture.client.pid}/environ`, "utf8")
     const status = await fs.readFile(`/proc/${fixture.client.pid}/status`, "utf8")
     const inventory = JSON.stringify(await fixture.client.inventory())
 
-    assert.ok(commandLine.includes("process-guardian.js"))
-    assert.ok(!commandLine.includes(fixture.token), "guardian capability must not be exposed through argv")
-    assert.ok(!environment.includes(fixture.token), "guardian capability must not be exposed through env")
-    assert.ok(!status.includes(fixture.token), "guardian capability must not be exposed through process status/title")
-    assert.ok(!inventory.includes(fixture.token), "guardian capability must not be exposed through guardian status")
+    expect(commandLine.includes("process-guardian.js")).toBeTruthy()
+    // Guardian capability must not be exposed through argv.
+    expect(commandLine.includes(fixture.token)).toBe(false)
+    // Guardian capability must not be exposed through env.
+    expect(environment.includes(fixture.token)).toBe(false)
+    // Guardian capability must not be exposed through process status/title.
+    expect(status.includes(fixture.token)).toBe(false)
+    // Guardian capability must not be exposed through guardian status.
+    expect(inventory.includes(fixture.token)).toBe(false)
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -45,11 +48,11 @@ test("guardian inventory removes only an exact owned provenance", async () => {
     const inventory = await fixture.client.inventory()
     const candidate = inventory.find((entry) => entry.key === "candidate")
 
-    assert.ok(candidate)
-    await assert.rejects(() => fixture.client.remove("candidate", `${candidate.provenance}-wrong`), /provenance mismatch/)
-    assert.equal((await fixture.client.inventory()).length, 1)
+    if (!candidate) throw new Error("Missing required fixture: candidate")
+    await expect(fixture.client.remove("candidate", `${candidate.provenance}-wrong`)).rejects.toThrow(/provenance mismatch/)
+    expect((await fixture.client.inventory()).length).toBe(1)
     await fixture.client.remove("candidate", candidate.provenance)
-    assert.deepEqual(await fixture.client.inventory(), [])
+    expect(await fixture.client.inventory()).toEqual([])
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -66,7 +69,7 @@ test("guardian runs a strict activation lifecycle command for the exact register
   try {
     await processInstance.start()
     await processInstance.activateStrict()
-    assert.equal(await fs.readFile(activationPath, "utf8"), "activated")
+    expect(await fs.readFile(activationPath, "utf8")).toBe("activated")
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -81,7 +84,7 @@ test("guardian preserves a custom activation timeout in the registered process d
 
   try {
     await processInstance.start()
-    await assert.rejects(() => processInstance.activateStrict(), /activate command timed out after 10ms/i)
+    await expect(processInstance.activateStrict()).rejects.toThrow(/activate command timed out after 10ms/i)
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -114,20 +117,20 @@ test("client reactivates a retained process through a guardian without the react
     await processInstance.quiesceStrict()
     await processInstance.reactivateStrict()
 
-    assert.equal(processInstance.status().pid, pid)
-    assert.equal(processInstance.status().state, "running")
-    assert.equal(processInstance.status().lifecycleRole, "active")
-    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "activate\nretire\nactivate\n")
+    expect(processInstance.status().pid).toBe(pid)
+    expect(processInstance.status().state).toBe("running")
+    expect(processInstance.status().lifecycleRole).toBe("active")
+    expect(await fs.readFile(lifecyclePath, "utf8")).toBe("activate\nretire\nactivate\n")
 
     const restarted = once(processInstance, "started")
 
-    assert.ok(pid)
+    if (!pid) throw new Error("Missing required fixture: pid")
     process.kill(-pid, "SIGKILL")
     await restarted
-    assert.notEqual(processInstance.status().pid, pid)
-    assert.equal(processInstance.status().state, "running")
-    assert.equal(processInstance.status().lifecycleRole, "active")
-    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "activate\nretire\nactivate\nactivate\n")
+    expect(processInstance.status().pid).not.toBe(pid)
+    expect(processInstance.status().state).toBe("running")
+    expect(processInstance.status().lifecycleRole).toBe("active")
+    expect(await fs.readFile(lifecyclePath, "utf8")).toBe("activate\nretire\nactivate\nactivate\n")
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -159,10 +162,10 @@ test("client reverses a worker quiet hook through a pre-reactivation guardian", 
     await processInstance.quiesceStrict()
     await processInstance.reactivateStrict()
 
-    assert.equal(processInstance.status().pid, pid)
-    assert.equal(processInstance.status().state, "running")
-    assert.equal(processInstance.status().lifecycleRole, "active")
-    assert.equal(await fs.readFile(lifecyclePath, "utf8"), "quiet\nresume\n")
+    expect(processInstance.status().pid).toBe(pid)
+    expect(processInstance.status().state).toBe("running")
+    expect(processInstance.status().lifecycleRole).toBe("active")
+    expect(await fs.readFile(lifecyclePath, "utf8")).toBe("quiet\nresume\n")
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -180,8 +183,8 @@ test("guardian atomically updates process provenance with private owner state", 
     const previousProvenance = (await fixture.client.inventory())[0]?.provenance
 
     await processInstance.updateDefinition({...definition("service"), env: {RELEASE: "v2"}}, nextOwnerState)
-    assert.deepEqual(await fixture.client.ownerState(), nextOwnerState)
-    assert.notEqual((await fixture.client.inventory())[0]?.provenance, previousProvenance)
+    expect(await fixture.client.ownerState()).toEqual(nextOwnerState)
+    expect((await fixture.client.inventory())[0]?.provenance).not.toBe(previousProvenance)
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -203,9 +206,10 @@ test("guardian forwards each retained output line to its exact process proxy", a
     const [entry] = await Promise.race([logged, exitedFirst])
     const event = await forwarded
 
-    assert.equal(entry.line, marker)
-    assert.equal(event.status, undefined, "log events must not resend the complete retained process status")
-    assert.ok(processInstance.status().logs.some((candidate) => candidate.line === marker))
+    expect(entry.line).toBe(marker)
+    // Log events must not resend the complete retained process status.
+    expect(event.status).toBe(undefined)
+    expect(processInstance.status().logs.some((candidate) => candidate.line === marker)).toBeTruthy()
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -221,12 +225,12 @@ test("guardian delivers the final process status after dropping logs for a backp
   })
   const socket = fixture.client.socket
 
-  assert.ok(socket)
+  if (!socket) throw new Error("Missing required fixture: socket")
   try {
     await processInstance.start()
     const pid = processInstance.status().pid
 
-    assert.ok(pid)
+    if (!pid) throw new Error("Missing required fixture: pid")
     const finalStatus = fixture.client.waitForEvent("process")
 
     socket.pause()
@@ -244,7 +248,7 @@ test("guardian delivers the final process status after dropping logs for a backp
     } finally {
       clearTimeout(timeout)
     }
-    assert.equal(processInstance.status().state, "failed")
+    expect(processInstance.status().state).toBe("failed")
   } finally {
     socket.resume()
     await cleanupGuardian(fixture)
@@ -264,7 +268,7 @@ test("guardian resynchronizes retained logs after dropping output for a backpres
   })
   const socket = fixture.client.socket
 
-  assert.ok(socket)
+  if (!socket) throw new Error("Missing required fixture: socket")
   try {
     await processInstance.start()
     socket.pause()
@@ -284,7 +288,7 @@ test("guardian resynchronizes retained logs after dropping output for a backpres
     } finally {
       clearTimeout(timeout)
     }
-    assert.equal(processInstance.status().logs.at(-1)?.line, finalLine)
+    expect(processInstance.status().logs.at(-1)?.line).toBe(finalLine)
   } finally {
     socket.resume()
     await cleanupGuardian(fixture)
@@ -300,13 +304,14 @@ test("guardian shutdown reports an exact owned process stop failure", async () =
     await processInstance.start()
     const [entry] = await fixture.client.inventory()
 
-    assert.ok(entry)
+    if (!entry) throw new Error("Missing required fixture: entry")
     fixture.client.disconnect()
     await replacement.connect()
     await replacement.claimOwner(0, null)
-    await assert.rejects(() => replacement.reconcileInventory(), /NOT_A_SIGNAL|Unknown signal/)
-    assert.deepEqual((await replacement.inventory()).map(({key, provenance}) => ({key, provenance})), [{key: entry.key, provenance: entry.provenance}], "failed reconciliation must retain the exact registration")
-    await assert.rejects(() => replacement.shutdown(), /NOT_A_SIGNAL|Unknown signal/)
+    await expect(replacement.reconcileInventory()).rejects.toThrow(/NOT_A_SIGNAL|Unknown signal/)
+    // Failed reconciliation must retain the exact registration.
+    expect((await replacement.inventory()).map(({key, provenance}) => ({key, provenance}))).toEqual([{key: entry.key, provenance: entry.provenance}])
+    await expect(replacement.shutdown()).rejects.toThrow(/NOT_A_SIGNAL|Unknown signal/)
   } finally {
     const inventory = await replacement.inventory().catch(() => [])
     const entry = inventory[0]
@@ -329,8 +334,8 @@ test("successful guardian shutdown closes an authenticated waiting contender bef
 
   try {
     await contender.connect()
-    assert.ok(fixture.client.socket)
-    assert.ok(contender.socket)
+    if (!fixture.client.socket) throw new Error("Missing required fixture: fixture.client.socket")
+    if (!contender.socket) throw new Error("Missing required fixture: contender.socket")
     const shutdownOrder = /** @type {string[]} */ ([])
     const onData = fixture.client.onData.bind(fixture.client)
 
@@ -341,14 +346,17 @@ test("successful guardian shutdown closes an authenticated waiting contender bef
     fixture.client.socket.once("close", () => shutdownOrder.push("caller-close"))
     const contenderClosed = new Promise((resolve) => contender.socket?.once("close", () => resolve(undefined)))
     const waitingClaim = contender.claimOwner(250, null)
-    const rejectedClaim = assert.rejects(waitingClaim, /connection closed/)
+    const rejectedClaim = (async () => {
+      await expect(waitingClaim).rejects.toThrow(/connection closed/)
+    })()
 
     await fixture.client.shutdown()
     await rejectedClaim
     await contenderClosed
-    assert.deepEqual(shutdownOrder, ["response", "caller-close"], "shutdown success must be received before the caller connection closes")
-    await assert.rejects(() => contender.inventory(), /not connected/)
-    await assert.rejects(fs.access(fixture.client.socketPath), {code: "ENOENT"})
+    // Shutdown success must be received before the caller connection closes.
+    expect(shutdownOrder).toEqual(["response", "caller-close"])
+    await expect(contender.inventory()).rejects.toThrow(/not connected/)
+    await expect(fs.access(fixture.client.socketPath)).rejects.toMatchObject({code: "ENOENT"})
     await fixture.client.guardianExit()
   } finally {
     contender.disconnect()
@@ -372,7 +380,7 @@ test("guardian restart uses the latest accepted command and exact environment", 
 
     const [restart] = await waitForRestartRecords(markerPath, 1)
 
-    assert.deepEqual({home: restart.home, marker: restart.marker}, {home: null, marker: "new"})
+    expect({home: restart.home, marker: restart.marker}).toEqual({home: null, marker: "new"})
   } finally {
     await reconnectAndShutdownGuardian(fixture, authority)
   }
@@ -392,7 +400,7 @@ test("guardian rearms recovery after an ownerless replacement aborts", async () 
 
     await new Promise((resolve) => setTimeout(resolve, 80))
     await replacement.abortOwnerReplacement(prepared.replacementId)
-    assert.deepEqual((await waitForRestartRecords(markerPath, 1)).map(({home, marker}) => ({home, marker})), [{home: null, marker: "accepted"}])
+    expect((await waitForRestartRecords(markerPath, 1)).map(({home, marker}) => ({home, marker}))).toEqual([{home: null, marker: "accepted"}])
   } finally {
     replacement.disconnect()
     await reconnectAndShutdownGuardian(fixture, authority)
@@ -409,9 +417,9 @@ test("guardian retry backoff remains nonzero when reconnect grace is zero", asyn
     fixture.client.disconnect()
     const records = await waitForRestartRecords(markerPath, 2)
 
-    assert.equal(typeof records[0]?.at, "number")
-    assert.equal(typeof records[1]?.at, "number")
-    assert.ok(Number(records[1].at) - Number(records[0].at) >= 900, `failed owner recovery retried after ${Number(records[1].at) - Number(records[0].at)}ms`)
+    expect(typeof records[0]?.at).toBe("number")
+    expect(typeof records[1]?.at).toBe("number")
+    expect({value: Boolean(Number(records[1].at) - Number(records[0].at) >= 900), context: `failed owner recovery retried after ${Number(records[1].at) - Number(records[0].at)}ms`}).toMatchObject({value: true})
   } finally {
     await reconnectAndShutdownGuardian(fixture, authority)
   }
@@ -438,7 +446,7 @@ test("a retired guardian-started owner does not block recovery of its replacemen
     await committed
     replacement.disconnect()
 
-    assert.deepEqual((await waitForRestartRecords(secondMarkerPath, 1)).map(({home, marker}) => ({home, marker})), [{home: null, marker: "replacement"}])
+    expect((await waitForRestartRecords(secondMarkerPath, 1)).map(({home, marker}) => ({home, marker}))).toEqual([{home: null, marker: "replacement"}])
   } finally {
     replacement.disconnect()
     if (firstOwnerPid) {
@@ -561,7 +569,7 @@ test("guardian backs off when a restarted owner exits after claiming but before 
     const records = await waitForRestartRecords(startedLogPath, 2)
 
     await waitForProcessExit(descendantPid)
-    assert.ok(Number(records[1].at) - Number(records[0].at) >= 900, `post-claim failure retried after ${Number(records[1].at) - Number(records[0].at)}ms`)
+    expect({value: Boolean(Number(records[1].at) - Number(records[0].at) >= 900), context: `post-claim failure retried after ${Number(records[1].at) - Number(records[0].at)}ms`}).toMatchObject({value: true})
   } finally {
     if (descendantPid) {
       try { process.kill(descendantPid, "SIGKILL") } catch (_error) { /* Exact descendant already exited. */ }
@@ -592,7 +600,7 @@ test("guardian preserves restart backoff when an unready owner disconnect aborts
     await aborted
     const records = await waitForRestartRecords(startedLogPath, 2)
 
-    assert.ok(Number(records[1].at) - Number(records[0].at) >= 900, `replacement abort retried after ${Number(records[1].at) - Number(records[0].at)}ms`)
+    expect({value: Boolean(Number(records[1].at) - Number(records[0].at) >= 900), context: `replacement abort retried after ${Number(records[1].at) - Number(records[0].at)}ms`}).toMatchObject({value: true})
   } finally {
     replacement.disconnect()
     await reconnectAndShutdownGuardian(fixture, authority)
@@ -631,7 +639,8 @@ test("replacement commit preserves a claimed guardian restart child through list
     process.kill(incumbentPid, "SIGUSR2")
     await Promise.race([waitForFileText(committedPath, new RegExp(prepared.replacementId)), published])
     await new Promise((resolve) => setTimeout(resolve, 50))
-    assert.doesNotThrow(() => process.kill(incumbentPid, 0), "claimed incumbent must survive replacement commit until its listeners retire")
+    // The claimed incumbent must survive replacement commit until its listeners retire.
+    await expect(() => process.kill(incumbentPid, 0)).not.toThrow()
 
     process.kill(incumbentPid, "SIGUSR1")
     await published
@@ -672,7 +681,7 @@ test("ownerless replacement commit kills a superseded restart candidate", async 
     await committed
     replacement.disconnect()
 
-    assert.deepEqual((await waitForRestartRecords(secondMarkerPath, 1)).map(({home, marker}) => ({home, marker})), [{home: null, marker: "committed"}])
+    expect((await waitForRestartRecords(secondMarkerPath, 1)).map(({home, marker}) => ({home, marker}))).toEqual([{home: null, marker: "committed"}])
   } finally {
     replacement.disconnect()
     if (delayedOwnerPid) {
@@ -710,9 +719,10 @@ test("guardian logs an asynchronous daemon spawn failure before retrying", async
     const diagnosticPattern = /"code":"ENOENT".*"message":"guardian failed to restart daemon"/
     const diagnostic = await waitForFileText(logPath, diagnosticPattern)
 
-    assert.match(diagnostic, diagnosticPattern)
+    expect(diagnostic).toMatch(diagnosticPattern)
     for (const privateValue of [privateArgs, privateEnvironment, privateExecutable, fixture.root, logPath]) {
-      assert.ok(!diagnostic.includes(privateValue), `guardian diagnostic exposed ${privateValue}`)
+      // Guardian diagnostics must not expose private values, including in assertion failures.
+      expect(diagnostic.includes(privateValue)).toBe(false)
     }
   } finally {
     await reconnectAndShutdownGuardian(fixture, authority)
@@ -746,8 +756,8 @@ test("guardian publishes the authenticated ready owner's PID file", async () => 
     await fs.symlink(victimPath, pidPath)
     await fixture.client.ownerReady()
 
-    assert.equal(await fs.readFile(pidPath, "utf8"), `${process.pid}\n`)
-    assert.equal(await fs.readFile(victimPath, "utf8"), "unchanged\n")
+    expect(await fs.readFile(pidPath, "utf8")).toBe(`${process.pid}\n`)
+    expect(await fs.readFile(victimPath, "utf8")).toBe("unchanged\n")
   } finally {
     await cleanupGuardian(fixture)
   }
@@ -769,14 +779,15 @@ test("replacement commit notification waits for incumbent listener retirement", 
 
     await fixture.client.commitOwnerReplacement(prepared.replacementId)
     await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(committed, false, "candidate publication must remain fenced while incumbent listener retirement is delayed")
+    // Candidate publication must remain fenced while incumbent listener retirement is delayed.
+    expect(committed).toBe(false)
     const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
 
     await fixture.client.completeOwnerListenerRetirement(prepared.replacementId)
     await listenersRetired
     await fixture.client.request({command: "finalize-owner-replacement", replacementId: prepared.replacementId})
     await notification
-    assert.equal(committed, true)
+    expect(committed).toBe(true)
     await candidate.shutdown()
     await fixture.client.guardianExit()
   } finally {
@@ -785,7 +796,7 @@ test("replacement commit notification waits for incumbent listener retirement", 
   }
 })
 
-test("completed direct listener retirement finalizes when the incumbent disconnects", {timeout: 3000}, async () => {
+test("completed direct listener retirement finalizes when the incumbent disconnects", {timeoutMs: 3000}, async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
   const authority = {configDigest: "incumbent", runtime: null}
@@ -804,7 +815,7 @@ test("completed direct listener retirement finalizes when the incumbent disconne
     fixture.client.disconnect()
     await committed
     await candidate.finalizeOwnerReplacement(prepared.replacementId)
-    assert.deepEqual(await candidate.replacementStatus(), {
+    expect(await candidate.replacementStatus()).toEqual({
       committedReplacementId: prepared.replacementId,
       ownerClaimed: true,
       retirementFailed: false,
@@ -831,14 +842,11 @@ test("replacement staging rejects owner state published after prepare", async ()
     const prepared = await candidate.prepareOwnerReplacement(authority, nextAuthority)
 
     await fixture.client.publishOwnerState({authority, snapshot: {activeReleaseId: "v2"}})
-    await assert.rejects(
-      () => candidate.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: {activeReleaseId: "v1"}}),
-      /owner state changed after prepare/i
-    )
+    await expect(candidate.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: {activeReleaseId: "v1"}})).rejects.toThrow(/owner state changed after prepare/i)
     await candidate.abortOwnerReplacement(prepared.replacementId)
     const fresh = await candidate.prepareOwnerReplacement(authority, nextAuthority)
 
-    assert.deepEqual(fresh.ownerState, {authority, snapshot: {activeReleaseId: "v2"}})
+    expect(fresh.ownerState).toEqual({authority, snapshot: {activeReleaseId: "v2"}})
     await candidate.abortOwnerReplacement(fresh.replacementId)
     await fixture.client.shutdown()
     await fixture.client.guardianExit()
@@ -848,7 +856,7 @@ test("replacement staging rejects owner state published after prepare", async ()
   }
 })
 
-test("staged replacement receives cleared local sources when the incumbent disconnects", {timeout: 3000}, async () => {
+test("staged replacement receives cleared local sources when the incumbent disconnects", {timeoutMs: 3000}, async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
   const authority = {configDigest: "incumbent", runtime: null}
@@ -875,7 +883,7 @@ test("staged replacement receives cleared local sources when the incumbent disco
     const committed = candidate.waitForEvent("replacement-committed")
 
     fixture.client.disconnect()
-    assert.deepEqual(await cleared, {
+    expect(await cleared).toEqual({
       connections: {http: 0, websocket: 0},
       event: "owner-connection-state",
       releaseId: "v1",
@@ -884,7 +892,7 @@ test("staged replacement receives cleared local sources when the incumbent disco
     await committed
     const state = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await candidate.ownerState())
 
-    assert.deepEqual(state.listenerConnectionSources, {})
+    expect(state.listenerConnectionSources).toEqual({})
     await candidate.shutdown()
     await fixture.client.guardianExit()
   } finally {
@@ -893,7 +901,7 @@ test("staged replacement receives cleared local sources when the incumbent disco
   }
 })
 
-test("staged successor state receives tombstones when an older completed listener disconnects", {timeout: 3000}, async () => {
+test("staged successor state receives tombstones when an older completed listener disconnects", {timeoutMs: 3000}, async () => {
   const fixture = await createGuardian()
   const candidate = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
   const successor = new GuardianClient({socketPath: fixture.client.socketPath, token: fixture.token})
@@ -935,12 +943,12 @@ test("staged successor state receives tombstones when an older completed listene
     fixture.client.disconnect()
     const tombstone = {connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "retired-local"}
 
-    assert.deepEqual(await Promise.all([sourceCleared, stagedSourceCleared]), [tombstone, tombstone])
+    expect(await Promise.all([sourceCleared, stagedSourceCleared])).toEqual([tombstone, tombstone])
 
     await candidate.commitOwnerReplacement(second.replacementId)
     const successorState = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await successor.ownerState())
 
-    assert.deepEqual(successorState.listenerConnectionSources, {})
+    expect(successorState.listenerConnectionSources).toEqual({})
     const secondCommitted = successor.waitForEvent("replacement-committed")
     const secondListenersRetired = successor.waitForEvent("replacement-listeners-retired")
 
@@ -971,7 +979,7 @@ test("replacement abort notifies both the candidate and committed owner", async 
     const candidateAborted = candidate.waitForEvent("replacement-aborted")
 
     await candidate.abortOwnerReplacement(prepared.replacementId)
-    assert.deepEqual(await Promise.all([incumbentAborted, candidateAborted]), [
+    expect(await Promise.all([incumbentAborted, candidateAborted])).toEqual([
       {event: "replacement-aborted", reason: "Replacement candidate aborted the prepared transaction"},
       {event: "replacement-aborted", reason: "Replacement candidate aborted the prepared transaction"}
     ])
@@ -990,7 +998,7 @@ test("retired owner replacement commit carries its exact recovered process key",
 
   client.request = async (request) => {
     if (!request.key) throw new Error(`Guardian ${request.command} requires a process key`)
-    assert.deepEqual(request, {command: "commit-retired-owner-replacement", key: processKey, replacementId})
+    expect(request).toEqual({command: "commit-retired-owner-replacement", key: processKey, replacementId})
     return {committed: true}
   }
 
@@ -1001,7 +1009,7 @@ test("guardian owner-replacement capability classification is explicit and fail 
   const current = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
 
   current.request = async (request) => {
-    assert.deepEqual(request, {command: "owner-replacement-capabilities"})
+    expect(request).toEqual({command: "owner-replacement-capabilities"})
     return {
       commands: ["commit-retired-owner-replacement", "future-command"],
       futureField: {supported: true},
@@ -1009,7 +1017,7 @@ test("guardian owner-replacement capability classification is explicit and fail 
       version: 2
     }
   }
-  assert.equal(await current.ownerReplacementProtocol(), "atomic")
+  expect(await current.ownerReplacementProtocol()).toBe("atomic")
 
   for (const [commitDiagnostic, expected] of [
     ["Owner replacement transaction is not the prepared candidate", "atomic"],
@@ -1024,8 +1032,8 @@ test("guardian owner-replacement capability classification is explicit and fail 
       if (request.command === "owner-replacement-capabilities") throw new Error("Guardian owner-replacement-capabilities requires a process key")
       throw new Error(commitDiagnostic)
     }
-    assert.equal(await older.ownerReplacementProtocol(), expected)
-    assert.deepEqual(requests, [
+    expect(await older.ownerReplacementProtocol()).toBe(expected)
+    expect(requests).toEqual([
       {command: "owner-replacement-capabilities"},
       {command: "commit-retired-owner-replacement", replacementId: "owner-replacement-capability-probe"}
     ])
@@ -1041,7 +1049,7 @@ test("guardian owner-replacement capability classification is explicit and fail 
     const ambiguous = new GuardianClient({socketPath: "/unused", token: "authenticated-capability"})
 
     ambiguous.request = fixture
-    await assert.rejects(() => ambiguous.ownerReplacementProtocol(), /invalid owner-replacement capability response|ambiguous retired-owner capability response/)
+    await expect(ambiguous.ownerReplacementProtocol()).rejects.toThrow(/invalid owner-replacement capability response|ambiguous retired-owner capability response/)
   }
 })
 
@@ -1054,14 +1062,11 @@ test("reserved process recovery rejects a reconstructed definition with differen
     await fixture.client.process(processKey, definition("worker")).recover()
     const [registration] = await fixture.client.inventory()
 
-    assert.ok(registration)
+    if (!registration) throw new Error("Missing required fixture: registration")
     await candidate.connect()
     candidate.reserveProcessRecovery(processKey, registration.provenance)
-    await assert.rejects(
-      () => candidate.process(processKey, definition("different-worker")).recover(),
-      /provenance mismatch for reserved process/
-    )
-    assert.deepEqual((await fixture.client.inventory()).map(({key}) => key), [processKey])
+    await expect(candidate.process(processKey, definition("different-worker")).recover()).rejects.toThrow(/provenance mismatch for reserved process/)
+    expect((await fixture.client.inventory()).map(({key}) => key)).toEqual([processKey])
   } finally {
     candidate.disconnect()
     await cleanupGuardian(fixture)
@@ -1094,10 +1099,7 @@ test("retired owner replacement rejects a registered process absent from committ
     const prepared = await candidate.prepareOwnerReplacement(authority, authority)
 
     await candidate.stageOwnerReplacement(prepared.replacementId, {authority, snapshot: candidateSnapshot})
-    await assert.rejects(
-      () => candidate.commitRetiredOwnerReplacement(prepared.replacementId, candidateProcessKey),
-      /process .* does not belong to the committed owner/
-    )
+    await expect(candidate.commitRetiredOwnerReplacement(prepared.replacementId, candidateProcessKey)).rejects.toThrow(/process .* does not belong to the committed owner/)
   } finally {
     candidate.disconnect()
     await cleanupGuardian(fixture)
@@ -1127,14 +1129,14 @@ test("retired owner replacement requires unchanged authority and the exact contr
     const changed = await candidate.prepareOwnerReplacement(authority, nextAuthority)
 
     await candidate.stageOwnerReplacement(changed.replacementId, {authority: nextAuthority, snapshot})
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(changed.replacementId, processKey), /unchanged owner authority/)
+    await expect(candidate.commitRetiredOwnerReplacement(changed.replacementId, processKey)).rejects.toThrow(/unchanged owner authority/)
     await candidate.abortOwnerReplacement(changed.replacementId)
 
     const occupied = await candidate.prepareOwnerReplacement(authority, authority)
 
     await candidate.stageOwnerReplacement(occupied.replacementId, {authority, snapshot})
     await fs.writeFile(controlPath, "occupied\n")
-    await assert.rejects(() => candidate.commitRetiredOwnerReplacement(occupied.replacementId, processKey), /control socket .* still exists/)
+    await expect(candidate.commitRetiredOwnerReplacement(occupied.replacementId, processKey)).rejects.toThrow(/control socket .* still exists/)
     await candidate.abortOwnerReplacement(occupied.replacementId)
 
     await fs.rm(controlPath)
@@ -1142,34 +1144,22 @@ test("retired owner replacement requires unchanged authority and the exact contr
 
     await candidate.stageOwnerReplacement(ready.replacementId, {authority, snapshot})
     await contender.connect()
-    await assert.rejects(
-      () => contender.request({command: "commit-retired-owner-replacement", key: processKey, replacementId: ready.replacementId}),
-      /not the prepared candidate/
-    )
-    await assert.rejects(
-      () => candidate.commitRetiredOwnerReplacement("stale-replacement", processKey),
-      /not the prepared candidate/
-    )
-    await assert.rejects(
-      () => candidate.commitRetiredOwnerReplacement(ready.replacementId, "release:v1:wrong"),
-      /process .* is not registered/
-    )
+    await expect(contender.request({command: "commit-retired-owner-replacement", key: processKey, replacementId: ready.replacementId})).rejects.toThrow(/not the prepared candidate/)
+    await expect(candidate.commitRetiredOwnerReplacement("stale-replacement", processKey)).rejects.toThrow(/not the prepared candidate/)
+    await expect(candidate.commitRetiredOwnerReplacement(ready.replacementId, "release:v1:wrong")).rejects.toThrow(/process .* is not registered/)
     const handoffRequested = fixture.client.waitForEvent("replacement-listener-handoff-requested")
 
     void handoffRequested.catch(() => undefined)
 
     await candidate.prepareRetiredOwnerListenerHandoff(ready.replacementId, processKey)
     await handoffRequested
-    await assert.rejects(
-      () => contender.prepareOwnerReplacement(authority, authority),
-      /listener retirement is pending/
-    )
+    await expect(contender.prepareOwnerReplacement(authority, authority)).rejects.toThrow(/listener retirement is pending/)
     const committed = candidate.waitForEvent("replacement-committed")
     const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
     const connectionState = candidate.waitForEvent("owner-connection-state")
 
     await fixture.client.publishOwnerConnectionState(ready.replacementId, "listener-a", "v1", {http: 1, websocket: 2}, true)
-    assert.deepEqual(await connectionState, {connections: {http: 1, websocket: 2}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
+    expect(await connectionState).toEqual({connections: {http: 1, websocket: 2}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
     await fixture.client.completeOwnerListenerRetirement(ready.replacementId)
     await listenersRetired
     const retirementRequested = fixture.client.waitForEvent("replacement-retirement-requested")
@@ -1223,7 +1213,7 @@ test("completed listener retirement survives owner recovery and clears a crashed
     const initial = candidate.waitForEvent("owner-connection-state")
 
     await fixture.client.publishOwnerConnectionState(prepared.replacementId, "listener-a", "v1", {http: 0, websocket: 1}, true)
-    assert.deepEqual(await initial, {connections: {http: 0, websocket: 1}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
+    expect(await initial).toEqual({connections: {http: 0, websocket: 1}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
     const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
 
     await fixture.client.completeOwnerListenerRetirement(prepared.replacementId)
@@ -1234,9 +1224,9 @@ test("completed listener retirement survives owner recovery and clears a crashed
     await recovered.claimOwner(1000, authority)
     const stateAfterCandidateCrash = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
 
-    assert.equal(stateAfterCandidateCrash.listenerConnectionSources?.["candidate-local"], undefined)
-    assert.deepEqual(stateAfterCandidateCrash.listenerConnectionSources?.["listener-a"], {v1: {http: 0, websocket: 1}})
-    assert.deepEqual(await recovered.replacementStatus(), {
+    expect(stateAfterCandidateCrash.listenerConnectionSources?.["candidate-local"]).toBe(undefined)
+    expect(stateAfterCandidateCrash.listenerConnectionSources?.["listener-a"]).toEqual({v1: {http: 0, websocket: 1}})
+    expect(await recovered.replacementStatus()).toEqual({
       committedReplacementId: prepared.replacementId,
       ownerClaimed: true,
       retirementFailed: false,
@@ -1247,17 +1237,17 @@ test("completed listener retirement survives owner recovery and clears a crashed
     const cleared = recovered.waitForEvent("owner-connection-state")
 
     fixture.client.disconnect()
-    assert.deepEqual(await Promise.race([
+    expect(await Promise.race([
       cleared,
       new Promise((_, reject) => {
         const timer = setTimeout(() => reject(new Error("Recovered owner did not receive the retired source tombstone")), 500)
 
         timer.unref()
       })
-    ]), {connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
+    ])).toEqual({connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "listener-a"})
     const recoveredOwnerState = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
 
-    assert.deepEqual(recoveredOwnerState.listenerConnectionSources, {})
+    expect(recoveredOwnerState.listenerConnectionSources).toEqual({})
     await recovered.publishOwnerState({
       authority,
       listenerConnectionSources: {"listener-a": {v1: {http: 0, websocket: 1}}},
@@ -1266,7 +1256,7 @@ test("completed listener retirement survives owner recovery and clears a crashed
     })
     const afterStalePublication = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
 
-    assert.deepEqual(afterStalePublication.listenerConnectionSources, {})
+    expect(afterStalePublication.listenerConnectionSources).toEqual({})
     const recoveredProcess = recovered.process(processKey, definition("worker"))
 
     await recoveredProcess.recover()
@@ -1278,7 +1268,7 @@ test("completed listener retirement survives owner recovery and clears a crashed
     })
     const afterStaleProcessUpdate = /** @type {{listenerConnectionSources?: Record<string, Record<string, {http: number, websocket: number}>>}} */ (await recovered.ownerState())
 
-    assert.deepEqual(afterStaleProcessUpdate.listenerConnectionSources, {})
+    expect(afterStaleProcessUpdate.listenerConnectionSources).toEqual({})
     await recovered.shutdown()
     await fixture.client.guardianExit()
   } finally {
@@ -1305,7 +1295,7 @@ test("direct retired-listener source relay survives committed owner recovery", a
     const initial = candidate.waitForEvent("owner-connection-state")
 
     await fixture.client.publishOwnerConnectionState(prepared.replacementId, "direct-listener", "v1", {http: 0, websocket: 1}, true)
-    assert.deepEqual(await initial, {connections: {http: 0, websocket: 1}, event: "owner-connection-state", releaseId: "v1", sourceId: "direct-listener"})
+    expect(await initial).toEqual({connections: {http: 0, websocket: 1}, event: "owner-connection-state", releaseId: "v1", sourceId: "direct-listener"})
     const listenersRetired = candidate.waitForEvent("replacement-listeners-retired")
 
     await fixture.client.completeOwnerListenerRetirement(prepared.replacementId)
@@ -1317,7 +1307,7 @@ test("direct retired-listener source relay survives committed owner recovery", a
     const cleared = recovered.waitForEvent("owner-connection-state")
 
     await fixture.client.publishOwnerConnectionState(prepared.replacementId, "direct-listener", "v1", {http: 0, websocket: 0}, true)
-    assert.deepEqual(await cleared, {connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "direct-listener"})
+    expect(await cleared).toEqual({connections: {http: 0, websocket: 0}, event: "owner-connection-state", releaseId: "v1", sourceId: "direct-listener"})
     await recovered.shutdown()
     await fixture.client.guardianExit()
   } finally {
@@ -1367,17 +1357,17 @@ test("incumbent listener disconnect before state completion aborts without commi
     await fixture.client.publishOwnerConnectionState(prepared.replacementId, "incumbent-local", "v1", {http: 0, websocket: 1}, true)
     await sourcePublished
     fixture.client.disconnect()
-    assert.deepEqual(await failed, {
+    expect(await failed).toEqual({
       event: "replacement-retirement-failed",
       reason: "Incumbent listener disconnected during the prepared handoff",
       replacementId: prepared.replacementId
     })
-    assert.deepEqual(await aborted, {
+    expect(await aborted).toEqual({
       event: "replacement-aborted",
       reason: "Incumbent listener disconnected during the prepared handoff"
     })
-    assert.equal(tombstones, 1)
-    assert.deepEqual(await candidate.replacementStatus(), {
+    expect(tombstones).toBe(1)
+    expect(await candidate.replacementStatus()).toEqual({
       committedReplacementId: null,
       ownerClaimed: false,
       retirementFailed: false,
@@ -1419,7 +1409,7 @@ test("replacement abort during listener handoff validation leaves the incumbent 
     const abandonedHandoff = candidate.prepareRetiredOwnerListenerHandoff(prepared.replacementId, processKey)
 
     await candidate.abortOwnerReplacement(prepared.replacementId)
-    await assert.rejects(() => abandonedHandoff, /prepared candidate/)
+    await expect(abandonedHandoff).rejects.toThrow(/prepared candidate/)
     await contender.connect()
     const fresh = await contender.prepareOwnerReplacement(authority, authority)
 
@@ -1469,7 +1459,7 @@ test("queued owner claim is revalidated against the latest committed authority",
     await new Promise((resolve) => setTimeout(resolve, 20))
     await fixture.client.publishOwnerState({authority: nextAuthority, snapshot: {activeReleaseId: null}})
     fixture.client.disconnect()
-    await assert.rejects(claim, /authority changed while the claim was queued/)
+    await expect(claim).rejects.toThrow(/authority changed while the claim was queued/)
     await contender.claimOwner(500, nextAuthority)
     await contender.shutdown()
     await fixture.client.guardianExit()
@@ -1488,7 +1478,7 @@ test("first upgrade migrates a real pre-split guardian without replacing its own
 
   try {
     await legacyProcess.start()
-    await assert.rejects(() => fixture.client.capabilities(), /Guardian capabilities requires a process key/)
+    await expect(fixture.client.capabilities()).rejects.toThrow(/Guardian capabilities requires a process key/)
     legacyPid = legacyProcess.status().pid
     const authority = {configDigest: "legacy-config", runtime: {digest: "legacy-runtime", format: 1, path: "/legacy", version: "0.1.28"}}
     const nextAuthority = {...authority, runtime: {...authority.runtime, digest: "candidate-runtime", path: "/candidate"}}
@@ -1502,7 +1492,7 @@ test("first upgrade migrates a real pre-split guardian without replacing its own
       }
     }
 
-    assert.ok(legacyPid)
+    if (!legacyPid) throw new Error("Missing required fixture: legacyPid")
     upgraded = await fixture.client.upgradeLegacyGuardian({
       ownerState,
       socketPath: path.join(fixture.root, "guardian-v2.sock"),
@@ -1513,19 +1503,19 @@ test("first upgrade migrates a real pre-split guardian without replacing its own
     const restored = upgraded.process("release:v1:legacy-worker", processDefinition)
 
     await restored.recover()
-    assert.equal(restored.status().pid, legacyPid)
-    assert.deepEqual(prepared.ownerState, ownerState)
-    assert.deepEqual(await upgraded.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: ownerState.snapshot}), {committed: true})
+    expect(restored.status().pid).toBe(legacyPid)
+    expect(prepared.ownerState).toEqual(ownerState)
+    expect(await upgraded.stageOwnerReplacement(prepared.replacementId, {authority: nextAuthority, snapshot: ownerState.snapshot})).toEqual({committed: true})
     await committed
-    assert.equal(restored.status().pid, legacyPid)
+    expect(restored.status().pid).toBe(legacyPid)
 
     const currentProcess = upgraded.process("release:v2:current-worker", {
       ...definition("current-worker"),
       lifecycle: {activateCommand: "sleep 0.05", activateTimeoutMs: 10, drainTimeoutMs: 0}
     })
     await currentProcess.start()
-    await assert.rejects(() => currentProcess.activateStrict(), /activate command timed out after 10ms/i)
-    assert.equal(restored.status().pid, legacyPid)
+    await expect(currentProcess.activateStrict()).rejects.toThrow(/activate command timed out after 10ms/i)
+    expect(restored.status().pid).toBe(legacyPid)
     await upgraded.shutdown()
     await upgraded.guardianExit()
   } finally {
@@ -1564,11 +1554,8 @@ test("split guardian rejects an owner-state update when its nested legacy defini
 
     await restored.recover()
     await legacyProcess.updateDefinition({...processDefinition, env: {REVISION: "external"}})
-    await assert.rejects(
-      () => restored.updateDefinition({...processDefinition, env: {REVISION: "candidate"}}, {authority: nextAuthority, snapshot: {...ownerState.snapshot, serviceReleaseIds: {service: "v2"}}}),
-      /provenance mismatch/
-    )
-    assert.deepEqual(await upgraded.ownerState(), committedOwnerState)
+    await expect(restored.updateDefinition({...processDefinition, env: {REVISION: "candidate"}}, {authority: nextAuthority, snapshot: {...ownerState.snapshot, serviceReleaseIds: {service: "v2"}}})).rejects.toThrow(/provenance mismatch/)
+    expect(await upgraded.ownerState()).toEqual(committedOwnerState)
   } finally {
     await legacyProcess.stop().catch(() => {})
     upgraded?.disconnect()
@@ -1621,14 +1608,15 @@ test("split guardian defers owner handoff until a nested legacy definition updat
     void claim.finally(() => { claimSettled = true })
     upgraded.disconnect()
     await new Promise((resolve) => setTimeout(resolve, 50))
-    assert.equal(claimSettled, false, "owner handoff must wait for the nested definition update")
+    // Owner handoff must wait for the nested definition update.
+    expect(claimSettled).toBe(false)
 
     await fs.writeFile(gatePath, "allow\n")
     await claim
     const updateError = await updateResult
 
-    assert.match(String(updateError), /connection closed while awaiting update/)
-    assert.deepEqual(await contender.ownerState(), {...committedOwnerState, listenerConnectionSources: {}})
+    expect(String(updateError)).toMatch(/connection closed while awaiting update/)
+    expect(await contender.ownerState()).toEqual({...committedOwnerState, listenerConnectionSources: {}})
   } finally {
     await fs.writeFile(gatePath, "allow\n").catch(() => {})
     await contender.shutdown().catch(() => {})
@@ -1667,7 +1655,8 @@ test("a disconnected legacy upgrade candidate does not strand its bridge guardia
       new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("Legacy upgrade bridge guardian did not exit after candidate disconnect")), 1000) })
     ]).finally(() => { if (timeout) clearTimeout(timeout) })
     bridgeExited = true
-    assert.equal(fixture.child.exitCode, null, "the pre-split guardian must remain available after bridge abandonment")
+    // The pre-split guardian must remain available after bridge abandonment.
+    expect(fixture.child.exitCode).toBe(null)
   } finally {
     upgraded?.disconnect()
     if (!bridgeExited && upgraded?.pid) killExactProcessGroup(upgraded.pid)
@@ -1702,7 +1691,7 @@ test("a legacy bridge remains discoverable when its candidate disconnects after 
     await upgraded.beginLegacyOwnerClaim(prepared.replacementId, 1000, statePath, recoverySnapshot)
     fixture.client.disconnect()
     await upgraded.completeLegacyOwnerClaim(prepared.replacementId)
-    assert.deepEqual(JSON.parse(await fs.readFile(statePath, "utf8")), recoverySnapshot)
+    expect(JSON.parse(await fs.readFile(statePath, "utf8"))).toEqual(recoverySnapshot)
     upgraded.disconnect()
 
     replacement = new GuardianClient({...identity, pid: upgraded.pid})
@@ -1710,7 +1699,7 @@ test("a legacy bridge remains discoverable when its candidate disconnects after 
     const resumed = await replacement.prepareOwnerReplacement(authority, nextAuthority)
     const committed = replacement.waitForEvent("replacement-committed")
 
-    assert.deepEqual(await replacement.stageOwnerReplacement(resumed.replacementId, {authority: nextAuthority, config: {statePath}, snapshot: ownerState.snapshot}), {committed: true})
+    expect(await replacement.stageOwnerReplacement(resumed.replacementId, {authority: nextAuthority, config: {statePath}, snapshot: ownerState.snapshot})).toEqual({committed: true})
     await committed
     await replacement.shutdown()
     await upgraded.guardianExit()
