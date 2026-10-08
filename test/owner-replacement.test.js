@@ -1649,10 +1649,13 @@ test("pruned release connection completion closes the incumbent listener session
   expect(closeCount).toBe(1)
   expect(daemon.incumbentListenerControl).toBe(undefined)
 
+  // A nonzero count for a release the daemon no longer retains is a stale drain timeout, not a
+  // live connection: reconcile it to zero and close the session instead of throwing, so the
+  // owner handoff cannot be deadlocked by a pruned generation's frozen count.
   daemon.incumbentListenerControl = controlSession
-  await expect(() => daemon.handleIncumbentListenerEvent({connections: {http: 1, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session)).toThrow(/unknown release pruned/)
-  expect(closeCount).toBe(1)
-  expect(daemon.incumbentListenerControl).toBe(session)
+  expect(() => daemon.handleIncumbentListenerEvent({connections: {http: 1, websocket: 0}, event: "owner-connection-state", releaseId: "pruned"}, session)).not.toThrow()
+  expect(closeCount).toBe(2)
+  expect(daemon.incumbentListenerControl).toBe(undefined)
 })
 
 test("same-authority owner replacement preserves completed activation compensation without replaying hooks", async () => {
