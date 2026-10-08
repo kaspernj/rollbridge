@@ -196,7 +196,9 @@ export default class ReleaseGroup extends EventEmitter {
     this.drainStartedAt = snapshot.drainStartedAt
     this.retirementError = snapshot.retirementError
     this.stoppedAt = snapshot.stoppedAt
-    this.setTransferredConnections(snapshot.connections)
+    // A stopped release no longer owns a proxy listener, so a persisted nonzero count is a
+    // stale drain timeout; re-adopting it would poison this daemon's handoff to the next one.
+    if (snapshot.state !== "stopped") this.setTransferredConnections(snapshot.connections)
 
     for (const processStatus of snapshot.processes) {
       const baseId = processStatus.id.replace(/#\d+$/, "")
@@ -626,6 +628,22 @@ export default class ReleaseGroup extends EventEmitter {
   }
 
   /**
+   * Abandons every connection this daemon still counts for the release. A release that
+   * reaches terminal `stopped` owns no live proxy listener, so any remaining local count
+   * is a stale drain timeout. Clearing it here (rather than relying on each in-flight
+   * connection to release) keeps the invariant "a stopped release holds no connections"
+   * intact for state persistence, owner-replacement handoff, and future daemons.
+   */
+  abandonLocalConnections() {
+    if (this.state !== "stopped") return
+    if (this.connectionCount === 0 && this.transferredConnections.http + this.transferredConnections.websocket === 0) return
+    this.connections = {http: 0, websocket: 0}
+    this.transferredConnections = {http: 0, websocket: 0}
+    this.connectionCount = 0
+    this.emit("drained")
+  }
+
+  /**
    * Reconciles connections still owned by a prior daemon listener.
    * @param {ReleaseConnections} connections - Exact incumbent listener counts.
    */
@@ -721,6 +739,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.state = "stopped"
     this.stoppedAt = new Date().toISOString()
     this.releasePortReservations()
+    this.abandonLocalConnections()
   }
 
   /**
@@ -763,6 +782,7 @@ export default class ReleaseGroup extends EventEmitter {
     this.state = "stopped"
     this.stoppedAt = new Date().toISOString()
     this.releasePortReservations()
+    this.abandonLocalConnections()
   }
 
   /** @returns {Promise<void>} Quiesces every release process without waiting for its drain. */

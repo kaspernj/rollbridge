@@ -832,7 +832,22 @@ export default class RollbridgeDaemon {
   setListenerConnectionSource(sourceId, releaseId, connections) {
     const release = this.releases.get(releaseId)
 
-    if (!release && (connections.http > 0 || connections.websocket > 0)) throw new Error(`Incumbent listener reported unknown release ${releaseId}`)
+    if (!release) {
+      if (connections.http + connections.websocket > 0) {
+        // A live proxy connection is always attributed to a release that still listens. A
+        // non-zero report for a release this daemon does not retain is a stale count frozen by
+        // a drain timeout in an earlier owner; accounting for it here would deadlock every
+        // future handoff, so reconcile it to zero instead of failing the owner replacement.
+        this.logger("dropping stale connection state for unretained release", {connections, releaseId, sourceId})
+      }
+      const sourceReleases = this.listenerConnectionSources.get(sourceId)
+
+      if (sourceReleases) {
+        sourceReleases.delete(releaseId)
+        if (sourceReleases.size === 0) this.listenerConnectionSources.delete(sourceId)
+      }
+      return
+    }
     const sourceReleases = this.listenerConnectionSources.get(sourceId) || new Map()
 
     if (connections.http + connections.websocket === 0) sourceReleases.delete(releaseId)
@@ -855,10 +870,23 @@ export default class RollbridgeDaemon {
 
   /** @returns {Record<string, Record<string, {http: number, websocket: number}>>} Exact live listener sources. */
   serializedListenerConnectionSources() {
-    const sources = new Map([...this.listenerConnectionSources].map(([sourceId, releases]) => [sourceId, new Map(releases)]))
+    const sources = new Map()
+
+    for (const [sourceId, releases] of this.listenerConnectionSources) {
+      const retained = new Map()
+
+      for (const [releaseId, connections] of releases) {
+        // A stopped release owns no live listener; its count is a stale drain timeout. Carrying
+        // it into a successor daemon would report a connection the successor cannot attribute.
+        if (this.releases.get(releaseId)?.state === "stopped") continue
+        retained.set(releaseId, connections)
+      }
+      if (retained.size > 0) sources.set(sourceId, retained)
+    }
     const local = new Map()
 
     for (const release of this.releases.values()) {
+      if (release.state === "stopped") continue
       const connections = release.localConnections()
 
       if (connections.http + connections.websocket > 0) local.set(release.releaseId, connections)
