@@ -588,12 +588,22 @@ function formatPredeployCleanupResult(result) {
 
 /**
  * Formats the result of a recover run (the report case, not the error case).
- * @param {{cleared: boolean, forced: boolean, orphans: OrphanProcess[], remaining: OrphanProcess[]}} result - Recover report.
+ * @param {{archived: boolean, archivePath?: string, cleared: boolean, deadGuardianState: boolean, forced: boolean, orphans: OrphanProcess[], remaining: OrphanProcess[]}} result - Recover report.
  * @returns {string} Human-readable summary.
  */
 export function formatRecoverResult(result) {
+  const deadGuardianNote = result.deadGuardianState
+    ? result.archived
+      ? `Archived the state naming a dead guardian at ${result.archivePath}; the next deploy boots a fresh generation.`
+      : "The state names a conclusively dead guardian, which dead-ends every boot path; re-run with --force to archive it (bytes preserved) so a later deploy can boot a fresh generation."
+    : undefined
+
   if (result.orphans.length === 0) {
-    return result.forced ? "No orphaned processes found; cleared the state file." : "No orphaned processes found."
+    if (result.archived) return deadGuardianNote ?? "No orphaned processes found."
+
+    const base = result.forced ? "No orphaned processes found; cleared the state file." : "No orphaned processes found."
+
+    return deadGuardianNote ? `${base}\n${deadGuardianNote}` : base
   }
 
   if (!result.forced) {
@@ -617,6 +627,8 @@ export function formatRecoverResult(result) {
       "Left the state file in place so you can investigate and re-run recover."
     )
   }
+
+  if (result.archived && deadGuardianNote) lines.push(deadGuardianNote)
 
   return lines.join("\n")
 }
