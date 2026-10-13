@@ -368,7 +368,7 @@ Cleans up orphaned managed processes left by a **crashed** daemon. It reads the
 persisted state ([`statePath`](config.md#statepath)) and finds managed processes
 whose pids are still alive. Without `--force` it only **lists** them (a dry run);
 with `--force` it stops each one's process group (`SIGTERM`, then `SIGKILL` after
-`proxy.forceStopTimeoutMs`) and clears the stale state file.
+`proxy.forceStopTimeoutMs`) and removes the stale state file (see below).
 
 Run it **before** restarting the daemon after a crash. It refuses to run while a
 daemon (or another process) holds the control socket — those pids belong to a
@@ -380,6 +380,16 @@ so it can't be signaled), that process is reported as still running, the state
 file is **kept** so you can investigate and re-run `recover`, and the command
 exits non-zero. Requires `statePath`; also exits non-zero when it is unset or a
 daemon is running.
+
+Normally the state file is cleared once every orphan is stopped. When it
+conclusively names a **dead guardian** — the recorded guardian pid is gone and
+nothing is listening on its Unix socket — `--force` **archives** it instead,
+under a timestamped `*.dead-guardian-<YYYYMMDDTHHmmZ>.json` evidence name, and
+moves the dead guardian socket metadata aside. Such a state dead-ends every boot
+path; archiving preserves the bytes as evidence while letting the next deploy
+boot a fresh generation. The dry run and the report expose this as
+`deadGuardianState`, `archived`, and `archivePath`; a live guardian listener or a
+live recorded pid blocks the archive (fail closed).
 
 ## `shutdown`
 
