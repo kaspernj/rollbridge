@@ -1,6 +1,7 @@
 // @ts-check
 
 import {spawn} from "node:child_process"
+import net from "node:net"
 import {once} from "node:events"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -166,4 +167,122 @@ test("recover refuses while a daemon is running", async () => {
     await fs.rm(dir, {force: true, recursive: true})
   }
 })
+
+test("recover archives a state naming a dead guardian once every orphan is stopped", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-recover-"))
+
+  try {
+    const statePath = path.join(dir, "rollbridge-state.json")
+    const guardianSocketPath = `${statePath}.guardian.sock`
+    const orphan = await spawnOrphan()
+    const orphanPid = orphan.pid ?? 0
+    const deadPid = await spawnDeadPid()
+    const listener = net.createServer()
+
+    await once(listener.listen(guardianSocketPath), "listening")
+    await new Promise((resolve) => listener.close(resolve))
+
+    await writeState(statePath, {
+      activeReleaseId: "v1",
+      recovery: {
+        configDigest: "digest",
+        format: 1,
+        guardian: {pid: deadPid, socketPath: guardianSocketPath, token: "token"},
+        reconnectGraceMs: 30000
+      },
+      releases: [{processes: [{id: "worker", pid: orphanPid}], releaseId: "v1"}],
+      services: [],
+      singletons: []
+    })
+
+    const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: true})
+
+    expect("error" in result).toBeFalse()
+
+    if ("error" in result) return
+
+    expect(result.forced).toEqual(true)
+    expect(result.archived).toEqual(true)
+    expect(result.deadGuardianState).toEqual(true)
+    expect(result.archivePath).toBeTruthy()
+    expect(result.remaining).toEqual([])
+
+    const archiveBytes = await fs.readFile(/** @type {string} */ (result.archivePath), "utf8")
+
+    expect(JSON.parse(archiveBytes).activeReleaseId).toEqual("v1")
+    await expectMissing(statePath)
+    await expectMissing(guardianSocketPath)
+  } finally {
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
+test("recover leaves the state alone when a guardian listener is still live", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rollbridge-recover-"))
+
+  try {
+    const statePath = path.join(dir, "rollbridge-state.json")
+    const guardianSocketPath = `${statePath}.guardian.sock`
+    const listener = net.createServer()
+
+    await once(listener.listen(guardianSocketPath), "listening")
+
+    try {
+      await writeState(statePath, {
+        activeReleaseId: "v1",
+        recovery: {
+          configDigest: "digest",
+          format: 1,
+          guardian: {socketPath: guardianSocketPath, token: "token"},
+          reconnectGraceMs: 30000
+        },
+        releases: [],
+        services: [],
+        singletons: []
+      })
+
+      const result = await recoverOrphans({config: buildConfig(dir, {statePath}), force: true})
+
+      expect("error" in result).toBeFalse()
+
+      if ("error" in result) return
+
+      expect(result.archived).toEqual(false)
+      expect(result.deadGuardianState).toEqual(false)
+      expect(result.cleared).toEqual(true)
+    } finally {
+      await new Promise((resolve) => listener.close(resolve))
+    }
+  } finally {
+    await fs.rm(dir, {force: true, recursive: true})
+  }
+})
+
+/**
+ * @returns {Promise<number>} The pid of a process that has exited.
+ */
+async function spawnDeadPid() {
+  const child = spawn(process.execPath, ["-e", "true"], {detached: true, stdio: "ignore"})
+  const pid = child.pid ?? 0
+
+  await once(child, "exit")
+  await waitFor(() => !isProcessAlive(pid))
+
+  return pid
+}
+
+/**
+ * @param {string} targetPath - Path that must no longer exist.
+ * @returns {Promise<void>} Resolves when the path is gone.
+ */
+async function expectMissing(targetPath) {
+  try {
+    await fs.access(targetPath)
+  } catch {
+    return
+  }
+
+  throw new Error(`Expected ${targetPath} to be gone`)
+}
+
 })
