@@ -1,5 +1,6 @@
 // @ts-check
 
+import {existsSync} from "node:fs"
 import fs from "node:fs/promises"
 import http from "node:http"
 import net from "node:net"
@@ -1629,6 +1630,8 @@ export default class RollbridgeDaemon {
       await this.updateGenerationTransition("restoring_committed")
       return await this.resumeGenerationTransition()
     }
+    this.assertReleaseDirectoryOwnership({releaseId: newReleaseId, releasePath})
+
     const release = new ReleaseGroup({
       config: nextConfig,
       logger: this.logger,
@@ -2670,6 +2673,26 @@ export default class RollbridgeDaemon {
     }
   }
 
+  /**
+   * Refuses to register a release on another tracked release's own directory.
+   *
+   * A release directory named after a tracked release id belongs to that release
+   * (`releases/20261023063230`). Registering a second id on it tracks a release whose path
+   * disagrees with the layout consumers derive from the active release path
+   * (`dirname(activeReleasePath)/<releaseId>`), and the published references then stop matching
+   * what the deploying tool expects. Directories whose name is not a tracked release id stay
+   * shareable, which keeps blue/green deployments on one application directory working.
+   * @param {{releaseId: string, releasePath: string}} identity - Requested release identity.
+   * @returns {void}
+   */
+  assertReleaseDirectoryOwnership({releaseId, releasePath}) {
+    const owner = this.releases.get(path.basename(releasePath))
+
+    if (owner && owner.releaseId !== releaseId && owner.releasePath === releasePath) {
+      throw new Error(`Release path ${releasePath} is the directory of tracked release ${owner.releaseId}; refusing to register release ${releaseId} on it`)
+    }
+  }
+
   /** @returns {void} Removes stopped releases beyond the retention policy. */
   pruneStoppedReleases() {
     const serviceOwnerReleaseIds = new Set(this.serviceReleaseIds.values())
@@ -2681,6 +2704,19 @@ export default class RollbridgeDaemon {
 
     for (const releaseId of releasesToPrune(statuses, this.config.releaseRetention, Date.now())) {
       this.releases.get(releaseId)?.releasePortReservations()
+      this.releases.delete(releaseId)
+    }
+
+    // A retired release whose directory is gone (the deploying tool owns on-disk cleanup) or that
+    // sits on another release's directory can never be rolled back to. Keeping it reports a release
+    // reference the deploy tool cannot reconcile with `dirname(activeReleasePath)/<releaseId>`,
+    // which blocked publishing on a live host.
+    const identities = [...this.releases.values()].map((release) => ({releaseId: release.releaseId, releasePath: release.releasePath, state: release.state}))
+
+    for (const releaseId of unusableRetiredReleaseIds(identities)) {
+      if (serviceOwnerReleaseIds.has(releaseId) || singletonOwnerReleaseIds.has(releaseId) || transitionReleaseIds.has(releaseId)) continue
+
+      this.logger("dropping unusable retired release", {releaseId, releasePath: this.releases.get(releaseId)?.releasePath})
       this.releases.delete(releaseId)
     }
   }
@@ -3465,7 +3501,37 @@ export function releasesToPrune(releases, policy, now) {
 }
 
 /**
- * @typedef {{alive: boolean, application?: string, activeReleaseId?: string | null, proxy?: {host: string, port: number}}} ControlSocketInspection
+ * @typedef {{releaseId: string, releasePath: string, state: string}} RetiredReleaseIdentity
+ */
+
+/**
+ * Selects retired releases that can no longer serve a rollback, and so must stop being reported as
+ * release references: their directory is gone (the deploying tool owns on-disk cleanup), or the
+ * directory belongs to another tracked release whose id names it.
+ *
+ * A directory whose name is not a tracked release id may be shared by several releases, which is
+ * how blue/green deployments on one application directory work; those records stay.
+ * @param {RetiredReleaseIdentity[]} releases - Identity and state of every tracked release.
+ * @param {(releasePath: string) => boolean} [pathExists] - Directory probe (defaults to `fs.existsSync`).
+ * @returns {string[]} Release ids to drop.
+ */
+export function unusableRetiredReleaseIds(releases, pathExists = existsSync) {
+  const byId = new Map(releases.map((release) => [release.releaseId, release]))
+
+  return releases
+    .filter((release) => release.state === "stopped")
+    .filter((release) => {
+      if (!pathExists(release.releasePath)) return true
+
+      const owner = byId.get(path.basename(release.releasePath))
+
+      return Boolean(owner && owner.releaseId !== release.releaseId && owner.releasePath === release.releasePath)
+    })
+    .map((release) => release.releaseId)
+}
+
+/**
+ * @typedef {{alive: boolean, application?: string, activeReleaseId?: string | null, proxy?: {host: string, port?: number}}} ControlSocketInspection
  */
 
 /**
