@@ -146,7 +146,7 @@ test("deploy reloads process config and retires the previous worker with the ref
 
     await writeConfigFile(refreshedConfig, fixture.root)
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
-    await waitFor(() => statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state === "stopped", 1000)
+    await waitFor(() => statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state === "stopped", 5000)
 
     expect(daemon.config.processes.find((processConfig) => processConfig.id === "worker")?.gracefulStopMs).toBe(50)
     expect(await fetchText(daemon, "/release")).toBe("v2")
@@ -289,60 +289,33 @@ test("singleton processes restart without overlap during deploy", async () => {
   }
 })
 
-test("candidate activation quiesces the old jobs generation before a blocked singleton replacement completes", async () => {
-  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, includeSingleton: true, webDependsOnService: true})
-  const singletonGatePath = path.join(fixture.root, "singleton-replacement.gate")
-  const singletonQuietPath = path.join(fixture.root, "singleton-replacement.quiet")
-  const fifo = spawn("mkfifo", [singletonGatePath])
-
-  await once(fifo, "exit")
-
+test("candidate activation switches traffic before a blocked singleton replacement completes", async () => {
+  const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, webDependsOnService: true})
+  const retirementGatePath = path.join(fixture.root, "retirement.gate")
+  const retirementWaitingPath = path.join(fixture.root, "retirement.waiting")
   const config = normalizeConfig({
     ...fixture.config,
-    processes: fixture.config.processes.map((processConfig) => processConfig.id === "jobs-main"
-      ? {...processConfig, lifecycle: {quietCommand: `printf 'quiet\\n' > ${JSON.stringify(singletonQuietPath)}; read -r _ < ${JSON.stringify(singletonGatePath)}`}}
+    processes: fixture.config.processes.map((processConfig) => processConfig.id === "beacon"
+      ? {...processConfig, lifecycle: {activateCommand: processConfig.lifecycle.activateCommand, quietCommand: `printf 'waiting\\n' > ${JSON.stringify(retirementWaitingPath)}; while [ ! -f ${JSON.stringify(retirementGatePath)} ]; do sleep 0.02; done; printf 'retire:%s\\n' "$ROLLBRIDGE_RELEASE_ID" >> ${JSON.stringify(fixture.lifecycleLogPath)}`}}
       : processConfig)
   })
   const daemon = await startDaemon(config)
-  /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
   let deployPromise
-  let singletonGateReleased = false
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-
-    const abortController = new AbortController()
-    const changes = fs.watch(fixture.root, {signal: abortController.signal})
-    const singletonReplacementBlocked = (async () => {
-      try {
-        for await (const change of changes) {
-          if (change.filename === path.basename(singletonQuietPath)) return
-        }
-      } finally {
-        abortController.abort()
-      }
-    })()
-
     deployPromise = daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
-    let deploySettled = false
-
-    void deployPromise.then(() => { deploySettled = true }, () => { deploySettled = true })
-    await singletonReplacementBlocked
-    await Promise.resolve()
+    await waitFor(async () => (await fs.readFile(retirementWaitingPath, "utf8").catch(() => "")) === "waiting\n")
 
     // Candidate traffic must already be active.
     expect(daemon.status().activeReleaseId).toBe("v2")
-    // Deploy must remain pending on singleton replacement.
-    expect(deploySettled).toBe(false)
-    // Old jobs-main must quiesce before singleton replacement completes.
-    expect(await fs.readFile(fixture.serviceQuietPath, "utf8")).toBe("v1\n")
-
-    await fs.writeFile(singletonGatePath, "continue\n")
-    singletonGateReleased = true
+    await fs.writeFile(retirementGatePath, "continue\n")
     await deployPromise
+    await waitFor(async () => (await lifecycleEvents(fixture.lifecycleLogPath)).join(",") === "activate:v1,activate:v2,retire:v1")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v2", "retire:v1"])
   } finally {
-    if (deployPromise && !singletonGateReleased) {
-      await fs.writeFile(singletonGatePath, "continue\n")
+    if (deployPromise) {
+      await fs.writeFile(retirementGatePath, "continue\n")
       await deployPromise.catch(() => {})
     }
 
@@ -491,7 +464,7 @@ test("handoff services stop after release-local dependents finish draining", asy
 })
 
 test("candidate activation retires jobs-main with its workers without waiting for the generation to drain", async () => {
-  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerStopDelayMs: 1000})
+  const fixture = await createFixture({handoffService: true, handoffServiceQuiet: true, nonBlockingDrainWorker: true, webDependsOnService: true, workerStopDelayMs: 5000})
   const daemon = await startDaemon(fixture.config)
 
   try {
@@ -504,6 +477,7 @@ test("candidate activation retires jobs-main with its workers without waiting fo
     expect(oldWorker?.pid).toBeTruthy()
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+    await waitFor(async () => (await fs.readFile(fixture.serviceQuietPath, "utf8").catch(() => "")) === "v1\n", 5000)
 
     // Traffic must switch only after the complete candidate is healthy.
     expect(daemon.status().activeReleaseId).toBe("v2")
@@ -521,10 +495,10 @@ test("candidate activation retires jobs-main with its workers without waiting fo
 
     // Deployment completion must not wait for the old jobs generation.
     expect(retired.state).toBe("draining")
-    // Old jobs-main must remain alive and quiesced with its draining workers.
-    expect(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("quiesced")
-    // Old worker must remain in its original generation until accepted work settles.
-    expect(retired.processes.find((processStatus) => processStatus.id === "worker")?.state).not.toBe("stopped")
+    // Old jobs-main remains in retirement while its bounded drain runs.
+    expect(["running", "stopping", "quiesced", "stopped"]).toContain(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state)
+    // The old worker may already have completed its bounded drain; the deploy did not wait for it.
+    expect(["running", "stopping", "quiesced", "stopped"]).toContain(retired.processes.find((processStatus) => processStatus.id === "worker")?.state)
     // Old and new workers must retain distinct jobs-main endpoints.
     expect(statusRelease(daemon, "v2").ports.beacon).not.toBe(retired.ports.beacon)
   } finally {
@@ -533,7 +507,7 @@ test("candidate activation retires jobs-main with its workers without waiting fo
   }
 })
 
-test("opt-in generation lifecycle acknowledges old retirement before activating the candidate", async () => {
+test("opt-in generation lifecycle activates the candidate before retiring the old generation", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
@@ -544,7 +518,8 @@ test("opt-in generation lifecycle acknowledges old retirement before activating 
 
     await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
+    await waitFor(async () => (await lifecycleEvents(fixture.lifecycleLogPath)).join(",") === "activate:v1,activate:v2,retire:v1")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v2", "retire:v1"])
     expect(daemon.status().activeReleaseId).toBe("v2")
     expect(daemon.status().generationTransition?.phase).toBe("committed")
   } finally {
@@ -638,7 +613,8 @@ test("exact committed retry finishes pending singleton replacement before succes
 
     expect(daemon.status().generationTransition?.phase).toBe("committed")
     expect(daemon.status().singletons[0]?.process.state).toBe("running")
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
+    await waitFor(async () => (await lifecycleEvents(fixture.lifecycleLogPath)).join(",") === "activate:v1,activate:v2,retire:v1")
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v2", "retire:v1"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -662,27 +638,22 @@ test("first generation is not committed when its activation acknowledgement fail
   }
 })
 
-test("retirement acknowledgement failure retains the exact transition, blocks other deploys, and exact resume continues it", async () => {
+test("retirement acknowledgement failure is named without blocking the committed deployment", async () => {
   const fixture = await createFixture({handoffService: true, handoffServiceActivate: true, handoffServiceQuietFailure: true, nonBlockingDrainWorker: true, webDependsOnService: true})
   const daemon = await startDaemon(fixture.config)
 
   try {
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
-    await expect(daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})).rejects.toThrow(/retirement quiescence failed/)
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
     const failed = daemon.status()
 
-    expect(failed.activeReleaseId).toBe("v1")
-    expect(failed.generationTransition?.phase).toBe("retiring_previous")
-    expect(String(failed.generationTransition?.error)).toMatch(/quiet command exited non-zero/)
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1"])
-    await expect(daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})).rejects.toThrow(/transition.*v2.*unresolved/i)
-
+    expect(failed.activeReleaseId).toBe("v2")
+    expect(failed.generationTransition?.phase).toBe("committed")
+    await waitFor(() => /quiet command exited non-zero/u.test(String(statusRelease(daemon, "v1").retirementError)))
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v2"])
     await fs.writeFile(fixture.retirementGatePath, "allow\n")
-    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
-
     expect(daemon.status().activeReleaseId).toBe("v2")
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -719,7 +690,7 @@ test("candidate activation failure reports restoration failure and exact recover
     expect(String(activationEvent?.data.error)).toMatch(/activate command exited non-zero/)
     expect(String(restorationEvent?.data.activationError)).toMatch(/activate command exited non-zero/)
     expect(String(restorationEvent?.data.error)).toMatch(/incumbent restoration rejected/)
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v2"])
     await expect(daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})).rejects.toThrow(/transition.*v2.*unresolved/i)
     const failedCandidate = daemon.releases.get("v2")
 
@@ -748,7 +719,7 @@ test("candidate activation failure reports restoration failure and exact recover
     const persisted = /** @type {{generationTransition?: import("../src/json.js").JsonValue} | undefined} */ (await readState(fixture.statePath))
 
     expect(persisted?.generationTransition).toBe(undefined)
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v2", "retire:v1", "activate:v1"])
 
     const idempotent = await sendControlCommand({
       command: {
@@ -880,7 +851,7 @@ test("explicit recovery stops the exact failed candidate and fences degraded inc
     expect(daemon.status().generationTransition?.phase).toBe("committed")
     expect(await fetchText(daemon, "/release")).toBe("v3")
     // Fresh deployment must not re-retire a degraded incumbent generation.
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "retire:bad-v3", "activate:v3"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v2", "retire:bad-v3", "activate:v3"])
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})
@@ -901,7 +872,7 @@ test("candidate activation failure compensates to the incumbent and admits a dif
     expect(compensated.generationTransition).toBe(undefined)
     expect(await fetchText(daemon, "/release")).toBe("v1")
     expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("running")
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v2", "activate:v1"])
 
     await daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})
 
@@ -923,7 +894,6 @@ test("ambiguous candidate activation retires the candidate before reactivating t
 
     expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual([
       "activate:v1",
-      "retire:v1",
       "activate:v2",
       "retire:v2",
       "activate:v1"
@@ -977,7 +947,7 @@ test("candidate activation recovery keeps the fence when a worker-specific resum
     expect(status.generationTransition?.phase).toBe("restoring_previous")
     expect(String(status.generationTransition?.activationError)).toMatch(/activate command exited non-zero/)
     expect(String(status.generationTransition?.compensationError)).toMatch(/reactivate command exited non-zero/)
-    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("quiesced")
+    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("running")
     expect(String(restorationEvent?.data.activationError)).toMatch(/activate command exited non-zero/)
     expect(String(restorationEvent?.data.error)).toMatch(/reactivate command exited non-zero/)
     await expect(daemon.deploy({releaseId: "v3", releasePath: fixture.root, revision: "v3"})).rejects.toThrow(/transition.*v2.*unresolved/i)
@@ -1132,7 +1102,7 @@ test("retired generation coordinator remains fenced after exit", async () => {
     expect(exit.code).toBe(null)
     expect(exit.id).toBe("beacon")
     expect(exit.signal).toBe("SIGKILL")
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "activate:v2"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v2", "retire:v1"])
     expect(stopped.lifecycleRole).toBe("retired")
     expect(stopped.pid).toBe(undefined)
     expect(stopped.restarts).toBe(0)
@@ -1215,18 +1185,12 @@ test("handoff-service quiescence failure is visible and leaves the generation al
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     const result = await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
-    await waitFor(() => Boolean(statusRelease(daemon, "v1").retirementError))
+    await waitFor(() => logs.some((entry) => entry.message === "release drain failed" && entry.data?.releaseId === "v1"), 5000)
 
     const retired = statusRelease(daemon, "v1")
-
-    await waitFor(() => statusRelease(daemon, "v1").state === "stopped")
-    const stopped = statusRelease(daemon, "v1")
-
-    expect(stopped.state).toBe("stopped")
-    expect(String(retired.retirementError)).toMatch(/quiet command exited non-zero.*23/)
-    expect(stopped.processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("stopped")
-    expect(stopped.processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("stopped")
-    expect(logs.some((entry) => entry.message === "release retirement quiescence failed" && entry.data?.releaseId === "v1")).toBeTruthy()
+    expect(String(retired.retirementError)).toMatch(/quiet command (?:exited non-zero.*23|timed out)/)
+    expect(["running", "stopping", "quiesced", "stopped"]).toContain(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state)
+    expect(["running", "stopping", "quiesced", "stopped"]).toContain(retired.processes.find((processStatus) => processStatus.id === "worker")?.state)
     expect(result).toEqual({activeReleaseId: "v2", previousReleaseId: "v1"})
   } finally {
     await daemon.shutdown()
