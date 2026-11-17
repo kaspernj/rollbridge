@@ -603,12 +603,12 @@ test("validateConfig defaults releaseRetention, accepts overrides, and rejects b
   const defaulted = validateRetention(undefined)
 
   expect(defaulted.issues).toEqual([])
-  expect(defaulted.config.releaseRetention).toEqual({keep: 10, maxAgeMs: 0})
+  expect(defaulted.config.releaseRetention).toEqual({escalateWedgedGenerations: false, keep: 10, maxAgeMs: 0})
 
   const custom = validateRetention({keep: 3, maxAgeMs: 60000})
 
   expect(custom.issues).toEqual([])
-  expect(custom.config.releaseRetention).toEqual({keep: 3, maxAgeMs: 60000})
+  expect(custom.config.releaseRetention).toEqual({escalateWedgedGenerations: false, keep: 3, maxAgeMs: 60000})
 
   const invalid = validateRetention({keep: -1, maxAgeMs: -5})
 
