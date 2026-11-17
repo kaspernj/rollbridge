@@ -1782,21 +1782,18 @@ export default class RollbridgeDaemon {
     if (transition.phase === "committed_pending") {
       await this.refreshServiceDefinitions(release)
       if (!activationLifecycle && previousRelease?.state === "active") {
-        try {
-          const retirementConfig = previousRelease.preserveConfigOnRetirement ? previousRelease.config : release.config
+        const retirementConfig = previousRelease.preserveConfigOnRetirement ? previousRelease.config : release.config
 
-          await previousRelease.beginRetirement(retirementConfig)
-        } catch (error) {
-          retirementFailure = previousRelease.retirementError ?? (error instanceof Error ? error.message : String(error))
-          this.logger("release retirement quiescence failed", {error: retirementFailure, releaseId: previousRelease.releaseId})
-        }
+        // Set the durable generation state before checkpointing, but do not await the
+        // quiescence hook. The successor is already serving traffic; retirement belongs to
+        // the detached drain and must not hold the deploy owner mutation.
+        void previousRelease.beginRetirement(retirementConfig).catch((error) => {
+          const failure = previousRelease.retirementError ?? (error instanceof Error ? error.message : String(error))
+
+          this.logger("release retirement quiescence failed", {error: failure, releaseId: previousRelease.releaseId})
+        })
       }
       await this.checkpointGenerationTransition()
-      if (previousRelease) {
-        const retirementConfig = previousRelease.config
-
-        void this.drainAndPrune(previousRelease, retirementConfig)
-      }
       try {
         await this.replaceSingletons(release)
       } catch (error) {
@@ -1809,6 +1806,15 @@ export default class RollbridgeDaemon {
       transition.updatedAt = new Date().toISOString()
       this.pruneStoppedReleases()
       await this.checkpointGenerationTransition()
+      if (previousRelease) {
+        const retirementConfig = !activationLifecycle && previousRelease.preserveConfigOnRetirement ? previousRelease.config : release.config
+
+        // Traffic is already on the healthy candidate. Retirement is deliberately detached
+        // from the owner mutation so a slow quiet/drain hook can never hold the deploy fence
+        // or make the active successor unavailable. drainAndStop applies the bounded force
+        // deadline and records any retirement failure on the old generation.
+        void this.drainAndPrune(previousRelease, retirementConfig)
+      }
     }
 
     return {
