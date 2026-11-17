@@ -1805,6 +1805,15 @@ export default class RollbridgeDaemon {
       transition.updatedAt = new Date().toISOString()
       this.pruneStoppedReleases()
       await this.checkpointGenerationTransition()
+      if (previousRelease) {
+        const retirementConfig = !activationLifecycle && previousRelease.preserveConfigOnRetirement ? previousRelease.config : release.config
+
+        // Traffic is already on the healthy candidate. Retirement is deliberately detached
+        // from the owner mutation so a slow quiet/drain hook can never hold the deploy fence
+        // or make the active successor unavailable. drainAndStop applies the bounded force
+        // deadline and records any retirement failure on the old generation.
+        void this.drainAndPrune(previousRelease, retirementConfig)
+      }
     }
 
     return {
