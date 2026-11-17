@@ -22,7 +22,7 @@ import {pathToFileURL} from "node:url"
  * @typedef {{drainTimeoutMs: number, forceStopTimeoutMs: number, healthPath: string, healthTimeoutMs: number, host: string, port: number, upstreamHost: string}} ProxyConfig
  * @typedef {{includes: string[], name: string}} LegacyTakeoverProcessConfig
  * @typedef {{forceStopTimeoutMs: number, processes: LegacyTakeoverProcessConfig[], screens: string[]}} LegacyTakeoverConfig
- * @typedef {{keep: number, maxAgeMs: number}} ReleaseRetentionConfig
+ * @typedef {{escalateWedgedGenerations?: boolean, keep: number, maxAgeMs: number}} ReleaseRetentionConfig
  * @typedef {{reconnectGraceMs: number}} OwnerRecoveryConfig
  * @typedef {{application: string, control: ControlConfig, legacyTakeover?: LegacyTakeoverConfig, ownerRecovery?: OwnerRecoveryConfig, processes: ProcessConfig[], proxy: ProxyConfig, releaseRetention: ReleaseRetentionConfig, statePath?: string}} RollbridgeConfig
  * @typedef {{fix: string, message: string}} ConfigIssue
@@ -628,6 +628,7 @@ function normalizeReleaseRetention(source, issues) {
   const maxAgeMs = normalizeNumber(source.maxAgeMs, "releaseRetention.maxAgeMs", issues, {default: 0})
 
   return {
+    escalateWedgedGenerations: normalizeBoolean(source.escalateWedgedGenerations, "releaseRetention.escalateWedgedGenerations", issues, false),
     keep: nonNegativeOrDefault(keep, "releaseRetention.keep", issues, 10, true),
     maxAgeMs: nonNegativeOrDefault(maxAgeMs, "releaseRetention.maxAgeMs", issues, 0, false)
   }
