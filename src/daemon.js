@@ -1706,8 +1706,11 @@ export default class RollbridgeDaemon {
     let retirementFailure = activationLifecycle ? undefined : previousRelease?.retirementError
 
     if (transition.phase === "candidate_ready") {
-      if (previousRelease && !transition.degradedIncumbent) await this.updateGenerationTransition("retiring_previous")
-      else await this.updateGenerationTransition("previous_retired")
+      // Candidate processes are already started and health-checked. Keep the incumbent
+      // serving until the candidate has acknowledged activation and traffic has switched;
+      // retiring it here can stop the only live web/jobs generation before its successor
+      // carries traffic (STOE-2269).
+      await this.updateGenerationTransition("activating_candidate")
     }
 
     if (transition.phase === "retiring_previous") {
@@ -1781,27 +1784,20 @@ export default class RollbridgeDaemon {
 
     if (transition.phase === "committed_pending") {
       await this.refreshServiceDefinitions(release)
-      if (!activationLifecycle && previousRelease?.state === "active") {
-        try {
-          const retirementConfig = previousRelease.preserveConfigOnRetirement ? previousRelease.config : release.config
-
-          await previousRelease.beginRetirement(retirementConfig)
-        } catch (error) {
-          retirementFailure = previousRelease.retirementError ?? (error instanceof Error ? error.message : String(error))
-          this.logger("release retirement quiescence failed", {error: retirementFailure, releaseId: previousRelease.releaseId})
-        }
-      }
       await this.checkpointGenerationTransition()
-      if (previousRelease) {
-        const retirementConfig = previousRelease.config
-
-        void this.drainAndPrune(previousRelease, retirementConfig)
-      }
       try {
         await this.replaceSingletons(release)
       } catch (error) {
         await this.failGenerationTransition(error instanceof Error ? error.message : String(error))
         throw error
+      }
+      if (previousRelease) {
+        const retirementConfig = previousRelease.preserveConfigOnRetirement ? previousRelease.config : release.config
+
+        // Traffic is already on the candidate and singleton ownership has been
+        // transferred. Retirement is deliberately detached so a slow old generation
+        // cannot hold the committed deploy open or race guardian-owned replacement.
+        void this.drainAndPrune(previousRelease, retirementConfig)
       }
       transition.phase = "committed"
       transition.error = undefined

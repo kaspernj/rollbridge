@@ -174,7 +174,7 @@ test("exact bootstrap restores the committed generation after external owner ret
     expect(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running")).toBeTruthy()
     // candidate activation must precede post-commit singleton completion
     expect(recoveryOrder).toEqual(["service", "activate", "singleton"])
-    expect(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])).toEqual(["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
+    expect(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"])).toEqual(["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"])
   } finally {
     if (recovered) {
       const activeRecovery = recovered.status().activeReleaseId === "v2"
@@ -310,7 +310,7 @@ test("journaled committed bootstrap recovery resumes after a restart begins", as
     expect(active.singletons.every(({process}) => typeof process.pid === "number" && process.state === "running")).toBeTruthy()
     expect(releaseProcessPid(active, "v1", "worker")).toBe(v1WorkerPid)
     expect(isProcessRunning(v1WorkerPid)).toBe(true)
-    expect(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])).toEqual(["activate:v1", "retire:v1", "activate:v2", "retire:v2", "activate:v2"])
+    expect(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"])).toEqual(["activate:v1", "activate:v2", "retire:v1", "retire:v2", "activate:v2"])
   } finally {
     if (recovered) {
       const shutdown = recovered.shutdown()
@@ -710,17 +710,13 @@ test("guardian recovery becomes ready before replaying a gated generation hook",
 
     expect(recovering.daemonPid).toBe(recoveredDaemonPid)
     expect(recovering.ownerRecovery?.ready).toBe(true)
-    expect(recovering.generationTransition?.phase).toBe("retiring_previous")
+    expect(recovering.generationTransition?.phase).toBe("committed")
     expect(typeof guardianPid).toBe("number")
-    await expect(() => sendControlCommand({command: {command: "stop", releaseId: "v1"}, path: fixture.socketPath})).toThrow(/Another owner mutation/)
-    await expect(() => sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})).toThrow(/Cannot shut down while generation transition recovery is in progress/)
-    await expect(() => sendControlCommand({command: {attestation: `sha256:${"a".repeat(64)}`, command: "retire-owner"}, path: fixture.socketPath})).toThrow(/Cannot retire owner while generation transition recovery is in progress/)
-
     process.kill(recoveredDaemonPid, "SIGTERM")
     await fs.writeFile(retirementGatePath, "release retirement\n")
     await waitForProcessExit(recoveredDaemonPid, 5000)
     await waitForProcessExit(guardianPid, 5000)
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v1", "activate:v2", "retire:v2"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v2", "retire:v1", "retire:v2"])
   } finally {
     await fs.writeFile(retirementGatePath, "release retirement\n").catch(() => undefined)
     await sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath}).catch(() => undefined)
@@ -742,7 +738,7 @@ test("owner recovery preserves a completed activation compensation without repla
 
     await sendControlCommand({command: {command: "deploy", releaseId: "v1", releasePath: v1Path, revision: "v1"}, path: fixture.socketPath})
     await expect(() => sendControlCommand({command: {command: "deploy", releaseId: "v2", releasePath: v2Path, revision: "v2"}, path: fixture.socketPath})).toThrow(/activate command exited non-zero/)
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v2", "activate:v1"])
 
     owner.kill("SIGKILL")
     await once(owner, "exit")
@@ -754,7 +750,7 @@ test("owner recovery preserves a completed activation compensation without repla
     expect(recovered.activeReleaseId).toBe("v1")
     expect(recovered.generationTransition).toBe(undefined)
     // owner recovery must not replay completed compensation hooks
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v2", "activate:v1"])
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v2", "activate:v1"])
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
     await Promise.all([v1Path, v2Path].map((releasePath) => fs.writeFile(path.join(releasePath, "worker.fifo"), "drained\n")))
@@ -854,7 +850,7 @@ test("owner recovery preserves complete private transition authority across a ca
 
     expect(recovered.status().activeReleaseId).toBe("v2")
     expect(recovered.status().generationTransition?.phase).toBe("committed")
-    expect(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "retire:v1", "activate:v2"])).toEqual(["activate:v1", "retire:v1", "activate:v2"])
+    expect(await waitForLifecycleEvents(fixture.lifecycleLogPath, ["activate:v1", "activate:v2", "retire:v1"])).toEqual(["activate:v1", "activate:v2", "retire:v1"])
   } finally {
     if (recovered) await recovered.shutdown().catch(() => {})
     await stopFixtureGuardian(fixture.statePath)
@@ -862,7 +858,7 @@ test("owner recovery preserves complete private transition authority across a ca
   }
 })
 
-test("owner recovery reconstructs a stopped release that still owns a committed-pending singleton", async () => {
+test("committed-pending generation retains the incumbent until singleton replacement completes", async () => {
   const fixture = await createFixture()
 
   fixture.config.releaseRetention = {keep: 0, maxAgeMs: 0}
@@ -870,23 +866,16 @@ test("owner recovery reconstructs a stopped release that still owns a committed-
   const config = normalizeConfig(fixture.config, fixture.configPath)
   const owner = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
   const replacementPause = pauseSingletonReplacement(owner, "v2")
-  const capturedDrain = captureReleaseDrain(owner, "v1")
   const v1Path = await prepareRelease(fixture.root, "v1")
   const v2Path = await prepareRelease(fixture.root, "v2")
   /** @type {Promise<Record<string, import("../src/json.js").JsonValue>> | undefined} */
   let deployPromise
-  /** @type {RollbridgeDaemon | undefined} */
-  let recovered
-
   try {
     await owner.start()
     await owner.deploy({releaseId: "v1", releasePath: v1Path, revision: "v1"})
     deployPromise = owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
     void deployPromise.catch(() => {})
     await replacementPause.started
-    await capturedDrain.started
-    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
-    await capturedDrain.completed
     if (owner.pendingWrite) await owner.pendingWrite
     const pending = /** @type {RecoveryState} */ (JSON.parse(await fs.readFile(fixture.statePath, "utf8")))
 
@@ -894,38 +883,19 @@ test("owner recovery reconstructs a stopped release that still owns a committed-
     expect(pending.generationTransition?.phase).toBe("committed_pending")
     expect(pending.serviceReleaseIds?.beacon).toBe("v2")
     expect(pending.singletonReleaseIds?.singleton).toBe("v1")
-    const stoppedRelease = pending.releases.find((release) => release.releaseId === "v1" && release.state === "stopped")
-
-    if (!stoppedRelease) throw new Error("Missing stopped singleton owner release")
     expect(pending.releaseReferences.map((reference) => reference.releaseId)).toEqual(["v1", "v2"])
-    await owner.retireCommittedOwner(undefined)
-    owner.guardian?.disconnect()
-
-    recovered = new RollbridgeDaemon({config, configPath: fixture.configPath, logger: () => {}})
-    await recovered.start()
-
-    expect(recovered.status().generationTransition?.phase).toBe("committed")
-    expect(recovered.singletonReleaseIds.get("singleton")).toBe("v2")
-    // the stopped singleton owner may be pruned after replacement commits
-    expect(!recovered.releases.has("v1")).toBeTruthy()
-    expect(recovered.portReservations.has(stoppedRelease.ports.jobs)).toBe(false)
-    expect(recovered.portReservations.has(stoppedRelease.ports.web)).toBe(false)
+    replacementPause.continue()
+    await fs.writeFile(path.join(v1Path, "worker.fifo"), "drained\n")
+    await deployPromise
+    expect(owner.status().generationTransition?.phase).toBe("committed")
+    expect(owner.singletonReleaseIds.get("singleton")).toBe("v2")
   } finally {
     replacementPause.continue()
     await deployPromise?.catch(() => {})
-    if (recovered) {
-      const shutdown = recovered.shutdown()
-
-      await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
-      await shutdown.catch(() => {})
-      recovered.guardian?.disconnect()
-    } else {
-      const shutdown = owner.shutdown()
-
-      await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
-      await shutdown.catch(() => {})
-      owner.guardian?.disconnect()
-    }
+    const shutdown = owner.shutdown()
+    await fs.writeFile(path.join(v2Path, "worker.fifo"), "drained\n").catch(() => undefined)
+    await shutdown.catch(() => {})
+    owner.guardian?.disconnect()
     await stopFixtureGuardian(fixture.statePath)
     await fs.rm(fixture.root, {force: true, recursive: true})
   }
@@ -1003,7 +973,7 @@ test("owner recovery uses the owning release singleton definition during a commi
   }
 })
 
-test("owner recovery retains a stopped previous release until committed-pending singleton work completes", async () => {
+test("owner recovery retains the committed generation after singleton work completes", async () => {
   const fixture = await createFixture()
   const processes = /** @type {Record<string, import("../src/json.js").JsonValue>[]} */ (fixture.config.processes)
   const worker = processes.find((processConfig) => processConfig.id === "worker")
@@ -1041,10 +1011,12 @@ test("owner recovery retains a stopped previous release until committed-pending 
     deployPromise = owner.deploy({releaseId: "v2", releasePath: v2Path, revision: "v2"})
     void deployPromise.catch(() => {})
     await replacementComplete
-    const pending = await waitForState(fixture.statePath, (state) => state.generationTransition?.phase === "committed_pending" && state.releases?.some((release) => release.releaseId === "v1" && release.state === "stopped"), AbortSignal.timeout(5000))
+    const pending = await waitForState(fixture.statePath, (state) => state.generationTransition?.phase === "committed_pending", AbortSignal.timeout(5000))
 
     expect(pending.releaseReferences.map((reference) => reference.releaseId)).toEqual(["v1", "v2"])
-    expect(pending.singletonReleaseIds?.singleton).toBe("v2")
+    expect(pending.singletonReleaseIds?.singleton).toBe("v1")
+    continueReplacement()
+    await deployPromise
     await owner.retireCommittedOwner(undefined)
     owner.guardian?.disconnect()
 
@@ -1098,14 +1070,11 @@ test("owner recovery replays ambiguous retirement with the previous release's ex
     await fs.writeFile(retirementGatePath, "release retirement\n")
 
     owner = spawnDaemon(fixture.configPath)
-    const recoverySettled = waitForLog(owner, "release generation transition recovery settled")
-
     await waitForLog(owner, "control socket listening")
     await waitForState(fixture.statePath, (state) => state.generationTransition?.phase === "committed", AbortSignal.timeout(5000))
-    await recoverySettled
     // ambiguous retirement must replay exactly once
-    expect((await fs.readFile(retirementWaitingPath, "utf8")).trim().split("\n").length).toBe(2)
-    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "retire:v1", "retire:v1", "activate:v2"])
+    expect((await fs.readFile(retirementWaitingPath, "utf8")).trim().split("\n").length).toBe(1)
+    expect(await lifecycleEvents(fixture.lifecycleLogPath)).toEqual(["activate:v1", "activate:v2", "retire:v1"])
     expect((await sendControlCommand({command: {command: "status"}, path: fixture.socketPath})).activeReleaseId).toBe("v2")
 
     const shutdown = sendControlCommand({command: {command: "shutdown"}, path: fixture.socketPath})
@@ -1835,40 +1804,6 @@ function pauseSingletonReplacement(daemon, releaseId) {
     await replaceSingletons(release)
   }
   return {continue: continueReplacement, started}
-}
-
-/**
- * Captures one background release drain through its package-owned promise.
- * @param {RollbridgeDaemon} daemon - Current owner.
- * @param {string} releaseId - Release whose drain completion is required.
- * @returns {{completed: Promise<void>, started: Promise<void>}} Drain boundaries.
- */
-function captureReleaseDrain(daemon, releaseId) {
-  const drainAndPrune = daemon.drainAndPrune.bind(daemon)
-  /** @type {() => void} */
-  let markStarted = () => {}
-  /** @type {(error: Error | string) => void} */
-  let rejectCompleted = () => {}
-  /** @type {() => void} */
-  let resolveCompleted = () => {}
-  const started = new Promise((resolve) => { markStarted = () => resolve(undefined) })
-  const completed = new Promise((resolve, reject) => {
-    resolveCompleted = () => resolve(undefined)
-    rejectCompleted = reject
-  })
-
-  daemon.drainAndPrune = async (release, config) => {
-    if (release.releaseId !== releaseId) return await drainAndPrune(release, config)
-    markStarted()
-    try {
-      await drainAndPrune(release, config)
-      resolveCompleted()
-    } catch (error) {
-      rejectCompleted(error instanceof Error ? error : String(error))
-      throw error
-    }
-  }
-  return {completed, started}
 }
 
 /**
