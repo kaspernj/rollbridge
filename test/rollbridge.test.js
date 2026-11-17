@@ -84,6 +84,27 @@ test("deploy switches new HTTP traffic while old WebSockets drain", async () => 
   }
 })
 
+test("deploy does not wait for retirement and force-stops an old generation by the drain deadline", async () => {
+  const fixture = await createFixture({nonBlockingDrainWorker: true, workerStopDelayMs: 10000})
+  const config = normalizeConfig({...fixture.config, proxy: {...fixture.config.proxy, drainTimeoutMs: 50, forceStopTimeoutMs: 50}})
+  const daemon = await startDaemon(config)
+
+  try {
+    await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
+    const startedAt = Date.now()
+
+    await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
+
+    expect(Date.now() - startedAt).toBeLessThan(1000)
+    expect(await fetchText(daemon, "/release")).toBe("v2")
+    await waitFor(() => statusRelease(daemon, "v1").state === "stopped", 8000)
+    expect(statusRelease(daemon, "v1").processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("stopped")
+  } finally {
+    await daemon.shutdown()
+    await fs.rm(fixture.root, {force: true, recursive: true})
+  }
+})
+
 test("failed health check leaves the previous release active", async () => {
   const fixture = await createFixture()
   const daemon = await startDaemon(fixture.config)
@@ -486,8 +507,15 @@ test("candidate activation retires jobs-main with its workers without waiting fo
 
     // Traffic must switch only after the complete candidate is healthy.
     expect(daemon.status().activeReleaseId).toBe("v2")
-    // Old jobs-main must quiesce immediately after candidate activation.
-    expect(await fs.readFile(fixture.serviceQuietPath, "utf8")).toBe("v1\n")
+    // Old jobs-main is retired after traffic switches, without holding deployment completion.
+    await waitFor(async () => {
+      try {
+        return (await fs.readFile(fixture.serviceQuietPath, "utf8")) === "v1\n"
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false
+        throw error
+      }
+    })
 
     const retired = statusRelease(daemon, "v1")
 
@@ -1187,14 +1215,19 @@ test("handoff-service quiescence failure is visible and leaves the generation al
     await daemon.deploy({releaseId: "v1", releasePath: fixture.root, revision: "v1"})
     const result = await daemon.deploy({releaseId: "v2", releasePath: fixture.root, revision: "v2"})
 
+    await waitFor(() => Boolean(statusRelease(daemon, "v1").retirementError))
+
     const retired = statusRelease(daemon, "v1")
 
-    expect(retired.state).toBe("draining")
+    await waitFor(() => statusRelease(daemon, "v1").state === "stopped")
+    const stopped = statusRelease(daemon, "v1")
+
+    expect(stopped.state).toBe("stopped")
     expect(String(retired.retirementError)).toMatch(/quiet command exited non-zero.*23/)
-    expect(retired.processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("stopping")
-    expect(retired.processes.find((processStatus) => processStatus.id === "worker")?.state).not.toBe("stopped")
+    expect(stopped.processes.find((processStatus) => processStatus.id === "beacon")?.state).toBe("stopped")
+    expect(stopped.processes.find((processStatus) => processStatus.id === "worker")?.state).toBe("stopped")
     expect(logs.some((entry) => entry.message === "release retirement quiescence failed" && entry.data?.releaseId === "v1")).toBeTruthy()
-    expect(result.retirement).toEqual({error: retired.retirementError, releaseId: "v1", status: "quiescence_failed"})
+    expect(result).toEqual({activeReleaseId: "v2", previousReleaseId: "v1"})
   } finally {
     await daemon.shutdown()
     await fs.rm(fixture.root, {force: true, recursive: true})

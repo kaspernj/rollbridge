@@ -708,7 +708,8 @@ export default class ReleaseGroup extends EventEmitter {
     // their lifecycle drain runs as soon as the release is retired — in parallel with the
     // connection drain, not held until after it. The rest stop once connections have closed.
     const entries = [...this.processes.entries()]
-    const nonBlockingStops = entries.filter(([id]) => this.nonBlockingDrainIds.has(id)).map(([, processInstance]) => processInstance.stop())
+    const stopOptions = {timeoutMs: config.proxy.forceStopTimeoutMs}
+    const nonBlockingStops = entries.filter(([id]) => this.nonBlockingDrainIds.has(id)).map(([, processInstance]) => processInstance.stop(stopOptions))
     const handoffServices = entries.filter(([id]) => this.handoffServiceIds.has(id)).map(([, processInstance]) => processInstance)
     const connectionDependent = entries.filter(([id]) => !this.nonBlockingDrainIds.has(id) && !this.handoffServiceIds.has(id)).map(([, processInstance]) => processInstance)
 
@@ -733,9 +734,9 @@ export default class ReleaseGroup extends EventEmitter {
       return
     }
 
-    await Promise.allSettled(connectionDependent.map((processInstance) => processInstance.stop()))
+    await Promise.allSettled(connectionDependent.map((processInstance) => processInstance.stop(stopOptions)))
     await Promise.allSettled(nonBlockingStops)
-    await Promise.allSettled(handoffServices.map((processInstance) => processInstance.stop()))
+    await Promise.allSettled(handoffServices.map((processInstance) => processInstance.stop(stopOptions)))
     this.state = "stopped"
     this.stoppedAt = new Date().toISOString()
     this.releasePortReservations()
@@ -764,6 +765,7 @@ export default class ReleaseGroup extends EventEmitter {
     const results = await Promise.allSettled([...this.processes.entries()]
       .filter(([id]) => generationIds.has(id))
       .map(([, processInstance]) => retry ? processInstance.requiesceStrict() : processInstance.quiesceStrict()))
+
     const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason)
 
     if (errors.length > 0) {
