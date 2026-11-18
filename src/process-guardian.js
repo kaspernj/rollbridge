@@ -34,6 +34,9 @@ const OWNER_RESTART_RETRY_MS = 1000
  * @property {string} [mutationId] - Owner mutation lease id.
  * @property {string} [operation] - Owner mutation diagnostic name.
  * @property {number} [ownerPid] - Exact claimant process PID.
+ * @property {string} [configDigest] - Exact committed owner configuration digest.
+ * @property {number} [pid] - Exact live process PID to re-adopt.
+ * @property {string} [processStartTime] - Exact `/proc` process start-time counter.
  * @property {import("./json.js").JsonValue} [recoverySnapshot] - Public bridge recovery snapshot.
  * @property {string} [statePath] - Exact public recovery state path.
  * @property {import("./json.js").JsonValue} [authority] - Expected current authority.
@@ -657,6 +660,18 @@ async function execute(request, socket) {
   if (request.command === "start") {
     record.desired = true
     await record.process.start(request.reason, request.lifecycleRole)
+  } else if (request.command === "adopt") {
+    requireOwner(socket, request.command)
+    const requestedPid = request.pid
+    const requestedStartTime = request.processStartTime
+    const committedConfigDigest = ownerState && typeof ownerState === "object" && !Array.isArray(ownerState)
+      ? /** @type {{authority?: {configDigest?: string}}} */ (ownerState).authority?.configDigest
+      : undefined
+    if (!request.configDigest || !committedConfigDigest || !isDeepStrictEqual(request.configDigest, committedConfigDigest)) throw new Error("Guardian process adoption authority does not match the committed owner")
+    if (!Number.isInteger(requestedPid) || !requestedStartTime) throw new Error("Guardian process adoption requires an exact PID and process start time")
+    if (typeof record.process.adopt !== "function") throw new Error("Guardian process adoption is not supported by this process implementation")
+    record.desired = true
+    await record.process.adopt({pid: /** @type {number} */ (requestedPid), processStartTime: requestedStartTime}, request.configDigest)
   } else if (request.command === "activate") {
     await record.process.activateStrict()
   } else if (request.command === "reactivate" || request.command === "reactivate-with-command") {

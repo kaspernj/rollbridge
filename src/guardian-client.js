@@ -462,13 +462,27 @@ class GuardianProcess extends ManagedProcess {
   }
 
   /** Reconnects to an already registered guardian process without changing its desired state. */
-  async recover() {
+  /** @param {{adopt?: {configDigest: string, pid: number, processStartTime: string}}} [options] - Optional identity-fenced adoption. */
+  async recover({adopt} = {}) {
     if (this.client.reservedProcessKey === this.key) {
       if (this.client.reservedProcessProvenance !== this.provenance) throw new Error(`Guardian provenance mismatch for reserved process ${this.key}`)
       this.cachedStatus = asProcessStatus(await this.client.request({command: "status", key: this.key}))
+      if (adopt) await this.adopt(adopt, adopt.configDigest)
       return
     }
     await this.ensureRegistered()
+    if (adopt) await this.adopt(adopt, adopt.configDigest)
+  }
+
+  /** Re-adopts a live committed process after a guardian/version handoff. */
+  /**
+   * @param {{pid: number, processStartTime: string}} identity - Exact process identity.
+   * @param {string} [configDigest] - Committed owner config digest.
+   */
+  async adopt(identity, configDigest) {
+    if (!configDigest) throw new Error("Guardian process adoption requires the committed owner config digest")
+    await this.ensureRegistered()
+    this.cachedStatus = asProcessStatus(await this.client.request({command: "adopt", key: this.key, pid: identity.pid, processStartTime: identity.processStartTime, configDigest}))
   }
 
   /** Attaches a reconstructed process whose incumbent-owned registration was reserved through commit. */

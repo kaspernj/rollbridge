@@ -151,9 +151,9 @@ export default class ReleaseGroup extends EventEmitter {
   /**
    * Reconstructs this release around processes still owned by the durable guardian.
    * @param {ReleaseStatus} snapshot - Persisted release snapshot.
-   * @param {{synchronizeLifecycleRole?: boolean}} [options] - Guardian role synchronization options.
+   * @param {{adoptCommittedGeneration?: boolean, configDigest?: string, synchronizeLifecycleRole?: boolean}} [options] - Guardian role synchronization options.
    */
-  async restore(snapshot, {synchronizeLifecycleRole = true} = {}) {
+  async restore(snapshot, {adoptCommittedGeneration = false, configDigest, synchronizeLifecycleRole = true} = {}) {
     if (!snapshot || snapshot.releaseId !== this.releaseId || snapshot.releasePath !== this.releasePath || snapshot.revision !== this.revision) {
       throw new Error(`Persisted release identity mismatch for ${this.releaseId}`)
     }
@@ -214,7 +214,12 @@ export default class ReleaseGroup extends EventEmitter {
       this.processes.set(processStatus.id, processInstance)
       if (processConfig.policy === "service" && processConfig.deployStrategy === "handoff") this.handoffServiceIds.add(processStatus.id)
       if (processConfig.nonBlockingDrain) this.nonBlockingDrainIds.add(processStatus.id)
-      if ("recover" in processInstance && typeof processInstance.recover === "function") await processInstance.recover()
+      if ("recover" in processInstance && typeof processInstance.recover === "function") {
+        const adopt = adoptCommittedGeneration && processStatus.state === "stopped" && processStatus.pid && processStatus.processStartTime && configDigest
+          ? {pid: processStatus.pid, processStartTime: processStatus.processStartTime, configDigest}
+          : undefined
+        await processInstance.recover(adopt ? {adopt} : undefined)
+      }
     }
     if (synchronizeLifecycleRole) await this.synchronizeLifecycleRoles()
   }
