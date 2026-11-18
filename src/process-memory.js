@@ -71,6 +71,31 @@ export function processGroupHasLiveMembers(pgid, procPath = "/proc") {
 }
 
 /**
+ * Returns Linux's monotonic process start-time counter for a PID.
+ * @param {number} pid - Process id.
+ * @param {string} [procPath] - Procfs root (overridable for deterministic tests).
+ * @returns {string | undefined} Kernel start-time ticks, or undefined when unavailable.
+ */
+export function processStartTime(pid, procPath = "/proc") {
+  let stat
+
+  try {
+    stat = fs.readFileSync(`${procPath}/${pid}/stat`, "utf8")
+  } catch {
+    return undefined
+  }
+
+  const commEnd = stat.lastIndexOf(")")
+
+  if (commEnd < 0) return undefined
+
+  const fields = stat.slice(commEnd + 2).split(" ")
+  const startTime = fields[19]
+
+  return /^\d+$/.test(startTime || "") ? startTime : undefined
+}
+
+/**
  * Measures the total resident memory (RSS) of a managed process group.
  * @param {number} pgid - Process-group id (the detached spawn's pid).
  * @returns {number | undefined} Total resident memory in bytes, or undefined when unmeasurable.

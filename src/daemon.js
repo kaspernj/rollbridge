@@ -23,7 +23,7 @@ const STATE_PERSIST_INTERVAL_MS = 5000
  * @typedef {{releaseId?: string, releasePath: string, revision?: string}} DeployArgs
  * @typedef {{attestation?: string, releaseId: string, releasePath: string, revision: string}} BootstrapIdentity
  * @typedef {{id: string, process: import("./managed-process.js").ManagedProcessStatus}} ProcessStatus
- * @typedef {{disruptive: true, mode: "legacy-first-upgrade", reason: string}} OwnerTransition
+ * @typedef {{disruptive: boolean, mode: "guardian-version-handoff" | "legacy-first-upgrade", reason: string}} OwnerTransition
  * @typedef {"candidate_ready" | "retiring_previous" | "previous_retired" | "activating_candidate" | "restoring_previous" | "retiring_failed_candidate" | "degraded_active" | "committed_pending" | "committed" | "restoring_committed"} GenerationTransitionPhase
  * @typedef {{activationError?: string, activationLifecycle?: boolean, candidateReleaseId: string, candidateReleasePath: string, candidateRevision: string, compensationError?: string, configDigest: string, degradedIncumbent?: boolean, error?: string, journalRevision?: number, phase: GenerationTransitionPhase, previousReleaseId: string | null, startedAt: string, updatedAt: string}} GenerationTransition
  * @typedef {{activeReleaseId: string | null, application: string, bootstrap: BootstrapIdentity | undefined, control: import("./config.js").ControlConfig, daemonPid: number, daemonRuntime: import("./daemon-runtime.js").DaemonRuntimeIdentity | undefined, generationTransition?: GenerationTransition, ownerRecovery: {configDigest: string, ready: boolean} | undefined, ownerTransition?: OwnerTransition, orphans: {id: string, pid: number, releaseId: string | null}[], proxy: {host: string, port: number | undefined, upstreamHost: string}, releaseReferences: {releaseId: string, releasePath: string}[], releases: import("./release-group.js").ReleaseStatus[], services: ProcessStatus[], singletons: ProcessStatus[]}} DaemonStatus
@@ -406,7 +406,11 @@ export default class RollbridgeDaemon {
         shouldStart: () => !this.stopping
       })
 
-      await release.restore(releaseStatus, {synchronizeLifecycleRole: synchronizeLifecycleRoles})
+      await release.restore(releaseStatus, {
+        adoptCommittedGeneration: releaseStatus.releaseId === snapshot.activeReleaseId && snapshot.generationTransition?.phase === "committed" && snapshot.ownerTransition?.mode === "guardian-version-handoff",
+        configDigest: ownerConfigDigest(config),
+        synchronizeLifecycleRole: synchronizeLifecycleRoles
+      })
       this.releases.set(release.releaseId, release)
       if (release.releaseId === snapshot.activeReleaseId) this.activeRelease = release
     }

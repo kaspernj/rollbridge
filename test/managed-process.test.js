@@ -1,11 +1,13 @@
 // @ts-check
 
 import fs from "node:fs"
+import {spawn} from "node:child_process"
 import os from "node:os"
 import path from "node:path"
 import {describe, expect, test} from "@velocious/testing"
 import {fileURLToPath} from "node:url"
 import ManagedProcess from "../src/managed-process.js"
+import {processStartTime} from "../src/process-memory.js"
 
 describe("managed-process", () => {
 
@@ -109,6 +111,27 @@ test("reports zeroed restart and uptime fields before the process starts", () =>
   expect(status.startedAt).toBe(undefined)
   expect(status.uptimeMs).toBe(undefined)
   expect(status.state).toBe("stopped")
+})
+
+test("re-adopts a live process whose supervisor status was stopped without spawning a duplicate", async () => {
+  const live = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {detached: true, stdio: "ignore"})
+  await new Promise((resolve, reject) => {
+    live.once("error", reject)
+    live.once("spawn", resolve)
+  })
+  if (!live.pid) throw new Error("Missing live process PID")
+  const startTime = processStartTime(live.pid)
+  if (!startTime) throw new Error("Missing live process start time")
+  const managed = buildProcess(10)
+
+  try {
+    expect(managed.status().state).toBe("stopped")
+    await managed.adopt({pid: live.pid, processStartTime: startTime}, "committed-config-digest")
+
+    expect(managed.status()).toMatchObject({pid: live.pid, processStartTime: startTime, state: "running"})
+  } finally {
+    await managed.stop()
+  }
 })
 
 test("counts automatic restarts and reports startedAt and uptime while running", async () => {

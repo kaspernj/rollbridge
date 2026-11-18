@@ -2,7 +2,7 @@
 
 import {EventEmitter} from "node:events"
 import {spawn} from "node:child_process"
-import {processGroupHasLiveMembers, processGroupMembers} from "./process-memory.js"
+import {processGroupHasLiveMembers, processGroupMembers, processStartTime} from "./process-memory.js"
 
 const DEFAULT_ACTIVATION_HOOK_TIMEOUT_MS = 30000
 const MAX_BUFFERED_OUTPUT_CHARACTERS = 64 * 1024
@@ -16,7 +16,7 @@ const MAX_BUFFERED_OUTPUT_CHARACTERS = 64 * 1024
  * @typedef {{at: string, line: string, stream: "stdout" | "stderr"}} ManagedProcessLog
  * @typedef {import("./config.js").StopTimeoutMs} StopTimeoutMs
  * @typedef {{command: string, cwd: string | undefined, env: Record<string, string | undefined>, lifecycle: import("./config.js").LifecycleConfig, logger: (message: string, data?: Record<string, import("./json.js").JsonValue>) => void, memory: import("./config.js").MemoryConfig | undefined, outputLines: number, restart: import("./config.js").RestartConfig, restartDelayMs: number, shouldRestart: () => boolean, stopSignal: string, stopTimeoutMs: StopTimeoutMs}} ManagedProcessDefinition
- * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, lifecycleRole?: LifecycleRole, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
+ * @typedef {{children: import("./process-memory.js").ProcessGroupMember[], command: string, cwd: string | undefined, exitCode: number | null | undefined, exitSignal: ProcessExitSignal | undefined, id: string, lastMemoryRestartAt: string | undefined, lastStartReason: ManagedProcessStartReason | undefined, lifecycleRole?: LifecycleRole, logs: ManagedProcessLog[], memoryRestarts: number, pid: number | undefined, processStartTime?: string, restarts: number, rssBytes: number | undefined, startedAt: string | undefined, state: ManagedProcessState, uptimeMs: number | undefined}} ManagedProcessStatus
  */
 
 export default class ManagedProcess extends EventEmitter {
@@ -78,6 +78,7 @@ export default class ManagedProcess extends EventEmitter {
     this.child = undefined
     this.exitPromise = undefined
     this.pid = undefined
+    this.processStartTime = undefined
     this.exitCode = undefined
     this.exitSignal = undefined
   }
@@ -126,6 +127,7 @@ export default class ManagedProcess extends EventEmitter {
       child.once("spawn", () => {
         void (async () => {
           this.startedAtMs = Date.now()
+          this.processStartTime = child.pid ? processStartTime(child.pid) : undefined
           this.lastStartReason = reason
           const lifecycleRestore = this.restoreLifecycleRole()
           const lifecycleRestoreBarrier = lifecycleRestore.then(() => undefined, () => undefined)
@@ -161,6 +163,7 @@ export default class ManagedProcess extends EventEmitter {
         if (this.child === child) {
           this.child = undefined
           this.pid = undefined
+          this.processStartTime = undefined
           this.exitPromise = undefined
         }
         reject(error)
@@ -172,6 +175,29 @@ export default class ManagedProcess extends EventEmitter {
       child.stderr.on("data", (chunk) => this.appendLog("stderr", chunk, outputBuffers))
       child.stderr.on("end", () => this.flushLogBuffer("stderr", outputBuffers))
     })
+  }
+
+  /**
+   * Re-adopts an already-live process after a guardian/version handoff.
+   * @param {{pid: number, processStartTime: string}} identity - Exact process identity.
+   * @param {string} [_configDigest] - Owner digest accepted by guardian-backed implementations.
+   * @returns {Promise<void>}
+   */
+  async adopt({pid, processStartTime: expectedStartTime}, _configDigest) {
+    if (!Number.isInteger(pid) || pid <= 0 || !/^\d+$/.test(expectedStartTime)) throw new Error(`Process ${this.id} adoption identity is invalid`)
+    const actualStartTime = processStartTime(pid)
+
+    if (actualStartTime !== expectedStartTime) throw new Error(`Process ${this.id} adoption rejected: PID ${pid} start time does not match the committed identity`)
+    if (this.child) throw new Error(`Process ${this.id} adoption rejected while the process is already supervised`)
+
+    this.pid = pid
+    this.processStartTime = actualStartTime
+    this.state = "running"
+    this.intentionalStop = false
+    this.intentionalStopSignal = undefined
+    this.exitCode = undefined
+    this.exitSignal = undefined
+    this.lastStartReason = "deploy"
   }
 
   /**
@@ -245,6 +271,7 @@ export default class ManagedProcess extends EventEmitter {
     this.exitSignal = signal ?? this.intentionalStopSignal
     this.child = undefined
     this.pid = undefined
+    this.processStartTime = undefined
     this.exitPromise = undefined
     this.rssBytes = undefined
     this.children = []
@@ -484,7 +511,7 @@ export default class ManagedProcess extends EventEmitter {
         this.restartTimer = undefined
       }
       if (this.lifecycleRestoreBarrier) await this.lifecycleRestoreBarrier
-      if (!this.child?.pid) {
+      if (!this.child?.pid && !this.pid) {
         this.state = "stopped"
         if (this.hasRestorableLifecycle()) this.lifecycleRole = "retired"
         return
@@ -824,6 +851,7 @@ export default class ManagedProcess extends EventEmitter {
       logs: this.logs.slice(-this.outputLines),
       memoryRestarts: this.memoryRestarts,
       pid: this.pid,
+      processStartTime: this.processStartTime,
       restarts: this.restarts,
       rssBytes: this.rssBytes,
       startedAt: this.startedAtMs === undefined ? undefined : new Date(this.startedAtMs).toISOString(),
